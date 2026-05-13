@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Eagle 视频节点 - 图像序列→视频 + 视频格式转换"""
+"""
+Eagle Suite 视频节点 - 图像序列→视频 + 视频格式转换
+重构版本，使用 eagle_suite.utils 和 eagle_suite.logger
+"""
 
 import os
 import re
@@ -10,7 +13,6 @@ import shutil
 import tempfile
 import time
 import uuid
-import logging
 from datetime import datetime
 
 import torch
@@ -18,31 +20,23 @@ import numpy as np
 from PIL import Image
 import folder_paths
 
-logger = logging.getLogger(__name__)
+from .logger import logger
+from .utils import (
+    get_cached_ffmpeg,
+    is_safe_path,
+    validate_path,
+    strip_path,
+    is_url,
+    hash_path,
+    get_sorted_dir_files,
+    ensure_dir,
+    get_extension,
+    LazyAudioMap,
+    VIDEO_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+)
 
 
-def _find_ffmpeg() -> str:
-    env = os.environ.get("FFMPEG_PATH", "")
-    if env and os.path.isfile(env):
-        return env
-    try:
-        import imageio_ffmpeg
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-        if ffmpeg_path and os.path.isfile(ffmpeg_path):
-            return ffmpeg_path
-    except Exception:
-        pass
-    ffmpeg_path = shutil.which("ffmpeg")
-    if ffmpeg_path:
-        return ffmpeg_path
-    if os.name == 'nt':
-        for path in [r"C:\ffmpeg\bin\ffmpeg.exe", r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"]:
-            if os.path.isfile(path):
-                return path
-    return ""
-
-
-FFMPEG = _find_ffmpeg()
 EAGLE_API_URL = "http://localhost:41595/api"
 
 STAR_OPTIONS = ["0 未评分", "1 ★", "2 ★★", "3 ★★★", "4 ★★★★", "5 ★★★★★"]
@@ -66,7 +60,6 @@ RESOLUTION_MAP = {
     "custom":             None,
 }
 
-# gif = 1-bit 透明（边缘有锯齿）；apng = 完整 8-bit alpha（推荐透明动图）
 ALPHA_CAPABLE_FORMATS = {"prores-mov", "vp9-webm", "webp", "apng", "gif"}
 
 
@@ -85,10 +78,11 @@ def _parse_resolution(resolution, custom_w=1920, custom_h=1080):
 
 
 def _check_ffmpeg():
-    if not FFMPEG or not os.path.isfile(FFMPEG):
+    """检查 ffmpeg 是否可用"""
+    ffmpeg = get_cached_ffmpeg()
+    if not ffmpeg or not os.path.isfile(ffmpeg):
         raise RuntimeError(
-            "❌ FFmpeg 未找到。请安装 ffmpeg 或设置 FFMPEG_PATH 环境变量。\n"
-            "提示：运行 pip install imageio-ffmpeg 可自动安装。"
+            "EagleSuite: FFmpeg 未找到。请安装 ffmpeg 或设置 EAGLE_FORCE_FFMPEG_PATH 环境变量。"
         )
 
 
@@ -101,6 +95,7 @@ def _tensor_to_np_uint8(frame_tensor) -> np.ndarray:
 
 
 def _resolve_video_path(video):
+    """解析视频路径"""
     if video is None:
         return None
     if isinstance(video, (list, tuple)):
@@ -134,6 +129,7 @@ def _resolve_video_path(video):
 
 
 def _extract_frames(video_path, target_fps, frame_limit=0):
+    """从视频提取帧"""
     cap = None
     try:
         import cv2
@@ -208,6 +204,7 @@ def _apply_mask(images, mask):
 
 
 def _write_audio(audio, out_dir):
+    """将音频数据写入临时 WAV 文件"""
     import wave
     try:
         if isinstance(audio, dict):
@@ -242,12 +239,14 @@ def _write_audio(audio, out_dir):
 
 
 def _generate_unique_filename(prefix):
+    """生成唯一文件名"""
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     short_id = uuid.uuid4().hex[:6]
     return f"{prefix}_{date_str}_{short_id}"
 
 
 def _parse_folder_input(folder_input):
+    """解析文件夹输入"""
     s = folder_input.strip()
     if not s:
         return None, None
@@ -265,6 +264,7 @@ def _parse_folder_input(folder_input):
 
 
 def _get_folders():
+    """获取 Eagle 文件夹列表"""
     try:
         response = requests.get(f"{EAGLE_API_URL}/folder/list", timeout=5)
         if response.status_code == 200:
@@ -277,6 +277,7 @@ def _get_folders():
 
 
 def _find_folder_by_path(folders, path):
+    """根据路径查找文件夹 ID"""
     path_parts = [p.strip() for p in path.split("/") if p.strip()]
 
     def search(folder_list, parts, depth=0):
@@ -297,6 +298,7 @@ def _find_folder_by_path(folders, path):
 
 
 def _save_to_eagle(file_path, folder_id, name, tags=None, annotation="", star=0):
+    """保存文件到 Eagle"""
     try:
         request_data = {'path': file_path, 'folderId': folder_id, 'name': name}
         if tags:
@@ -320,19 +322,20 @@ def _save_to_eagle(file_path, folder_id, name, tags=None, annotation="", star=0)
 
 
 def _cleanup_temp_file(file_path):
+    """清理临时文件"""
     if file_path and os.path.exists(file_path):
         try:
             os.remove(file_path)
         except Exception as e:
             logger.warning(f"临时文件清理失败 {file_path}: {e}")
-# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ============================================================================
 # 节点1: 图像序列 → 视频
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 class EagleImagesToVideo:
-    """图像序列保存为视频，支持保存到本地路径或 Eagle"""
 
-    # apng = 完整 alpha；gif = 1-bit 透明（边缘有锯齿，不推荐抠图用）
     VIDEO_FORMATS = [
         "h264-mp4", "h265-mp4", "av1-webm", "vp9-webm",
         "gif", "apng", "webp", "prores-mov",
@@ -437,19 +440,19 @@ class EagleImagesToVideo:
         if images.shape[0] == 0:
             return ("", "❌ 图像序列为空", "")
 
-        # ── 抽帧 ─────────────────────────────────────────────────────────────
+        # 抽帧
         if frame_skip > 0:
             indices = list(range(0, len(images), frame_skip + 1))
             images = images[indices]
             if images.shape[0] == 0:
                 return ("", "❌ 抽帧后图像序列为空", "")
 
-        # ── 帧数上限（均匀采样） ──────────────────────────────────────────────
+        # 帧数上限
         if frame_limit > 0 and len(images) > frame_limit:
             indices = np.linspace(0, len(images) - 1, frame_limit, dtype=int)
             images = images[indices]
 
-        # ── 透明通道处理 ──────────────────────────────────────────────────────
+        # 透明通道处理
         n_channels = images.shape[-1]
 
         if n_channels == 4:
@@ -458,7 +461,6 @@ class EagleImagesToVideo:
                 input_pix_fmt = "rgba"
                 use_alpha     = True
             else:
-                # h264/h265/av1：黑底合成后转 RGB
                 rgb           = images[..., :3]
                 alpha         = images[..., 3:4]
                 frame_data    = (rgb * alpha).clamp(0, 1)
@@ -499,7 +501,8 @@ class EagleImagesToVideo:
         out_w = out_w if out_w % 2 == 0 else out_w + 1
         out_h = out_h if out_h % 2 == 0 else out_h + 1
 
-        args = [FFMPEG, "-y", "-f", "rawvideo", "-pix_fmt", input_pix_fmt,
+        ffmpeg = get_cached_ffmpeg()
+        args = [ffmpeg, "-y", "-f", "rawvideo", "-pix_fmt", input_pix_fmt,
                 "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0"]
         audio_path = None
 
@@ -514,37 +517,41 @@ class EagleImagesToVideo:
             t_w      = target[0] if target else out_w
             t_h      = target[1] if target else out_h
             eff_mode = size_mode if target else "original"
-            vf       = self._build_vf(W, H, out_w, out_h, eff_mode, t_w, t_h)
+            vf       = self._build_vf(W, H, out_w, out_h, eff_mode, t_w, t_h, use_alpha)
 
-            # ── GIF：支持 1-bit 透明 ─────────────────────────────────────────
+            # GIF
             if format == "gif":
+                # 参考 comfyui-videohelpersuite 的 GIF 处理方式：
+                # - 不使用 alpha_threshold 强制二值化，保留抖动效果
+                # - transparency_color=ffffff 指定透明色为白色
+                # - 使用 sierra2_4a 抖动算法获得更平滑的透明边缘
+                base_gif = f"fps={min(int(fps), 15)},scale={out_w}:{out_h}:flags=lanczos"
                 if use_alpha or input_pix_fmt == "rgba":
-                    # reserve_transparent 保留调色板中的透明槽位
-                    # alpha_threshold=128：半透明像素按阈值二值化
                     gif_vf = (
-                        f"fps={min(int(fps), 15)},scale={out_w}:{out_h}:flags=lanczos,"
-                        f"split[s0][s1];"
-                        f"[s0]palettegen=max_colors=255:reserve_transparent=1[p];"
-                        f"[s1][p]paletteuse=alpha_threshold=128:dither=bayer"
+                        f"{base_gif},split[s0][s1];"
+                        f"[s0]palettegen=max_colors=255:reserve_transparent=on:"
+                        f"transparency_color=ffffff[p];"
+                        f"[s1][p]paletteuse=dither=sierra2_4a"
                     )
                 else:
                     gif_vf = (
-                        f"fps={min(int(fps), 15)},scale={out_w}:{out_h}:flags=lanczos,"
-                        f"split[s0][s1];"
+                        f"{base_gif},split[s0][s1];"
                         f"[s0]palettegen=max_colors=128[p];"
-                        f"[s1][p]paletteuse=dither=bayer"
+                        f"[s1][p]paletteuse=dither=sierra2_4a"
                     )
-                args += ["-vf", (vf + "," if vf else "") + gif_vf, "-an"]
+                if vf:
+                    args += ["-vf", vf + "," + gif_vf, "-an"]
+                else:
+                    args += ["-vf", gif_vf, "-an"]
 
-            # ── APNG：完整 8-bit alpha，透明动图首选 ────────────────────────
+            # APNG
             elif format == "apng":
                 if vf:
                     args += ["-vf", vf]
                 pix = "rgba" if use_alpha else "rgb24"
-                # -plays 0 = 无限循环（与 GIF 行为一致）
                 args += ["-c:v", "apng", "-plays", "0", "-pix_fmt", pix, "-an"]
 
-            # ── WebP ─────────────────────────────────────────────────────────
+            # WebP
             elif format == "webp":
                 if vf:
                     args += ["-vf", vf]
@@ -554,7 +561,7 @@ class EagleImagesToVideo:
                 else:
                     args += ["-c:v", "libwebp_anim", "-quality", "85", "-an"]
 
-            # ── ProRes（支持 4444 alpha 通道）───────────────────────────────
+            # ProRes
             elif format == "prores-mov":
                 if vf:
                     args += ["-vf", vf]
@@ -569,7 +576,7 @@ class EagleImagesToVideo:
                 else:
                     args += ["-an"]
 
-            # ── VP9-WebM（支持 alpha）────────────────────────────────────────
+            # VP9-WebM
             elif format == "vp9-webm":
                 if vf:
                     args += ["-vf", vf]
@@ -584,7 +591,7 @@ class EagleImagesToVideo:
                 else:
                     args += ["-an"]
 
-            # ── H.264 / H.265 / AV1 ─────────────────────────────────────────
+            # H.264 / H.265 / AV1
             else:
                 if vf:
                     args += ["-vf", vf]
@@ -645,23 +652,31 @@ class EagleImagesToVideo:
             return target_w, target_h
         return w, h
 
-    def _build_vf(self, in_w, in_h, out_w, out_h, mode, target_w, target_h):
+    def _build_vf(self, in_w, in_h, out_w, out_h, mode, target_w, target_h, use_alpha=False):
+        filters = []
+        
         if mode == "crop":
-            return (
+            filters.append(
                 f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}:(iw-{target_w})/2:(ih-{target_h})/2"
             )
         elif out_w != in_w or out_h != in_h:
-            return f"scale={out_w}:{out_h}:flags=lanczos"
-        return ""
-# ═══════════════════════════════════════════════════════════════════════════════
+            filters.append(f"scale={out_w}:{out_h}:flags=lanczos")
+        
+        # 确保透明通道在滤镜链中不被丢弃
+        if use_alpha:
+            filters.append("format=rgba")
+        
+        return ",".join(filters) if filters else ""
+
+
+# ============================================================================
 # 节点2: 视频格式转换
-# ═══════════════════════════════════════════════════════════════════════════════
+# ============================================================================
 
 class EagleVideoConverter:
     """视频格式转换，支持视频输入或图像序列，可保存到本地路径或 Eagle"""
 
-    # prores-mov 补回来；apng 新增
     FORMATS = [
         "h264-mp4", "h265-mp4", "av1-webm", "vp9-webm",
         "gif", "apng", "webp", "prores-mov",
@@ -762,7 +777,7 @@ class EagleVideoConverter:
             if not input_path:
                 return ("", "❌ 无法准备输入视频", "")
 
-            # ── 图像序列导出 ──────────────────────────────────────────────────
+            # 图像序列导出
             if format.startswith("sequence-"):
                 seq_w = target[0] if target else 0
                 seq_h = target[1] if target else 0
@@ -784,7 +799,8 @@ class EagleVideoConverter:
                 out_dir = tempfile.gettempdir()
             out_path = os.path.join(out_dir, filename)
 
-            args     = [FFMPEG, "-y", "-i", input_path]
+            ffmpeg = get_cached_ffmpeg()
+            args   = [ffmpeg, "-y", "-i", input_path]
             vf_parts = []
 
             if speed != 1.0:
@@ -793,15 +809,13 @@ class EagleVideoConverter:
             if target is not None:
                 w, h = target
                 if size_mode == "fit-max":
-                    val = max(w, h)
                     vf_parts.append(
-                        f"scale='min({val},iw)':'min({val},ih)'"
+                        f"scale='min({w},iw)':'min({h},ih)'"
                         f":force_original_aspect_ratio=decrease"
                     )
                 elif size_mode == "fit-min":
-                    val = min(w, h)
                     vf_parts.append(
-                        f"scale='if(gt(iw,ih),{val},-1)':'if(gt(iw,ih),-1,{val})'"
+                        f"scale='if(gt(iw,ih),{w},-1)':'if(gt(iw,ih),-1,{h})'"
                         f":force_original_aspect_ratio=decrease"
                     )
                 elif size_mode == "stretch":
@@ -815,44 +829,45 @@ class EagleVideoConverter:
             if target_fps > 0:
                 args += ["-r", str(target_fps)]
 
-            # ── GIF：支持透明 ────────────────────────────────────────────────
+            # GIF
             if codec == "gif":
                 gif_vf = (
                     "fps=15,scale=480:-1:flags=lanczos,"
                     "split[s0][s1];"
-                    "[s0]palettegen=max_colors=255:reserve_transparent=1[p];"
-                    "[s1][p]paletteuse=alpha_threshold=128:dither=bayer"
+                    "[s0]palettegen=max_colors=255:reserve_transparent=on:"
+                    "transparency_color=ffffff[p];"
+                    "[s1][p]paletteuse=dither=sierra2_4a"
                 )
                 combined = ",".join(vf_parts) + "," + gif_vf if vf_parts else gif_vf
                 args += ["-vf", combined, "-an"]
 
-            # ── APNG：完整 alpha，透明动图首选 ──────────────────────────────
+            # APNG
             elif codec == "apng":
                 if vf_parts:
                     args += ["-vf", ",".join(vf_parts)]
                 args += ["-c:v", "apng", "-plays", "0", "-an"]
 
-            # ── WebP ─────────────────────────────────────────────────────────
+            # WebP
             elif codec == "webp":
                 if vf_parts:
                     args += ["-vf", ",".join(vf_parts)]
                 args += ["-c:v", "libwebp_anim", "-quality", "85", "-an"]
 
-            # ── ProRes（修复：原来错误落入 else 用了 yuv420p）───────────────
+            # ProRes
             elif format == "prores-mov":
                 if vf_parts:
                     args += ["-vf", ",".join(vf_parts)]
                 args += ["-c:v", "prores_ks", "-profile:v", "3",
                          "-pix_fmt", "yuv422p10le", "-an"]
 
-            # ── VP9-WebM ─────────────────────────────────────────────────────
+            # VP9-WebM
             elif format == "vp9-webm":
                 if vf_parts:
                     args += ["-vf", ",".join(vf_parts)]
                 args += ["-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0",
                          "-pix_fmt", "yuv420p", "-c:a", "libopus", "-b:a", "128k"]
 
-            # ── H.264 / H.265 / AV1 ─────────────────────────────────────────
+            # H.264 / H.265 / AV1
             else:
                 if vf_parts:
                     args += ["-vf", ",".join(vf_parts)]
@@ -899,27 +914,26 @@ class EagleVideoConverter:
     def _export_sequence(self, input_path, format, eagle_folder, local_save_path,
                          filename_prefix, size_mode, width, height,
                          tags, annotation, star_val):
-        # sequence-png / sequence-jpg / sequence-webp
+        """导出图像序列"""
         ext        = format.split("-")[-1]
         unique_name = _generate_unique_filename(filename_prefix)
         base_dir   = local_save_path.strip() if local_save_path.strip() else folder_paths.get_output_directory()
         out_dir    = os.path.join(base_dir, unique_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        args     = [FFMPEG, "-y", "-i", input_path]
+        ffmpeg = get_cached_ffmpeg()
+        args   = [ffmpeg, "-y", "-i", input_path]
         vf_parts = []
 
         if width > 0 and height > 0:
             if size_mode == "fit-max":
-                val = max(width, height)
                 vf_parts.append(
-                    f"scale='min({val},iw)':'min({val},ih)'"
+                    f"scale='min({width},iw)':'min({height},ih)'"
                     f":force_original_aspect_ratio=decrease"
                 )
             elif size_mode == "fit-min":
-                val = min(width, height)
                 vf_parts.append(
-                    f"scale='if(gt(iw,ih),{val},-1)':'if(gt(iw,ih),-1,{val})'"
+                    f"scale='if(gt(iw,ih),{width},-1)':'if(gt(iw,ih),-1,{height})'"
                     f":force_original_aspect_ratio=decrease"
                 )
             elif size_mode == "stretch":
@@ -969,6 +983,7 @@ class EagleVideoConverter:
         )
 
     def _create_temp_video(self, images, fps):
+        """创建临时视频"""
         try:
             if images is None or len(images) == 0:
                 return None
@@ -981,12 +996,12 @@ class EagleVideoConverter:
             temp_path = os.path.join(
                 tempfile.gettempdir(), f"_eagle_temp_{uuid.uuid4().hex[:8]}.mp4"
             )
-            # RGBA 图像先合成到黑底，临时视频只需 RGB
             if images.shape[-1] == 4:
                 images = (images[..., :3] * images[..., 3:4]).clamp(0, 1)
 
             H, W  = images.shape[1], images.shape[2]
-            args  = [FFMPEG, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+            ffmpeg = get_cached_ffmpeg()
+            args  = [ffmpeg, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                      "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0",
                      "-c:v", "libx264", "-crf", "23", "-pix_fmt", "yuv420p", temp_path]
             proc  = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1005,7 +1020,7 @@ class EagleVideoConverter:
             return None
 
 
-# ── 注册 ────────────────────────────────────────────────────────────────────
+# 导出映射
 NODE_CLASS_MAPPINGS = {
     "EagleImagesToVideo":  EagleImagesToVideo,
     "EagleVideoConverter": EagleVideoConverter,

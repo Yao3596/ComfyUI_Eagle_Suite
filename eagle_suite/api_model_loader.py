@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Eagle Suite API 统一节点（安全版 v4.1）
+迁移自 nodes/api_model_loader.py
 - history 输出过滤 system 消息和图像 base64
 - API Key 不进入任何输出字段
 - 内部消息与输出历史分离
@@ -27,7 +28,7 @@ SYSTEM_TEMPLATES = {
     "creative": "You are a creative assistant with vivid imagination. Provide detailed and engaging descriptions.",
     "technical": "You are a technical expert. Provide accurate, detailed technical analysis and explanations.",
     "concise": "You are a concise assistant. Provide brief, to-the-point answers.",
-    "image_expert": "You are an image analysis expert. Describe images in detail, noting objects, colors, composition, mood, and any text visible.",
+    "image_expert": "You are an image analysis expert. Describe images in detail.",
     "translator": "You are a professional translator. Translate accurately while preserving tone and context.",
     "coder": "You are an expert programmer. Provide clean, efficient code with explanations.",
 }
@@ -117,7 +118,6 @@ def _serialize_history(messages: list) -> str:
 
         content = msg.get("content", "")
 
-        # 多模态内容：只保留文本部分，丢弃图像
         if isinstance(content, list):
             text_parts = [
                 part.get("text", "")
@@ -136,9 +136,7 @@ def _serialize_history(messages: list) -> str:
 
 
 def _deserialize_history(history_str: str) -> list:
-    """
-    反序列化对话历史，只接受合法的 user/assistant 文本消息
-    """
+    """反序列化对话历史，只接受合法的 user/assistant 文本消息"""
     if not history_str.strip():
         return []
     try:
@@ -171,10 +169,7 @@ def tensor2pil(image):
 
 
 def _tensor_to_base64(img_tensor, max_size=2048, quality=90, batch_mode="first") -> list:
-    """
-    将图像 tensor 转为 base64 列表
-    batch_mode: "first" 只取第一帧 | "all" 处理所有帧
-    """
+    """将图像 tensor 转为 base64 列表"""
     try:
         if not isinstance(img_tensor, torch.Tensor):
             return []
@@ -531,5 +526,4 @@ class EagleAPIUnifiedNode(_BaseAPI):
             return ("", f"❌ 解析响应失败: {e}", _serialize_history(history_messages))
 
 
-# ── 导出 ───────────────────────────────────────────────────────
 __all__ = ["EagleAPIUnifiedNode"]

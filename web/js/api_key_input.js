@@ -1,48 +1,82 @@
 /**
- * Eagle API Key Input - 密码输入控件
+ * Eagle API Key Input - 密码输入控件（混淆存储）
+ * localStorage / 工作流 JSON 存 ENC:base64，执行时传明文给 Python
  */
 
+// ── 混淆工具（Base64，防止明文直接暴露）─────────────────────────
+const _ENC_PREFIX = 'ENC:'
+
+function _encodeKey(str) {
+  if (!str) return ''
+  try { return _ENC_PREFIX + btoa(encodeURIComponent(str)) } catch { return str }
+}
+
+function _decodeKey(str) {
+  if (!str) return ''
+  if (typeof str === 'string' && str.startsWith(_ENC_PREFIX)) {
+    try { return decodeURIComponent(atob(str.slice(_ENC_PREFIX.length))) } catch { return str }
+  }
+  return str  // 兼容旧版明文，平滑迁移
+}
+
+// ────────────────────────────────────────────────────────────────
 app.registerExtension({
   name: 'Eagle.APIKeyInput',
 
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
-    // 用 class name（NODE_CLASS_MAPPINGS 的 key），不是 display name
     if (nodeData.name !== 'EagleAPIKeyNode') return
 
+    // ── 加载工作流时解码 ─────────────────────────────────────
     const onConfigure = nodeType.prototype.onConfigure
     nodeType.prototype.onConfigure = function (widgets_values) {
-      onConfigure?.apply(this, arguments)
-      if (widgets_values?.length > 0) {
-        const savedKey = (widgets_values[0] || '').trim()
-        if (savedKey && this._eagleKeyInput) {
-          this._eagleKeyInput.value = savedKey
-        }
+      // 解码后再走原始流程
+      let decoded_values = widgets_values
+      if (Array.isArray(widgets_values) && widgets_values.length > 0) {
+        decoded_values = [...widgets_values]
+        decoded_values[0] = _decodeKey(widgets_values[0])
+      }
+      onConfigure?.apply(this, [decoded_values])
+
+      const plain = (decoded_values?.[0] || '').trim()
+      if (plain) {
+        const w = this.widgets?.find(w => w.name === 'api_key')
+        if (w) w.value = plain          // widget 存明文，执行时直接用
+        if (this._eagleKeyInput) this._eagleKeyInput.value = plain
       }
     }
 
+    // ── 节点创建 ─────────────────────────────────────────────
     const origNodeCreated = nodeType.prototype.onNodeCreated
     nodeType.prototype.onNodeCreated = function () {
       origNodeCreated?.apply(this, arguments)
-
       const node = this
 
-      // 隐藏原始 api_key 文本 widget，但保留它用于序列化
+      // 隐藏原始 widget，保留用于序列化和执行
       const originalWidget = node.widgets?.find(w => w.name === 'api_key')
       if (originalWidget) {
         originalWidget.type = 'hidden'
         originalWidget.computeSize = () => [0, -4]
       }
 
-      // 创建密码输入框容器
+      // ── 序列化时编码（保存工作流 JSON 时触发）────────────
+      const origSerialize = node.serialize?.bind(node)
+      node.serialize = function () {
+        const data = origSerialize ? origSerialize() : {}
+        if (data.widgets_values && originalWidget) {
+          const idx = node.widgets.indexOf(originalWidget)
+          if (idx >= 0) {
+            // 工作流 JSON 里存编码值
+            data.widgets_values[idx] = _encodeKey(originalWidget.value || '')
+          }
+        }
+        return data
+      }
+
+      // ── DOM：密码输入框 ───────────────────────────────────
       const container = document.createElement('div')
-      container.style.cssText = `
-        position: absolute;
-        pointer-events: auto;
-        z-index: 10;
-      `
+      container.style.cssText = 'position:absolute;pointer-events:auto;z-index:10;'
       document.body.appendChild(container)
 
-      // 创建密码输入框
       const ip = document.createElement('input')
       ip.type = 'password'
       ip.placeholder = '输入 API Key'
@@ -60,49 +94,47 @@ app.registerExtension({
       ip.addEventListener('focus', () => { ip.style.borderColor = '#7af' })
       ip.addEventListener('blur',  () => { ip.style.borderColor = '#555' })
       container.appendChild(ip)
-
       node._eagleKeyInput = ip
 
-      // 从 localStorage 恢复
-      const storageKey = 'eagle_api_key'
+      // ── localStorage 恢复（存的是编码值，读出来解码）────
+      const STORAGE_KEY = 'eagle_api_key'
       const nodeId = String(node.id)
       try {
-        const saved = JSON.parse(localStorage.getItem(storageKey) || '{}')
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
         if (saved[nodeId]) {
-          ip.value = saved[nodeId]
-          if (originalWidget) originalWidget.value = saved[nodeId]
+          const plain = _decodeKey(saved[nodeId])
+          ip.value = plain
+          if (originalWidget) originalWidget.value = plain  // 明文给执行用
         }
       } catch (e) {}
 
-      // 输入变化时同步
+      // ── 输入同步 ──────────────────────────────────────────
       ip.addEventListener('input', () => {
         const val = ip.value
+        // originalWidget 始终存明文 → Python 收到明文，无需改 Python 侧
         if (originalWidget) originalWidget.value = val
+        // localStorage 存编码值
         try {
-          const data = JSON.parse(localStorage.getItem(storageKey) || '{}')
-          data[nodeId] = val
-          localStorage.setItem(storageKey, JSON.stringify(data))
+          const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+          data[nodeId] = _encodeKey(val)
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
         } catch (e) {}
       })
 
-      // 自定义 widget：负责在 draw 时更新 DOM 位置
+      // ── 位置 widget（负责跟随节点移动）──────────────────
       const posWidget = {
         type: 'custom_password',
         name: 'api_key_display',
         computeSize: () => [200, 36],
         draw(ctx, node, widget_width, y, widget_height) {
-          // 将 canvas 坐标转换为屏幕坐标
           const canvas = app.canvas
           const rect = canvas.canvas.getBoundingClientRect()
-          const transform = canvas.ds  // DragAndScale
-
+          const transform = canvas.ds
           const scale = transform.scale
           const offsetX = transform.offset[0]
           const offsetY = transform.offset[1]
-
           const screenX = rect.left + (node.pos[0] + offsetX) * scale + 8 * scale
           const screenY = rect.top  + (node.pos[1] + y + offsetY) * scale
-
           Object.assign(container.style, {
             left:   `${screenX}px`,
             top:    `${screenY}px`,
@@ -115,7 +147,6 @@ app.registerExtension({
 
       node.addCustomWidget(posWidget)
 
-      // 节点删除时清理 DOM
       const onRemoved = node.onRemoved
       node.onRemoved = () => {
         container.remove()

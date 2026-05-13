@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Eagle API Key Input Node - 独立密钥输入节点
-- 密码输入框（前端显示为点）
-- 密钥保存到 localStorage，Reload 后自动恢复
-- 输出字符串可直接连接到其他节点的 api_key 输入
+迁移自 nodes/api_key_node.py
 """
 
 import os
 import json
 
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
 
 class EagleAPIKeyNode:
     """
@@ -41,15 +37,4 @@ class EagleAPIKeyNode:
         return (api_key.strip(),)
 
 
-# ── 注册 ────────────────────────────────────────────────────────
-NODE_CLASS_MAPPINGS["EagleAPIKeyNode"] = EagleAPIKeyNode
-NODE_DISPLAY_NAME_MAPPINGS["EagleAPIKeyNode"] = "🦅 API Key Input"
-
 __all__ = ["EagleAPIKeyNode"]
-
-api_key_node_mappings = {
-    "EagleAPIKeyNode": EagleAPIKeyNode,
-}
-api_key_node_display_names = {
-    "EagleAPIKeyNode": "🦅 API Key Input",
-}
