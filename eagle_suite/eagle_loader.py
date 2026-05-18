@@ -42,10 +42,10 @@ class EagleLoader:
                     "multiline": False,
                     "placeholder": "Eagle 文件夹 ID / URL / 名称"
                 }),
-                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "control_mode": (["固定", "增加", "减少", "随机", "指定索引"],),
             },
             "optional": {
+                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "sort_by": (["名称 (A-Z)", "添加日期", "修改日期", "创建日期", "文件大小", "扩展名", "评分"], {"default": "添加日期"}),
                 "sort_order": (["升序", "降序"], {"default": "降序"}),
                 "max_count": ("INT", {"default": 0, "min": 0, "max": 99999, "step": 1, "tooltip": "0=自动根据文件夹数量，上限10000"}),
@@ -170,7 +170,7 @@ class EagleLoader:
                 return c
             total = count_f(target)
             return total if total > 0 else -1
-        except:
+        except Exception:
             return -1
 
     # ── Eagle API 图片获取 ──
@@ -327,8 +327,8 @@ class EagleLoader:
         }, ensure_ascii=False, indent=2)
 
     # ── 主函数 ──
-    def load_image(self, preview, folder_input, index, control_mode,
-                   sort_by="添加日期", sort_order="降序", max_count=0,
+    def load_image(self, preview, folder_input, control_mode,
+                   index=0, sort_by="添加日期", sort_order="降序", max_count=0,
                    tags_filter="", star_filter="全部", aspect_filter="全部",
                    include_subfolders=True):
 

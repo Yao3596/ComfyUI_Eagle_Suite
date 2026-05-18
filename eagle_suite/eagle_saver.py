@@ -233,7 +233,7 @@ class EagleSaver:
         if not save_to_eagle and not save_to_local:
             raise Exception("❌ 没有有效的保存目标")
 
-        tags_list = [t.strip() for t in tags.split(",") if t.strip()]
+        tags_list = [t.strip() for t in re.split(r'[,，]', tags) if t.strip()]
 
         results = []
         success_count = 0
@@ -268,8 +268,6 @@ class EagleSaver:
                         'name': unique_name,
                     }
 
-                    if tags_list:
-                        request_data['tags'] = tags_list
                     if annotation:
                         request_data['annotation'] = annotation
                     if star > 0:
@@ -284,6 +282,15 @@ class EagleSaver:
                     if response.status_code == 200:
                         result = response.json()
                         if result.get("status") == "success":
+                            # addFromPath 后单独更新 tags
+                            if tags_list:
+                                item_id = result.get("data", {}).get("id")
+                                if item_id:
+                                    requests.post(
+                                        f"{self.eagle_api_url}/item/update",
+                                        json={"id": item_id, "tags": tags_list},
+                                        timeout=30
+                                    )
                             print(f"✅ Eagle 保存成功")
                             results.append(f"✅ {unique_name}")
                             success_count += 1

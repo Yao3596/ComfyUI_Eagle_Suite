@@ -306,17 +306,17 @@ class EagleAPIUnifiedNode(_BaseAPI):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": ("STRING", {
+                "api_config_key": ("STRING", {
                     "default": "",
                     "multiline": False,
                     "placeholder": "输入 API Key（留空使用已保存）"
                 }),
-                "base_url": ("STRING", {
+                "api_config_url": ("STRING", {
                     "default": "",
                     "multiline": False,
                     "placeholder": "如 https://api.openai.com/v1（留空使用已保存）"
                 }),
-                "model": ("STRING", {
+                "api_config_model": ("STRING", {
                     "default": "",
                     "multiline": False,
                     "placeholder": "如 gpt-4o, qwen-vl-max（留空使用已保存）"
@@ -343,6 +343,10 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 "timeout": ("INT", {"default": 120, "min": 10, "max": 600, "step": 10}),
             },
             "optional": {
+                "api_config": ("API_CONFIG", {
+                    "forceInput": True,
+                    "tooltip": "API 配置总线（来自 EagleAPILoader，优先使用，覆盖上方独立字段）"
+                }),
                 "history": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -367,10 +371,11 @@ class EagleAPIUnifiedNode(_BaseAPI):
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
 
-    def process(self, api_key, base_url, model,
+    def process(self, api_config_key, api_config_url, api_config_model,
                 system_template, system_prompt, user_prompt,
                 temperature, max_tokens, seed, top_p,
                 response_format, batch_mode, timeout,
+                api_config=None,
                 history="",
                 image_1=None, image_2=None, image_3=None,
                 image_4=None, image_5=None, image_6=None,
@@ -379,18 +384,33 @@ class EagleAPIUnifiedNode(_BaseAPI):
         print(f"\n[EagleAPI] ========== 开始处理 ==========")
         self.timeout = timeout
 
+        # ── API 配置解析（优先 api_config 复合端口）─────────────
+        if api_config is not None:
+            # api_config 是三元组 (api_key, base_url, model)
+            try:
+                cfg_key, cfg_url, cfg_model = api_config
+                api_config_key = cfg_key
+                api_config_url = cfg_url
+                api_config_model = cfg_model
+                print(f"[EagleAPI] 使用 api_config 复合端口: model={cfg_model}")
+            except Exception as e:
+                return ("", f"❌ api_config 格式错误: {e}", "")
+
         # ── 参数校验（留空时从 api_config.json 读取已保存值）──────
-        key = api_key.strip() or _load_saved_key()
+        key = api_config_key.strip() or _load_saved_key()
         if not key:
-            return ("", "❌ 请输入 API Key", "")
+            # api_config 错误时 base_url 可能包含错误消息
+            err_hint = api_config_url.strip() if api_config_url and api_config_url.startswith("❌") else ""
+            msg = err_hint or "❌ 请输入 API Key（或连接 api_config 端口）"
+            return ("", msg, "")
 
-        url = _normalize_url(base_url.strip() or _load_saved_base_url())
+        url = _normalize_url(api_config_url.strip() or _load_saved_base_url())
         if not url:
-            return ("", "❌ 请输入 API 地址", "")
+            return ("", "❌ 请输入 API 地址（或连接 api_config 端口）", "")
 
-        mdl = model.strip() or _load_saved_model()
+        mdl = api_config_model.strip() or _load_saved_model()
         if not mdl:
-            return ("", "❌ 请输入模型名称", "")
+            return ("", "❌ 请输入模型名称（或连接 api_config 端口）", "")
 
         # 三个字段统一保存到 api_config.json
         _save_api_config(api_key=key, base_url=url, model=mdl)

@@ -23,10 +23,10 @@ class LocalImageLoader:
                     "multiline": False,
                     "placeholder": "本地路径或网络路径"
                 }),
-                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "control_mode": (["固定", "增加", "减少", "随机", "指定索引"],),
             },
             "optional": {
+                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "sort_by": (["文件名", "修改日期", "创建日期", "文件大小"],),
                 "sort_order": (["升序", "降序"],),
                 "max_count": ("INT", {"default": 200, "min": 1, "max": 999999}),
@@ -99,8 +99,8 @@ class LocalImageLoader:
                 continue
         return out
 
-    def load_image(self, preview, folder_path, index, control_mode,
-                   sort_by="文件名", sort_order="升序", max_count=200,
+    def load_image(self, preview, folder_path, control_mode,
+                   index=0, sort_by="文件名", sort_order="升序", max_count=200,
                    file_filter="", aspect_filter="全部",
                    include_subfolders=False, unique_id=None):
 
@@ -129,7 +129,7 @@ class LocalImageLoader:
             allowed = self.SUPPORTED_EXT
 
         # 扫描
-        paths = self.scan_image(folder_path, include_subfolders, allowed)
+        paths = self.scan_images(folder_path, include_subfolders, allowed)
         total_on_disk = len(paths)
         print(f"📊 磁盘共 {total_on_disk} 张图片")
 

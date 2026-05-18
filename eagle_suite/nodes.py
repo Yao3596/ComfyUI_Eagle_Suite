@@ -19,10 +19,12 @@ from .batch_video_nodes import (
     EagleVideoFrameExtractor,
     EagleVideoInfo,
 )
-from .api_key_node import EagleAPIKeyNode
+from .api_key_node import EagleAPIKeyNode, EagleAPILoader
 from .api_model_loader import EagleAPIUnifiedNode
 from .local_loader import LocalImageLoader
-
+from .wallhaven_gallery import WallhavenGalleryNode
+from .eagle_gallery import EagleGalleryNode
+from .pinterest_gallery import PinterestGalleryNode
 
 # ── 节点映射 ─────────────────────────────────────────────
 
@@ -48,6 +50,12 @@ NODE_CLASS_MAPPINGS = {
     # API
     "EagleAPIUnifiedNode": EagleAPIUnifiedNode,
     "EagleAPIKeyNode":      EagleAPIKeyNode,
+    "EagleAPILoader":       EagleAPILoader,
+
+    # 图库
+    "WallhavenGalleryNode": WallhavenGalleryNode,
+    "EagleGalleryNode": EagleGalleryNode,
+    "PinterestGalleryNode": PinterestGalleryNode,
 }
 
 
@@ -73,6 +81,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # API
     "EagleAPIUnifiedNode": "🦅 API 多功能调用",
     "EagleAPIKeyNode":      "🦅 API Key Input",
+    "EagleAPILoader":       "🦅 API 配置加载器",
+
+    # 图库
+    "WallhavenGalleryNode": "🌊 Wallhaven Gallery",
+    "EagleGalleryNode": "🦅 Eagle Gallery",
+    "PinterestGalleryNode": "📌 Pinterest Gallery",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
