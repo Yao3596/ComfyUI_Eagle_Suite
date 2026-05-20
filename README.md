@@ -67,7 +67,7 @@ pip install -r requirements.txt
 
 ## 更新日志
 
-### 2025-05-13
+### 2026-05-21
 - 修复 GIF 透明处理（移除 alpha_threshold 强制二值化）
 - 优化 VP9-WebM 透明通道滤镜链
 - 添加视频预览支持（JS 前端）
