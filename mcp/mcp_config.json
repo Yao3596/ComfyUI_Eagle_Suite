@@ -1,0 +1,10 @@
+{
+  "name": "eagle-mcp",
+  "version": "1.0.0",
+  "description": "Eagle App Model Context Protocol Server",
+  "main": "server.py",
+  "dependencies": {
+    "mcp": "^0.1.0",
+    "requests": "^2.31.0"
+  }
+}

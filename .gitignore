@@ -1,0 +1,44 @@
+# ── Sensitive config files ──
+api_profiles.json
+api_config.json
+*.json.bak
+machine_id.txt
+eagle_gallery_settings.json
+wallhaven_settings.json
+pinterest_settings.json
+
+# ── Python cache ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Logs ──
+*.log
+danbooru_gallery.log
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS generated ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Backup files ──
+*.bak
+
+# ── Work-in-progress (未发布) ──
+eagle_suite/pinterest_gallery.py
+web/js/pinterest_gallery.js
+
+# ── ComfyUI generated ──
+../../input/example.png
