@@ -42,7 +42,7 @@ class EagleLoader:
                     "multiline": False,
                     "placeholder": "Eagle 文件夹 ID / URL / 名称"
                 }),
-                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1, "forceInput": True}),
                 "control_mode": (["固定", "增加", "减少", "随机", "指定索引"],),
             },
             "optional": {
@@ -331,6 +331,21 @@ class EagleLoader:
                    sort_by="添加日期", sort_order="降序", max_count=0,
                    tags_filter="", star_filter="全部", aspect_filter="全部",
                    include_subfolders=True):
+
+        # 向后兼容：旧工作流可能传入字符串值
+        if isinstance(index, str):
+            try:
+                index = int(index)
+            except (ValueError, TypeError):
+                index = 0
+        index = int(index) if index is not None else 0
+
+        # 向后兼容：旧工作流可能传入数字 control_mode
+        if isinstance(control_mode, (int, float)):
+            mode_map = {0: "固定", 1: "增加", 2: "减少", 3: "随机", 4: "指定索引"}
+            control_mode = mode_map.get(int(control_mode), "固定")
+        elif not isinstance(control_mode, str) or control_mode not in ["固定", "增加", "减少", "随机", "指定索引"]:
+            control_mode = "固定"
 
         print("\n" + "=" * 60)
         print("🦅 Eagle 图片加载器")

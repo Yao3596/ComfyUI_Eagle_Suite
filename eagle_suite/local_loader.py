@@ -23,7 +23,7 @@ class LocalImageLoader:
                     "multiline": False,
                     "placeholder": "本地路径或网络路径"
                 }),
-                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1, "forceInput": True}),
                 "control_mode": (["固定", "增加", "减少", "随机", "指定索引"],),
             },
             "optional": {
@@ -103,6 +103,21 @@ class LocalImageLoader:
                    sort_by="文件名", sort_order="升序", max_count=200,
                    file_filter="", aspect_filter="全部",
                    include_subfolders=False, unique_id=None):
+
+        # 向后兼容：旧工作流可能传入字符串值
+        if isinstance(index, str):
+            try:
+                index = int(index)
+            except (ValueError, TypeError):
+                index = 0
+        index = int(index) if index is not None else 0
+
+        # 向后兼容：旧工作流可能传入数字 control_mode
+        if isinstance(control_mode, (int, float)):
+            mode_map = {0: "固定", 1: "增加", 2: "减少", 3: "随机", 4: "指定索引"}
+            control_mode = mode_map.get(int(control_mode), "固定")
+        elif not isinstance(control_mode, str) or control_mode not in ["固定", "增加", "减少", "随机", "指定索引"]:
+            control_mode = "固定"
 
         print("\n" + "=" * 60)
         print("🖼️ 本地图片加载器")
