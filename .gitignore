@@ -40,3 +40,4 @@ backup/
 venv/
 .venv/
 env/
+api_config.json
