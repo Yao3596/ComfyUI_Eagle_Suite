@@ -1,0 +1,42 @@
+# Sensitive config files
+api_profiles.json
+machine_id.txt
+eagle_gallery_settings.json
+wallhaven_settings.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Node
+node_modules/
+
+# Logs
+*.log
+danbooru_gallery.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup (local only)
+backup/
+
+# Virtual environments
+venv/
+.venv/
+env/
