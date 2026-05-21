@@ -6,7 +6,7 @@ import { app } from "../../../scripts/app.js";
 
 // Eagle Gallery 一次性加载全部（本地库无需分页）
 
-function $el(tag, attrs, children) {
+function eg$el(tag, attrs, children) {
     let cls = "";
     if (typeof tag === "string" && tag.includes(".")) {
         const parts = tag.split(".");
@@ -17,7 +17,10 @@ function $el(tag, attrs, children) {
     if (cls) el.className = cls;
     if (attrs && typeof attrs === "object" && !Array.isArray(attrs)) {
         for (const [k, v] of Object.entries(attrs)) {
-            if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+            if (k === "style") {
+                if (typeof v === "string") el.style.cssText = v;
+                else if (typeof v === "object") { for (const [sk, sv] of Object.entries(v)) el.style.setProperty(sk, sv); }
+            }
             else if (k === "textContent") el.textContent = v;
             else if (k === "innerHTML") el.innerHTML = v;
             else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
@@ -124,7 +127,7 @@ app.registerExtension({
             }, 300);
 
             if (!document.getElementById("eg-style")) {
-                document.head.appendChild($el("style", { id: "eg-style", textContent: CSS }));
+                document.head.appendChild(eg$el("style", { id: "eg-style", textContent: CSS }));
             }
 
             const state = {
@@ -141,7 +144,7 @@ app.registerExtension({
                 sidebarVisible: true,
             };
 
-            const container = $el("div.eg-container");
+            const container = eg$el("div.eg-container");
             buildUI(container, state, this);
             this.addDOMWidget("eagle_gallery", "div", container, { serialize: false });
 
@@ -155,7 +158,7 @@ function buildUI(container, state, node) {
     state._node = node;
 
     // ── 预览条 ──
-    var previewArea = $el("div.eg-preview");
+    var previewArea = eg$el("div.eg-preview");
     previewArea.innerHTML = '<div class="eg-preview-empty">选中图片将显示在这里</div>';
     state._previewArea = previewArea;
     // 鼠标滚轮横向滚动
@@ -168,19 +171,19 @@ function buildUI(container, state, node) {
     container.appendChild(previewArea);
 
     // ── 工具栏 ──
-    var toolbar = $el("div.eg-toolbar");
+    var toolbar = eg$el("div.eg-toolbar");
 
-    var searchInput = $el("input.eg-search", { type: "text", placeholder: "搜索关键词..." });
+    var searchInput = eg$el("input.eg-search", { type: "text", placeholder: "搜索关键词..." });
     searchInput.addEventListener("keydown", function (e) {
         if (e.key === "Enter") { loadItems(state); }
     });
     state._searchInput = searchInput;
 
-    var searchBtn = $el("button.eg-btn.primary", { textContent: "\u{1F50D} 搜索" });
+    var searchBtn = eg$el("button.eg-btn.primary", { textContent: "\u{1F50D} 搜索" });
     searchBtn.onclick = function () { loadItems(state); };
 
     // 索引跳转
-    var jumpInput = $el("input.eg-search", {
+    var jumpInput = eg$el("input.eg-search", {
         type: "number",
         placeholder: "# 索引",
         style: "min-width:60px;max-width:80px;flex:0",
@@ -191,19 +194,19 @@ function buildUI(container, state, node) {
     });
     state._jumpInput = jumpInput;
 
-    var jumpBtn = $el("button.eg-btn", { textContent: "↗ 跳转", title: "跳转到指定索引" });
+    var jumpBtn = eg$el("button.eg-btn", { textContent: "↗ 跳转", title: "跳转到指定索引" });
     jumpBtn.onclick = function () { jumpToIndex(state, parseInt(jumpInput.value, 10) || 0); };
     state._jumpBtn = jumpBtn;
 
-    var totalBadge = $el("span", {
+    var totalBadge = eg$el("span", {
         textContent: "共 0 张",
         style: "color:#888;font-size:11px;white-space:nowrap",
     });
     state._totalBadge = totalBadge;
 
     // 文件夹下拉
-    var folderSelect = $el("select.eg-btn", { style: "min-width:120px" });
-    folderSelect.appendChild($el("option", { value: "", textContent: "📁 全部文件夹" }));
+    var folderSelect = eg$el("select.eg-btn", { style: "min-width:120px" });
+    folderSelect.appendChild(eg$el("option", { value: "", textContent: "📁 全部文件夹" }));
     folderSelect.addEventListener("change", function () {
         state.folderId = folderSelect.value;
         loadItems(state);
@@ -211,9 +214,9 @@ function buildUI(container, state, node) {
     state._folderSelect = folderSelect;
 
     // 评分筛选
-    var starSelect = $el("select.eg-btn", { style: "min-width:80px" });
+    var starSelect = eg$el("select.eg-btn", { style: "min-width:80px" });
     ["全部", "未评分", "1星", "2星", "3星", "4星", "5星"].forEach(function (s) {
-        starSelect.appendChild($el("option", { value: s, textContent: s === "全部" ? "⭐ 全部" : "⭐ " + s }));
+        starSelect.appendChild(eg$el("option", { value: s, textContent: s === "全部" ? "⭐ 全部" : "⭐ " + s }));
     });
     starSelect.addEventListener("change", function () {
         state.star = starSelect.value;
@@ -221,14 +224,14 @@ function buildUI(container, state, node) {
     });
 
     // 形状筛选
-    var shapeSelect = $el("select.eg-btn", { style: "min-width:80px" });
+    var shapeSelect = eg$el("select.eg-btn", { style: "min-width:80px" });
     [
         { value: "全部", label: "全部比例" },
         { value: "横向", label: "▬ 横向" },
         { value: "纵向", label: "▮ 纵向" },
         { value: "方形", label: "■ 方形" },
     ].forEach(function (s) {
-        shapeSelect.appendChild($el("option", { value: s.value, textContent: s.label }));
+        shapeSelect.appendChild(eg$el("option", { value: s.value, textContent: s.label }));
     });
     shapeSelect.addEventListener("change", function () {
         state.shape = shapeSelect.value;
@@ -236,14 +239,14 @@ function buildUI(container, state, node) {
     });
 
     // 侧边栏切换
-    var sidebarBtn = $el("button.eg-btn", { textContent: "📂", title: "切换文件夹树" });
+    var sidebarBtn = eg$el("button.eg-btn", { textContent: "📂", title: "切换文件夹树" });
     sidebarBtn.onclick = function () {
         state.sidebarVisible = !state.sidebarVisible;
         if (sidebar) sidebar.style.display = state.sidebarVisible ? "block" : "none";
     };
 
     // 设置按钮
-    var settingsBtn = $el("button.eg-btn", { textContent: "⚙️", title: "设置" });
+    var settingsBtn = eg$el("button.eg-btn", { textContent: "⚙️", title: "设置" });
     settingsBtn.onclick = function (e) {
         e.stopPropagation();
         openSettings(state);
@@ -253,16 +256,16 @@ function buildUI(container, state, node) {
     container.appendChild(toolbar);
 
     // ── 主体区域 ──
-    var main = $el("div.eg-main");
+    var main = eg$el("div.eg-main");
 
     // 文件夹树侧边栏
-    var sidebar = $el("div.eg-sidebar");
+    var sidebar = eg$el("div.eg-sidebar");
     sidebar.innerHTML = '<div class="eg-empty">加载中...</div>';
     state._sidebar = sidebar;
     main.appendChild(sidebar);
 
     // 图片网格
-    var grid = $el("div.eg-grid");
+    var grid = eg$el("div.eg-grid");
     grid.innerHTML = '<div class="eg-empty">选择文件夹或输入关键词搜索</div>';
     state._grid = grid;
     main.appendChild(grid);
@@ -270,8 +273,8 @@ function buildUI(container, state, node) {
     container.appendChild(main);
 
     // ── 页脚 ──
-    var footer = $el("div.eg-footer");
-    var pageInfo = $el("span.eg-pageinfo", { textContent: "就绪" });
+    var footer = eg$el("div.eg-footer");
+    var pageInfo = eg$el("span.eg-pageinfo", { textContent: "就绪" });
     state._pageInfo = pageInfo;
     footer.appendChild(pageInfo);
     container.appendChild(footer);
@@ -280,8 +283,8 @@ function buildUI(container, state, node) {
     function openSettings(state) {
         var backdrop = document.querySelector(".eg-settings-backdrop");
         if (!backdrop) {
-            backdrop = $el("div.eg-settings-backdrop", { onclick: function (e) { if (e.target === backdrop) backdrop.classList.remove("show"); } });
-            var panel = $el("div.eg-settings-panel");
+            backdrop = eg$el("div.eg-settings-backdrop", { onclick: function (e) { if (e.target === backdrop) backdrop.classList.remove("show"); } });
+            var panel = eg$el("div.eg-settings-panel");
             panel.innerHTML = '<h3>设置</h3>' +
                 '<label>Eagle API URL</label>' +
                 '<input type="text" id="eg-api-url" placeholder="http://localhost:41595">' +
@@ -347,7 +350,7 @@ function renderFolderTree(state) {
 
     function buildTree(folders, parent) {
         folders.forEach(function (f) {
-            var item = $el("div.eg-folder-item");
+            var item = eg$el("div.eg-folder-item");
             var hasChildren = f.children && f.children.length > 0;
             var icon = hasChildren ? "📂" : "📁";
             item.innerHTML = '<span class="eg-folder-icon">' + icon + '</span> ' + escapeHtml(f.name || "未命名");
@@ -365,7 +368,7 @@ function renderFolderTree(state) {
             parent.appendChild(item);
 
             if (hasChildren) {
-                var childrenWrap = $el("div.eg-folder-children");
+                var childrenWrap = eg$el("div.eg-folder-children");
                 buildTree(f.children, childrenWrap);
                 parent.appendChild(childrenWrap);
             }
@@ -391,7 +394,7 @@ function populateFolderSelect(state) {
     function addOptions(folders, prefix) {
         folders.forEach(function (f) {
             var label = prefix + (f.name || "未命名");
-            select.appendChild($el("option", { value: f.id, textContent: label }));
+            select.appendChild(eg$el("option", { value: f.id, textContent: label }));
             if (f.children && f.children.length) {
                 addOptions(f.children, prefix + "  ");
             }
@@ -458,12 +461,12 @@ function renderGrid(state) {
         var tags = item.tags || [];
         var resText = width && height ? width + "x" + height : "";
 
-        var card = $el("div.eg-thumb", { "data-id": itemId, "data-index": globalIndex });
+        var card = eg$el("div.eg-thumb", { "data-id": itemId, "data-index": globalIndex });
         if (state.selected.has(itemId)) card.classList.add("selected");
 
         // 缩略图
         var thumbSrc = "/eagle_gallery/thumbnail?id=" + encodeURIComponent(itemId);
-        var img = $el("img", {
+        var img = eg$el("img", {
             src: thumbSrc,
             loading: "lazy",
             alt: name,
@@ -479,25 +482,25 @@ function renderGrid(state) {
         };
 
         // 信息栏
-        var info = $el("div.eg-thumb-info", [
-            $el("span", { textContent: tags.length ? "🏷 " + tags.length : "" }),
-            $el("span", { textContent: name.length > 12 ? name.slice(0, 12) + "..." : name }),
+        var info = eg$el("div.eg-thumb-info", [
+            eg$el("span", { textContent: tags.length ? "🏷 " + tags.length : "" }),
+            eg$el("span", { textContent: name.length > 12 ? name.slice(0, 12) + "..." : name }),
         ]);
 
         // 评分
         var starBadge = null;
         if (star > 0) {
-            starBadge = $el("span.eg-thumb-star", { textContent: "★".repeat(star) });
+            starBadge = eg$el("span.eg-thumb-star", { textContent: "★".repeat(star) });
         }
 
         // 分辨率
         var resBadge = null;
         if (resText) {
-            resBadge = $el("span.eg-thumb-res", { textContent: resText });
+            resBadge = eg$el("span.eg-thumb-res", { textContent: resText });
         }
 
         // 全局序号
-        var indexBadge = $el("span.eg-thumb-index", { textContent: "#" + globalIndex });
+        var indexBadge = eg$el("span.eg-thumb-index", { textContent: "#" + globalIndex });
 
         card.appendChild(img);
         card.appendChild(info);
@@ -591,14 +594,14 @@ function updatePreview(state) {
 
     // 遍历完整选中列表，不依赖 state.items
     state.selectedItems.forEach(function (sel) {
-        var thumbEl = $el("div.eg-preview-thumb");
-        var img = $el("img", {
+        var thumbEl = eg$el("div.eg-preview-thumb");
+        var img = eg$el("img", {
             src: "/eagle_gallery/thumbnail?id=" + encodeURIComponent(sel.id),
             title: sel.name || "",
         });
         img.onerror = function () { img.style.display = "none"; };
 
-        var delBtn = $el("div.eg-preview-del", { textContent: "×" });
+        var delBtn = eg$el("div.eg-preview-del", { textContent: "×" });
         delBtn.onclick = function (e) {
             e.stopPropagation();
             state.selected.delete(sel.id);
@@ -615,7 +618,7 @@ function updatePreview(state) {
     });
 
     // 清除全部按钮
-    var clearBtn = $el("button.eg-btn", {
+    var clearBtn = eg$el("button.eg-btn", {
         textContent: "清除",
         style: "flex-shrink:0;height:60px;align-self:center;margin-left:4px",
         title: "清除全部",

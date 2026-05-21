@@ -5,7 +5,7 @@ import { app } from "../../../scripts/app.js";
 
 const PAGE_SIZE = 24;
 
-function $el(tag, attrs, children) {
+function whg$el(tag, attrs, children) {
     let cls = "";
     if (typeof tag === "string" && tag.includes(".")) {
         const parts = tag.split(".");
@@ -16,7 +16,10 @@ function $el(tag, attrs, children) {
     if (cls) el.className = cls;
     if (attrs && typeof attrs === "object" && !Array.isArray(attrs)) {
         for (const [k, v] of Object.entries(attrs)) {
-            if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+            if (k === "style") {
+                if (typeof v === "string") el.style.cssText = v;
+                else if (typeof v === "object") { for (const [sk, sv] of Object.entries(v)) el.style.setProperty(sk, sv); }
+            }
             else if (k === "textContent") el.textContent = v;
             else if (k === "innerHTML") el.innerHTML = v;
             else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
@@ -34,14 +37,14 @@ function $el(tag, attrs, children) {
 }
 
 function createDropdown(labelText, options, stateKey, state, onChange) {
-    const wrap = $el("div.whg-dropdown");
-    const btn = $el("button.whg-btn", { textContent: labelText + " \u25BC" });
-    const menu = $el("div.whg-dropdown-menu");
+    const wrap = whg$el("div.whg-dropdown");
+    const btn = whg$el("button.whg-btn", { textContent: labelText + " \u25BC" });
+    const menu = whg$el("div.whg-dropdown-menu");
 
     options.forEach(function (opt) {
-        const item = $el("div.whg-dropdown-item");
-        const label = $el("label");
-        const cb = $el("input", { type: "checkbox" });
+        const item = whg$el("div.whg-dropdown-item");
+        const label = whg$el("label");
+        const cb = whg$el("input", { type: "checkbox" });
         if (state[stateKey].includes(opt.value)) cb.checked = true;
         cb.addEventListener("change", function () {
             if (cb.checked) {
@@ -160,7 +163,7 @@ app.registerExtension({
             }, 300);
 
             if (!document.getElementById("whg-style")) {
-                document.head.appendChild($el("style", { id: "whg-style", textContent: CSS }));
+                document.head.appendChild(whg$el("style", { id: "whg-style", textContent: CSS }));
             }
 
             const state = {
@@ -177,7 +180,7 @@ app.registerExtension({
                 selectedItems: [],   // 完整选中数据列表，不依赖 state.results
             };
 
-            const container = $el("div.whg-container");
+            const container = whg$el("div.whg-container");
             buildUI(container, state, this);
             this.addDOMWidget("wallhaven_gallery", "div", container, { serialize: false });
 
@@ -188,7 +191,7 @@ app.registerExtension({
 
 function buildUI(container, state, node) {
     state._node = node;
-    var previewArea = $el("div.whg-preview");
+    var previewArea = whg$el("div.whg-preview");
     previewArea.innerHTML = '<div class="whg-preview-empty">\u9009\u4E2D\u56FE\u7247\u5C06\u663E\u793A\u5728\u8FD9\u91CC</div>';
     state._previewArea = previewArea;
     // 鼠标滚轮横向滚动
@@ -200,15 +203,15 @@ function buildUI(container, state, node) {
     }, { passive: false });
     container.appendChild(previewArea);
 
-    var header = $el("div.whg-header");
+    var header = whg$el("div.whg-header");
 
-    var searchInput = $el("input.whg-search", { type: "text", placeholder: "\u641C\u7D22\u5173\u952E\u8BCD..." });
+    var searchInput = whg$el("input.whg-search", { type: "text", placeholder: "\u641C\u7D22\u5173\u952E\u8BCD..." });
     searchInput.addEventListener("keydown", function (e) {
         if (e.key === "Enter") { state.page = 1; search(state, container); }
     });
     state._searchInput = searchInput;
 
-    var searchBtn = $el("button.whg-btn.primary", { textContent: "\u{1F50D} \u641C\u7D22" });
+    var searchBtn = whg$el("button.whg-btn.primary", { textContent: "\u{1F50D} \u641C\u7D22" });
     searchBtn.onclick = function () { state.page = 1; search(state, container); };
 
     var catDropdown = createDropdown("\u5206\u7C7B", [
@@ -224,8 +227,8 @@ function buildUI(container, state, node) {
     ], "purities", state, function () { state.page = 1; search(state, container); });
 
     // 排序下拉选择器（单选）
-    var sortLabel = $el("span", { textContent: "\u6392\u5E8F:", style: "font-size:11px;color:#aaa;margin-right:4px" });
-    var sortSelect = $el("select.whg-btn", { style: "min-width:80px" });
+    var sortLabel = whg$el("span", { textContent: "\u6392\u5E8F:", style: "font-size:11px;color:#aaa;margin-right:4px" });
+    var sortSelect = whg$el("select.whg-btn", { style: "min-width:80px" });
     var sortModes = [
         { key: "date_added", label: "\u6700\u65B0" },
         { key: "relevance", label: "\u76F8\u5173" },
@@ -235,7 +238,7 @@ function buildUI(container, state, node) {
         { key: "toplist", label: "\u699C\u5355" },
     ];
     sortModes.forEach(function(m) {
-        var opt = $el("option", { value: m.key, textContent: m.label });
+        var opt = whg$el("option", { value: m.key, textContent: m.label });
         sortSelect.appendChild(opt);
     });
     sortSelect.addEventListener("change", function() {
@@ -249,14 +252,14 @@ function buildUI(container, state, node) {
     });
     state._sortSelect = sortSelect;
 
-    var settingsBtn = $el("button.whg-btn", { textContent: "\u2699\uFE0F", title: "\u8BBE\u7F6E" });
+    var settingsBtn = whg$el("button.whg-btn", { textContent: "\u2699\uFE0F", title: "\u8BBE\u7F6E" });
     settingsBtn.onclick = function (e) {
         e.stopPropagation();
         openSettings();
     };
 
     // 高级筛选按钮
-    var advancedBtn = $el("button.whg-btn", { textContent: "\u270F\uFE0F \u7B5B\u9009", title: "\u9AD8\u7EA7\u7B5B\u9009" });
+    var advancedBtn = whg$el("button.whg-btn", { textContent: "\u270F\uFE0F \u7B5B\u9009", title: "\u9AD8\u7EA7\u7B5B\u9009" });
     var advancedVisible = false;
     var advancedRow = null;
     advancedBtn.onclick = function (e) {
@@ -276,12 +279,12 @@ function buildUI(container, state, node) {
     container.appendChild(header);
 
     function buildAdvancedFilters(state, container) {
-        advancedRow = $el("div.whg-header", { style: "display:none;padding-top:4px" });
+        advancedRow = whg$el("div.whg-header", { style: "display:none;padding-top:4px" });
 
         // 颜色筛选 - 完整 36 色（API 原色值，无 # 号）
-        var colorLabel = $el("span", { textContent: "\u989C\u8272:", style: "font-size:11px;color:#aaa;margin-right:4px" });
-        var colorSwatch = $el("span.whg-color-swatch");
-        var colorSelect = $el("select.whg-btn", { style: "min-width:80px" });
+        var colorLabel = whg$el("span", { textContent: "\u989C\u8272:", style: "font-size:11px;color:#aaa;margin-right:4px" });
+        var colorSwatch = whg$el("span.whg-color-swatch");
+        var colorSelect = whg$el("select.whg-btn", { style: "min-width:80px" });
         var colors = [
             { value: "", label: "\u5168\u90E8" },
             { value: "660000", label: "\u6D45\u7EA2" },
@@ -315,7 +318,7 @@ function buildUI(container, state, node) {
             { value: "424153", label: "\u84DD\u7070" },
         ];
         colors.forEach(function(c) {
-            var opt = $el("option", { value: c.value, textContent: c.label });
+            var opt = whg$el("option", { value: c.value, textContent: c.label });
             colorSelect.appendChild(opt);
         });
         function updateColorSwatch() {
@@ -333,8 +336,8 @@ function buildUI(container, state, node) {
         state._colorSelect = colorSelect;
 
         // 尺寸比例筛选
-        var ratioLabel = $el("span", { textContent: "\u6BD4\u4F8B:", style: "font-size:11px;color:#aaa;margin-right:4px" });
-        var ratioSelect = $el("select.whg-btn", { style: "min-width:80px" });
+        var ratioLabel = whg$el("span", { textContent: "\u6BD4\u4F8B:", style: "font-size:11px;color:#aaa;margin-right:4px" });
+        var ratioSelect = whg$el("select.whg-btn", { style: "min-width:80px" });
         var ratios = [
             { value: "", label: "\u5168\u90E8" },
             { value: "16x9", label: "16:9" },
@@ -346,7 +349,7 @@ function buildUI(container, state, node) {
             { value: "3x2", label: "3:2" },
         ];
         ratios.forEach(function(r) {
-            var opt = $el("option", { value: r.value, textContent: r.label });
+            var opt = whg$el("option", { value: r.value, textContent: r.label });
             ratioSelect.appendChild(opt);
         });
         ratioSelect.addEventListener("change", function() {
@@ -357,8 +360,8 @@ function buildUI(container, state, node) {
         state._ratioSelect = ratioSelect;
 
         // 最小分辨率筛选
-        var atleastLabel = $el("span", { textContent: "\u6700\u4F4E:", style: "font-size:11px;color:#aaa;margin-right:4px" });
-        var atleastSelect = $el("select.whg-btn", { style: "min-width:100px" });
+        var atleastLabel = whg$el("span", { textContent: "\u6700\u4F4E:", style: "font-size:11px;color:#aaa;margin-right:4px" });
+        var atleastSelect = whg$el("select.whg-btn", { style: "min-width:100px" });
         var atleastOptions = [
             { value: "", label: "\u65E0" },
             { value: "1920x1080", label: "1080p" },
@@ -368,7 +371,7 @@ function buildUI(container, state, node) {
             { value: "7680x4320", label: "8K" },
         ];
         atleastOptions.forEach(function(a) {
-            var opt = $el("option", { value: a.value, textContent: a.label });
+            var opt = whg$el("option", { value: a.value, textContent: a.label });
             atleastSelect.appendChild(opt);
         });
         atleastSelect.addEventListener("change", function() {
@@ -379,8 +382,8 @@ function buildUI(container, state, node) {
         state._atleastSelect = atleastSelect;
 
         // 精确分辨率筛选（支持多选）
-        var resLabel = $el("span", { textContent: "\u5206\u8FA8\u7387:", style: "font-size:11px;color:#aaa;margin-right:4px" });
-        var resSelect = $el("select.whg-btn", { style: "min-width:100px" });
+        var resLabel = whg$el("span", { textContent: "\u5206\u8FA8\u7387:", style: "font-size:11px;color:#aaa;margin-right:4px" });
+        var resSelect = whg$el("select.whg-btn", { style: "min-width:100px" });
         var resOptions = [
             { value: "", label: "\u65E0" },
             { value: "1920x1080", label: "1920x1080" },
@@ -391,7 +394,7 @@ function buildUI(container, state, node) {
             { value: "3840x2400", label: "3840x2400" },
         ];
         resOptions.forEach(function(r) {
-            var opt = $el("option", { value: r.value, textContent: r.label });
+            var opt = whg$el("option", { value: r.value, textContent: r.label });
             resSelect.appendChild(opt);
         });
         resSelect.addEventListener("change", function() {
@@ -402,8 +405,8 @@ function buildUI(container, state, node) {
         state._resSelect = resSelect;
 
         // 热门时间范围（仅 toplist 排序时生效）
-        var topRangeLabel = $el("span", { textContent: "\u699C\u5355:", style: "font-size:11px;color:#aaa;margin-right:4px" });
-        var topRangeSelect = $el("select.whg-btn", { style: "min-width:80px" });
+        var topRangeLabel = whg$el("span", { textContent: "\u699C\u5355:", style: "font-size:11px;color:#aaa;margin-right:4px" });
+        var topRangeSelect = whg$el("select.whg-btn", { style: "min-width:80px" });
         var topRanges = [
             { value: "1d", label: "1\u5929" },
             { value: "3d", label: "3\u5929" },
@@ -414,7 +417,7 @@ function buildUI(container, state, node) {
             { value: "1y", label: "1\u5E74" },
         ];
         topRanges.forEach(function(r) {
-            var opt = $el("option", { value: r.value, textContent: r.label });
+            var opt = whg$el("option", { value: r.value, textContent: r.label });
             topRangeSelect.appendChild(opt);
         });
         topRangeSelect.value = state.topRange || "1M";
@@ -429,16 +432,16 @@ function buildUI(container, state, node) {
         container.appendChild(advancedRow);
     }
 
-    var grid = $el("div.whg-grid");
+    var grid = whg$el("div.whg-grid");
     grid.innerHTML = '<div class="whg-empty">\u8F93\u5165\u5173\u952E\u8BCD\u70B9\u51FB\u641C\u7D22</div>';
     state._grid = grid;
     container.appendChild(grid);
 
 
-    var footer = $el("div.whg-footer");
-    var prevBtn = $el("button.whg-btn", { textContent: "\u25C0 \u4E0A\u4E00\u9875" });
-    var nextBtn = $el("button.whg-btn", { textContent: "\u4E0B\u4E00\u9875 \u25B6" });
-    var pageInfo = $el("span.whg-pageinfo", { textContent: "\u5C31\u7EEA" });
+    var footer = whg$el("div.whg-footer");
+    var prevBtn = whg$el("button.whg-btn", { textContent: "\u25C0 \u4E0A\u4E00\u9875" });
+    var nextBtn = whg$el("button.whg-btn", { textContent: "\u4E0B\u4E00\u9875 \u25B6" });
+    var pageInfo = whg$el("span.whg-pageinfo", { textContent: "\u5C31\u7EEA" });
     prevBtn.onclick = function () { if (state.page > 1) { state.page--; search(state, container); } };
     nextBtn.onclick = function () { state.page++; search(state, container); };
     state._pageInfo = pageInfo;
@@ -450,8 +453,8 @@ function buildUI(container, state, node) {
     function openSettings() {
         var backdrop = document.querySelector(".whg-settings-backdrop");
         if (!backdrop) {
-            backdrop = $el("div.whg-settings-backdrop", { onclick: function (e) { if (e.target === backdrop) backdrop.classList.remove("show"); } });
-            var panel = $el("div.whg-settings-panel");
+            backdrop = whg$el("div.whg-settings-backdrop", { onclick: function (e) { if (e.target === backdrop) backdrop.classList.remove("show"); } });
+            var panel = whg$el("div.whg-settings-panel");
             panel.innerHTML = '<h3>\u8BBE\u7F6E</h3>' +
                 '<label>Wallhaven API Key</label>' +
                 '<input type="text" id="whg-api-key" placeholder="\u53EF\u9009\uFF0C\u7528\u4E8E NSFW \u548C\u9AD8\u7EA7\u641C\u7D22">' +
@@ -565,18 +568,18 @@ function renderGrid(state) {
         var purity = item.purity || "sfw";
         var pClass = purity === "sfw" ? "p-sfw" : purity === "sketchy" ? "p-sketchy" : "p-nsfw";
 
-        var card = $el("div.whg-thumb", { "data-id": item.id });
+        var card = whg$el("div.whg-thumb", { "data-id": item.id });
         if (state.selected.has(item.id)) card.classList.add("selected");
 
-        var img = $el("img", { src: "/wallhaven_gallery/image_proxy?url=" + encodeURIComponent(thumb), loading: "lazy" });
+        var img = whg$el("img", { src: "/wallhaven_gallery/image_proxy?url=" + encodeURIComponent(thumb), loading: "lazy" });
         img.onerror = function () { img.style.display = "none"; };
 
-        var info = $el("div.whg-thumb-info", [
-            $el("span", { textContent: item.resolution || "" }),
-            $el("span", { textContent: "\u2665 " + (item.favorites || 0) }),
+        var info = whg$el("div.whg-thumb-info", [
+            whg$el("span", { textContent: item.resolution || "" }),
+            whg$el("span", { textContent: "\u2665 " + (item.favorites || 0) }),
         ]);
 
-        var badge = $el("span.whg-thumb-purity." + pClass, { textContent: purity.toUpperCase() });
+        var badge = whg$el("span.whg-thumb-purity." + pClass, { textContent: purity.toUpperCase() });
 
         card.append(img, info, badge);
 
@@ -621,16 +624,16 @@ function updatePreview(state) {
     preview.innerHTML = "";
     // 遍历完整选中列表，不依赖 state.results（修复翻页后预览丢失）
     state.selectedItems.forEach(function (sel) {
-        var thumbEl = $el("div.whg-preview-thumb");
+        var thumbEl = whg$el("div.whg-preview-thumb");
         // 优先使用缩略图 URL（性能），fallback 到原图 URL
         var previewUrl = sel.thumb_url || sel.image_url || "";
-        var img = $el("img", {
+        var img = whg$el("img", {
             src: previewUrl ? "/wallhaven_gallery/image_proxy?url=" + encodeURIComponent(previewUrl) : "",
             alt: sel.wallpaper_id || "",
         });
         img.onerror = function () { img.style.display = "none"; };
 
-        var delBtn = $el("div.whg-preview-del", { textContent: "\u00D7" });
+        var delBtn = whg$el("div.whg-preview-del", { textContent: "\u00D7" });
         delBtn.onclick = function (e) {
             e.stopPropagation();
             state.selected.delete(sel.id);
@@ -645,7 +648,7 @@ function updatePreview(state) {
         preview.appendChild(thumbEl);
     });
 
-    var clearBtn = $el("button.whg-btn", {
+    var clearBtn = whg$el("button.whg-btn", {
         textContent: "\u6E05\u9664",
         style: "flex-shrink:0;height:60px;align-self:center;margin-left:4px",
         title: "\u6E05\u9664\u5168\u90E8"
