@@ -675,17 +675,19 @@ function confirmSelection(state, node) {
     var selectionJson = JSON.stringify({ selections: selections });
 
     if (node) {
+        // 同时写入 widget、input 和 _selection_data，确保后端多路径读取都能命中
         var widget = node.widgets ? node.widgets.find(function (w) { return w.name === "selection_data"; }) : null;
         if (widget) {
             widget.value = selectionJson;
-        } else {
-            var input = node.inputs ? node.inputs.find(function (inp) { return inp.name === "selection_data"; }) : null;
-            if (input) {
-                input.value = selectionJson;
-            } else {
-                node._selection_data = selectionJson;
-            }
         }
+
+        var input = node.inputs ? node.inputs.find(function (inp) { return inp.name === "selection_data"; }) : null;
+        if (input) {
+            input.value = selectionJson;
+        }
+
+        node._selection_data = selectionJson;
+
         node.setDirtyCanvas(true, true);
         if (node.graph) {
             node.graph.change();

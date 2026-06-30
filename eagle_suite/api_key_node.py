@@ -13,6 +13,7 @@ import base64
 import requests
 
 from .logger import logger
+from .utils import decode_api_key, _ENC_PREFIX
 
 # ── 懒加载 aiohttp / PromptServer（避免导入时触发依赖链错误）──
 try:
@@ -24,28 +25,9 @@ except Exception:
     PromptServer = None
     _HAS_PROMPT_SERVER = False
 
-# ── API Key 解码（兼容前端 ENC:Base64 编码）───────────────
-_ENC_PREFIX = "ENC:"
-
-def _decode_api_key(raw: str) -> str:
-    """解码前端 ENC:Base64 编码的 API Key；明文直接透传。"""
-    if not raw or not isinstance(raw, str):
-        return ""
-    import urllib.parse
-    s = raw.strip()
-    if not s.startswith(_ENC_PREFIX):
-        return s
-    try:
-        max_depth = 10
-        depth = 0
-        while s.startswith(_ENC_PREFIX) and depth < max_depth:
-            payload = s[len(_ENC_PREFIX):]
-            decoded = base64.b64decode(payload).decode("utf-8")
-            s = urllib.parse.unquote(decoded)
-            depth += 1
-        return s
-    except Exception:
-        return raw.strip()
+# ── API Key 解码（使用公共函数）───────────────
+# 保留 _decode_api_key 作为内部别名，兼容已有代码
+_decode_api_key = decode_api_key
 
 
 def _encode_api_key(raw: str) -> str:
@@ -71,16 +53,45 @@ def _strip_path_quotes(path: str) -> str:
     if not path:
         return ""
     s = path.strip()
-    # 去除外层引号：支持 "path" 、'path'、"path 、path" 等常见形式
-    while s and s[0] in ('"', "'") and s[-1] in ('"', "'"):
-        s = s.strip(s[0])
-        s = s.strip()
+    # 去除外层配对引号：支持 "path" 、'path' 等形式
+    # 注意：不能用 str.strip(char)，因为 strip 按字符集移除，会误删内容
+    while len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    return s
+
+
+def _strip_chat_completions(url: str) -> str:
+    """规范化 base_url：剥离尾部 /chat/completions 等后缀。
+
+    配置文件中可能把完整的请求路径写入 base_url（"https://xxx/v1/chat/completions"），
+    下游 EagleAPIUnifiedNode.process 会再拼接一次 /chat/completions，
+    因此必须在配置加载阶段就剥离后缀，保证输出干净的根地址。
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    s = url.strip().rstrip("/")
+    # 剥离所有可能的尾部后缀（按从长到短匹配，避免误删）
+    for suffix in ("/chat/completions", "/embeddings", "/completions", "/responses"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    # 确保以 /v1 结尾（OpenAI 兼容要求），缺失时自动补全
+    if not s.endswith("/v1"):
+        # 如果用户写的是裸域名，则补 /v1；否则保留原样
+        if "/v1" in s:
+            s = s.split("/v1")[0] + "/v1"
+        else:
+            s = s + "/v1"
     return s
 
 
 # ── 默认配置文件路径 ──────────────────────────────────────────
+# 优先使用 api_profiles.json，不存在时回退到 api_config.json（兼容旧配置）
 DEFAULT_PROFILES_PATH = os.path.join(
     os.path.dirname(__file__), "..", "api_profiles.json"
+)
+_FALLBACK_CONFIG_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "api_config.json"
 )
 
 
@@ -138,15 +149,18 @@ class EagleAPIKeyNode:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("api_key",)
+    RETURN_TYPES = ("STRING", "API_CONFIG")
+    RETURN_NAMES = ("api_key", "api_config")
     FUNCTION = "get_key"
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
 
     def get_key(self, api_key: str):
-        """输出 ENC:xxx 加密格式，下游节点接收后自行解码。"""
-        return (_encode_api_key(api_key),)
+        """输出 ENC:xxx 加密格式 + api_config 复合类型，兼容两种连接方式。"""
+        encoded = _encode_api_key(api_key)
+        # api_config 复合类型：只填充 api_key，base_url 和 model 留空
+        # EagleAPIUnifiedNode 会优先使用 api_config，base_url/model 留空时回退到独立字段
+        return (encoded, (encoded, "", ""))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -218,7 +232,13 @@ class EagleAPILoader:
         # ── 确定配置文件路径 ───────────────────────────────────
         path = _strip_path_quotes(config_path) if config_path else ""
         if not path:
-            path = DEFAULT_PROFILES_PATH
+            # 优先 api_profiles.json，不存在时回退到 api_config.json
+            if os.path.exists(DEFAULT_PROFILES_PATH):
+                path = DEFAULT_PROFILES_PATH
+            elif os.path.exists(_FALLBACK_CONFIG_PATH):
+                path = _FALLBACK_CONFIG_PATH
+            else:
+                path = DEFAULT_PROFILES_PATH  # 都不存在，用默认路径（后续会报不存在错误）
 
         # ── 加载配置文件 ───────────────────────────────────────
         if not os.path.exists(path):
@@ -264,7 +284,12 @@ class EagleAPILoader:
 
         # ── 提取字段并编码输出（保证所有端口传输 ENC:xxx）─────────
         api_key = _encode_api_key(profile.get("api_key", ""))
-        base_url = profile.get("base_url", "")
+        # ── 规范化 base_url ───────────────────────────────────
+        # 配置里可能写完整的 chat/completions 路径，必须在输出前剥离，
+        # 否则下游 EagleAPIUnifiedNode.process 会再次拼接 /chat/completions，
+        # 导致请求变成 https://xxx/v1/chat/completions/chat/completions（404）
+        raw_base_url = profile.get("base_url", "")
+        base_url = _strip_chat_completions(raw_base_url)
         model = profile.get("model", "")
 
         if not api_key:
@@ -458,7 +483,26 @@ if _HAS_PROMPT_SERVER:
 
 
 def _native_file_dialog() -> str:
-    """打开原生 Windows 文件对话框，返回选中文件路径。"""
+    """打开原生 Windows 文件对话框，返回选中文件路径。
+    优先使用 tkinter（进程内调用，零延迟），兜底 PowerShell。
+    """
+    # ── 优先 tkinter（Python 进程内，无冷启动开销）──────────
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        path = filedialog.askopenfilename(
+            title="选择 API 配置文件",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        root.destroy()
+        if path:
+            return path
+    except Exception as e:
+        logger.warning(f"[EagleAPILoader] tkinter 对话框失败: {e}")
+
+    # ── 兜底 PowerShell（冷启动慢，仅 tkinter 不可用时使用）──
     import subprocess
     ps_code = '''
 Add-Type -AssemblyName System.Windows.Forms
@@ -480,21 +524,6 @@ if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }
         logger.warning("[EagleAPILoader] 文件对话框超时")
     except Exception as e:
         logger.warning(f"[EagleAPILoader] PowerShell 对话框失败: {e}")
-
-    # 兜底：尝试 tkinter
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        path = filedialog.askopenfilename(
-            title="选择 API 配置文件",
-            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
-        )
-        root.destroy()
-        return path if path else ""
-    except Exception as e:
-        logger.warning(f"[EagleAPILoader] tkinter 对话框失败: {e}")
 
     return ""
 

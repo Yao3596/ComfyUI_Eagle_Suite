@@ -29,7 +29,7 @@ class LocalImageLoader:
                 "index": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "sort_by": (["文件名", "修改日期", "创建日期", "文件大小"],),
                 "sort_order": (["升序", "降序"],),
-                "max_count": ("INT", {"default": 200, "min": 1, "max": 999999}),
+                "max_count": ("INT", {"default": 2000, "min": 1, "max": 999999}),
                 "file_filter": ("STRING", {
                     "default": "",
                     "multiline": False,

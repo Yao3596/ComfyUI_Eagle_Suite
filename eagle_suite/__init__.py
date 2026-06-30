@@ -18,6 +18,7 @@ from .utils import (
     cached,
     ensure_dir,
     get_extension,
+    decode_api_key,
     VIDEO_EXTENSIONS,
     IMAGE_EXTENSIONS,
     AUDIO_EXTENSIONS,

@@ -171,6 +171,15 @@ const EagleVideoPreview = {
         }
 
         const filename = videoPath.split(/[/\\]/).pop();
+        // 判断是否在 ComfyUI 标准输出目录下（路径中包含 output 或 input）
+        const isComfyDir = /[\\/]output[\\/]/i.test(videoPath) || /[\\/]input[\\/]/i.test(videoPath);
+        // 对于在 output 目录下的文件使用 /view API，否则尝试直接加载本地路径
+        if (isComfyDir) {
+            const type = /[\\/]input[\\/]/i.test(videoPath) ? "input" : "output";
+            return `${api.apiURL}/view?filename=${encodeURIComponent(filename)}&type=${type}`;
+        }
+        // 非 ComfyUI 标准目录的文件：使用 subfolder 参数传递相对路径
+        // 或者直接使用完整路径（取决于 ComfyUI 服务器配置）
         return `${api.apiURL}/view?filename=${encodeURIComponent(filename)}&type=output`;
     },
 

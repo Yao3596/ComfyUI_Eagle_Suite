@@ -18,11 +18,29 @@ from torch import Tensor
 
 from .logger import logger
 
+import uuid
+from datetime import datetime
+
 # 常量
 BIGMIN = -(2**53 - 1)
 BIGMAX = (2**53 - 1)
 DIMMAX = 8192
 ENCODE_ARGS = ("utf-8", 'backslashreplace')
+
+
+def generate_unique_filename(prefix="ComfyUI", extension="png"):
+    """生成带时间戳和随机位的唯一文件名"""
+    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    short_id = uuid.uuid4().hex[:6]
+    return f"{prefix}_{date_str}_{short_id}.{extension}"
+
+
+def parse_tags(tags_str):
+    """解析逗号分隔的标签字符串为列表"""
+    if not tags_str:
+        return []
+    # 支持中英文逗号
+    return [t.strip() for t in re.split(r'[,，]', tags_str) if t.strip()]
 
 # ============================================================
 # ffmpeg 管理
@@ -375,3 +393,38 @@ def ensure_dir(path):
 def get_extension(path):
     """获取文件扩展名（小写）"""
     return os.path.splitext(path)[1].lower()
+
+
+# ============================================================
+# API Key 解码（兼容前端 ENC:Base64 编码）
+# ============================================================
+
+import base64
+import urllib.parse
+
+_ENC_PREFIX = "ENC:"
+
+def decode_api_key(raw: str) -> str:
+    """解码前端 ENC:Base64 编码的 API Key；明文直接透传。
+
+    前端将 API Key 用 ``ENC:`` + Base64 编码后传入 widget，
+    此函数负责还原为明文。支持多层编码（最多 10 层）。
+
+    此函数是公共版本，供 api_key_node.py 和 api_model_loader.py 共用。
+    """
+    if not raw or not isinstance(raw, str):
+        return ""
+    s = raw.strip()
+    if not s.startswith(_ENC_PREFIX):
+        return s
+    try:
+        max_depth = 10
+        depth = 0
+        while s.startswith(_ENC_PREFIX) and depth < max_depth:
+            payload = s[len(_ENC_PREFIX):]
+            decoded = base64.b64decode(payload).decode("utf-8")
+            s = urllib.parse.unquote(decoded)
+            depth += 1
+        return s
+    except Exception:
+        return raw.strip()

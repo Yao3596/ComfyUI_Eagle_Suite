@@ -12,8 +12,10 @@ import torch
 import numpy as np
 from PIL import Image
 import folder_paths
+
+
 def _resolve_video_path(video):
-    """将任意视频类型解析为文件路径字符串""
+    """将任意视频类型解析为文件路径字符串"""
     if video is None:
         return None
     if isinstance(video, (list, tuple)):
@@ -23,7 +25,6 @@ def _resolve_video_path(video):
             if isinstance(item, str) and os.path.isfile(item):
                 return item
         video = video[0]
-    用 ffprobe 获取视频编解码器名称和比特率(kbps)    """
     if isinstance(video, str):
         path = video.strip()
         return path if path and os.path.isfile(path) else None
@@ -47,9 +48,10 @@ def _resolve_video_path(video):
     except Exception:
         pass
     return None
+
+
 def _get_codec_info(video_path):
-    """
-    用 ffprobe 获取视频编解码器名称和比特率(kbps)    """
+    """用 ffprobe 获取视频编解码器名称和比特率(kbps)"""
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         return "unknown", 0
@@ -60,7 +62,7 @@ def _get_codec_info(video_path):
         ]
         result = subprocess.run(cmd, capture_output=True, timeout=10)
         data = json.loads(result.stdout)
-        codec = "unknown"""
+        codec = "unknown"
         for stream in data.get("streams", []):
             if stream.get("codec_type") == "video":
                 codec = stream.get("codec_name", "unknown")
@@ -69,10 +71,15 @@ def _get_codec_info(video_path):
         return codec, bitrate
     except Exception:
         return "unknown", 0
-# ══════════════════════════════════════════════════════════════════════════════# 节点1: 批量视频加载# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点1: 批量视频加载
+# ══════════════════════════════════════════════════════════════════════════════
 class EagleBatchVideoLoader:
     """
-    🦅 批量视频加载    支持：视频预览、加载数量控制、格式分类统一加载、递归搜索
+    🦅 批量视频加载
+    支持：视频预览、加载数量控制、格式分类统一加载、递归搜索
     """
     SUPPORTED_FORMATS = ['.mp4', '.avi', '.mov', '.mkv', '.webm',
                          '.flv', '.wmv', '.m4v', '.ts', '.m2ts']
@@ -85,13 +92,14 @@ class EagleBatchVideoLoader:
         "仅MP4":   ['.mp4'],
         "仅MOV":   ['.mov'],
     }
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "video_folder": ("STRING", {
                     "default": "", "multiline": False,
-                    "placeholder": "视频文件夹路径，留空使用默认输入目录"""
+                    "placeholder": "视频文件夹路径，留空使用默认输入目录"
                 }),
                 "load_mode":    (["限制数量", "加载全部", "按格式分类"],
                                   {"default": "限制数量"}),
@@ -103,7 +111,7 @@ class EagleBatchVideoLoader:
                 "frame_skip":   ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
                 "max_frames_per_video": ("INT", {
                     "default": 0, "min": 0, "max": 10000, "step": 1,
-                    "tooltip": "每个视频最大加载帧数，0=无限"""
+                    "tooltip": "每个视频最大加载帧数，0=无限"
                 }),
                 "resize_width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
                 "resize_height":("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
@@ -117,15 +125,17 @@ class EagleBatchVideoLoader:
                 "preview_first_frame": ("BOOLEAN", {"default": True}),
             }
         }
+
     RETURN_TYPES = ("IMAGE", "STRING", "INT", "STRING", "IMAGE", "STRING", "STRING", "IMAGE")
     RETURN_NAMES = ("frames", "video_info", "total_frames", "video_list", "preview", "video_paths", "video", "images")
-    OUTPUT_IS_LIST = (False, False, False, False, False, False)
-    FUNCTION = "load_videos"""
-    CATEGORY = "🦅 Eagle/视频"""
-    def load_videos(self, video_folder, load_mode, max_load, format_filter,
-                    frame_skip, max_frames_per_video, resize_width, resize_height,
-                    start_index, seed, recursive=False,
-                    sort_by="文件", preview_first_frame=True,
+    OUTPUT_IS_LIST = (False, False, False, False, False, False, False, False)
+    FUNCTION = "load_videos"
+    CATEGORY = "🦅 Eagle/视频"
+
+    def load_videos(self, video_folder, load_mode, max_load, start_index, seed,
+                    format_filter, frame_skip, max_frames_per_video,
+                    resize_width, resize_height,
+                    recursive=False, sort_by="文件", preview_first_frame=True,
                     video=None, images=None):
         if not video_folder:
             video_folder = folder_paths.get_input_directory()
@@ -194,14 +204,14 @@ class EagleBatchVideoLoader:
                     preview_frames.append(preview)
             except Exception as e:
                 video_details.append(
-                    f"{os.path.basename(vpath)}: {str(e)[:50]}"""
+                    f"{os.path.basename(vpath)}: {str(e)[:50]}"
                 )
         if not all_frames:
             empty = self._empty_frame(resize_width, resize_height)
             return (empty, "无法加载任何视频", 0, "", empty, "", video, images)
         frames_tensor = torch.cat(all_frames, dim=0)
-        info_str = f"📹 共加{len(video_files)} 个视 {total_frame_count} 帧\n"""
-        info_str += f"🔍 格式筛 {format_filter} | 模式: {load_mode}\n"""
+        info_str = f"📹 共加载 {len(video_files)} 个视频，{total_frame_count} 帧\n"
+        info_str += f"🔍 格式筛选: {format_filter} | 模式: {load_mode}\n"
         info_str += "\n".join(video_details)
         video_list_str = "\n".join(
             [f"{i+1}. {os.path.basename(v)}" for i, v in enumerate(video_files)]
@@ -213,6 +223,7 @@ class EagleBatchVideoLoader:
         video_paths_str = "\n".join(video_files)
         return (frames_tensor, info_str, total_frame_count,
                 video_list_str, preview, video_paths_str, video, images)
+
     def _sort_videos(self, video_files, sort_by):
         if sort_by == "文件":
             video_files.sort()
@@ -223,6 +234,7 @@ class EagleBatchVideoLoader:
         elif sort_by == "时长":
             video_files.sort(key=lambda x: self._get_video_duration(x))
         return video_files
+
     def _get_video_duration(self, video_path):
         try:
             import cv2
@@ -233,12 +245,13 @@ class EagleBatchVideoLoader:
             return fc / fps if fps > 0 else 0
         except Exception:
             return 0
+
     def _process_video(self, video_path, frame_skip, max_frames,
                        resize_width, resize_height, get_preview):
         try:
             import cv2
         except ImportError:
-            raise ImportError("需要安opencv-python: pip install opencv-python")
+            raise ImportError("需要安装 opencv-python: pip install opencv-python")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise Exception("无法打开视频文件")
@@ -283,12 +296,13 @@ class EagleBatchVideoLoader:
             if ff_frames:
                 frames = ff_frames
                 preview = ff_preview
-                info = (f"{video_name}: {len(frames)}(ffmpeg备用) """
+                info = (f"{video_name}: {len(frames)} 帧 (ffmpeg备用) "
                         f"({duration:.1f}s, {file_size:.1f}MB)")
                 return frames, info, preview
-        info = (f"{video_name}: {frames_loaded}"""
+        info = (f"{video_name}: {frames_loaded} 帧 "
                 f"({fps:.1f}fps, {duration:.1f}s, {width}x{height}, {file_size:.1f}MB)")
         return frames, info, preview
+
     def _create_preview(self, preview_frames, width, height):
         if not preview_frames:
             return self._empty_frame(width, height)
@@ -306,8 +320,10 @@ class EagleBatchVideoLoader:
             ).squeeze(0).permute(1, 2, 0)
             resized.append(t2)
         return torch.cat(resized, dim=1).unsqueeze(0)
+
     def _empty_frame(self, width, height):
         return torch.zeros((1, height, width, 3))
+
     def _extract_frames_ffmpeg(self, video_path, frame_skip, max_frames,
                                resize_width, resize_height, get_preview):
         """ffmpeg 备用提取：cv2 读不出时调用"""
@@ -319,8 +335,9 @@ class EagleBatchVideoLoader:
         frames, preview = [], None
         try:
             out_pattern = os.path.join(tmpdir, "frame_%06d.jpg")
-            # 先尝试用 select 过滤器隔帧提取，限制总帧            select_expr = f"not(mod(n\\,{frame_skip + 1}))" if frame_skip > 0 else "1"""
-            vf = f"select='{select_expr}',scale={resize_width}:{resize_height}:flags=lanczos"""
+            # 先尝试用 select 过滤器隔帧提取，限制总帧数
+            select_expr = f"not(mod(n\\,{frame_skip + 1}))" if frame_skip > 0 else "1"
+            vf = f"select='{select_expr}',scale={resize_width}:{resize_height}:flags=lanczos"
             cmd = [
                 ffmpeg, "-y", "-i", video_path,
                 "-vf", vf,
@@ -344,15 +361,19 @@ class EagleBatchVideoLoader:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         return frames, preview
-# ══════════════════════════════════════════════════════════════════════════════# 节点2: 视频帧提取器
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点2: 视频帧提取器
 # ══════════════════════════════════════════════════════════════════════════════
 class EagleVideoFrameExtractor:
     """
     🦅 视频帧提取器
     - 视频预览条：自动生成 8 张均匀分布的缩略帧
-    - 三种模式：单帧提/ 均匀采样 / 自定义时间点
+    - 三种模式：单帧提取 / 均匀采样 / 自定义时间点
     """
     TIMELINE_STRIP_COUNT = 8
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -362,11 +383,11 @@ class EagleVideoFrameExtractor:
                                   {"default": "单帧提取"}),
                 "frame_index":  ("INT", {
                     "default": 0, "min": 0, "max": 999999, "step": 1,
-                    "tooltip": "直接输入目标帧号(单帧提取模式)"""
+                    "tooltip": "直接输入目标帧号(单帧提取模式)"
                 }),
                 "sample_count": ("INT", {
                     "default": 4, "min": 1, "max": 64, "step": 1,
-                    "tooltip": "均匀采样帧数"""
+                    "tooltip": "均匀采样帧数"
                 }),
                 "resize_width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
                 "resize_height":("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
@@ -379,15 +400,17 @@ class EagleVideoFrameExtractor:
                 "custom_times": ("STRING", {
                     "default": "0, 5, 10, 15",
                     "multiline": False,
-                    "tooltip": "自定义时间点(秒)，用英文逗号分隔"""
+                    "tooltip": "自定义时间点(秒)，用英文逗号分隔"
                 }),
             }
         }
+
     RETURN_TYPES = ("IMAGE", "STRING", "IMAGE", "IMAGE", "STRING")
     RETURN_NAMES = ("frames", "info", "preview", "timeline_strip", "video")
     OUTPUT_IS_LIST = (True, False, False, False, False)
-    FUNCTION = "extract_frames"""
-    CATEGORY = "🦅 Eagle/视频"""
+    FUNCTION = "extract_frames"
+    CATEGORY = "🦅 Eagle/视频"
+
     def extract_frames(self, video_path, time_mode, frame_index, sample_count,
                        resize_width, resize_height, preview_strip, custom_times=""):
         resolved = _resolve_video_path(video_path)
@@ -398,7 +421,7 @@ class EagleVideoFrameExtractor:
         try:
             import cv2
         except ImportError:
-            raise ImportError("需要安opencv-python: pip install opencv-python")
+            raise ImportError("需要安装 opencv-python: pip install opencv-python")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return ([empty], "无法打开视频", empty, empty, video_path)
@@ -408,6 +431,7 @@ class EagleVideoFrameExtractor:
         vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
+
         def _read_frame_at(cap_local, pos):
             pos = max(0, min(pos, total_frames - 1))
             cap_local.set(cv2.CAP_PROP_POS_FRAMES, pos)
@@ -419,14 +443,18 @@ class EagleVideoFrameExtractor:
             if frame.ndim == 3 and frame.shape[2] == 4:
                 return cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
         def _resize(f):
             if f.shape[1] != resize_width or f.shape[0] != resize_height:
                 f = cv2.resize(f, (resize_width, resize_height),
                                interpolation=cv2.INTER_LANCZOS4)
             return f
+
         def _to_tensor(f):
             return torch.from_numpy(f.astype(np.float32) / 255.0)
-        # 预览        strip_frames = []
+
+        # 预览
+        strip_frames = []
         if preview_strip and total_frames > 0:
             n = self.TIMELINE_STRIP_COUNT
             cap2 = cv2.VideoCapture(video_path)
@@ -448,6 +476,7 @@ class EagleVideoFrameExtractor:
             timeline_strip = _to_tensor(np.hstack(strip_imgs)).unsqueeze(0)
         else:
             timeline_strip = torch.zeros((1, 128, max(128, resize_width), 3))
+
         # 确定提取时间
         if time_mode == "单帧提取":
             target = max(0, min(frame_index, total_frames - 1))
@@ -465,7 +494,9 @@ class EagleVideoFrameExtractor:
                     times = [0]
             except Exception:
                 times = [0]
-        # 提取        frames, frame_infos, current_preview = [], [], None
+
+        # 提取
+        frames, frame_infos, current_preview = [], [], None
         cap3 = cv2.VideoCapture(video_path)
         for i, t in enumerate(times):
             frame_pos = max(0, min(int(round(t * fps)), total_frames - 1))
@@ -484,19 +515,26 @@ class EagleVideoFrameExtractor:
             return ([empty], "无法提取任何帧", empty, timeline_strip, video_path)
         codec, bitrate = _get_codec_info(video_path)
         info = f"📹 {os.path.basename(video_path)}\n"
-        info += f"🎬 {total_frames}{fps:.2f}fps {duration:.2f}s {vid_w}x{vid_h}\n"
-        info += f"🎞编解码器: {codec}"""
+        info += f"🎬 {total_frames} 帧 {fps:.2f}fps {duration:.2f}s {vid_w}x{vid_h}\n"
+        info += f"🎞 编解码器: {codec}"
         if bitrate > 0:
-            info += f" | 比特 {bitrate} kbps"""
-        info += f"\n📸 模式:{time_mode} | 提取:{len(frames)}帧\n"""
+            info += f" | 比特率: {bitrate} kbps"
+        info += f"\n📸 模式: {time_mode} | 提取: {len(frames)} 帧\n"
         info += "\n".join(frame_infos)
         if current_preview is None:
             current_preview = empty
         return (frames, info, current_preview, timeline_strip, video_path)
-# ══════════════════════════════════════════════════════════════════════════════# 节点3: 视频信息分析# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 节点3: 视频信息分析
+# ══════════════════════════════════════════════════════════════════════════════
 class EagleVideoInfo:
     """
-    🦅 视频信息分析    获取视频详细信息(含编解码器、比特率)，不加载帧    """
+    🦅 视频信息分析
+    获取视频详细信息(含编解码器、比特率)，不加载帧
+    """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -504,10 +542,12 @@ class EagleVideoInfo:
                 "video_path": ("*", {"forceInput": True}),
             }
         }
+
     RETURN_TYPES = ("STRING", "FLOAT", "FLOAT", "INT", "INT", "INT", "STRING")
     RETURN_NAMES = ("info", "duration", "fps", "total_frames", "width", "height", "video")
-    FUNCTION = "analyze_video"""
-    CATEGORY = "🦅 Eagle/视频"""
+    FUNCTION = "analyze_video"
+    CATEGORY = "🦅 Eagle/视频"
+
     def analyze_video(self, video_path):
         resolved = _resolve_video_path(video_path)
         if not resolved:
@@ -516,7 +556,7 @@ class EagleVideoInfo:
         try:
             import cv2
         except ImportError:
-            raise ImportError("需要安opencv-python: pip install opencv-python")
+            raise ImportError("需要安装 opencv-python: pip install opencv-python")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return ("无法打开视频", 0.0, 0.0, 0, 0, 0, video_path)
@@ -529,13 +569,15 @@ class EagleVideoInfo:
         cap.release()
         codec, bitrate = _get_codec_info(video_path)
         info = f"📹 {os.path.basename(video_path)}\n"
-        info += f"⏱️ 时长: {duration:.2f}s\n"""
-        info += f"🎬 帧率: {fps:.2f} fps\n"""
-        info += f"📊 总帧 {total_frames}\n"""
-        info += f"📐 分辨 {width}x{height}\n"""
-        info += f"🎞编解码器: {codec}\n"""
+        info += f"⏱️ 时长: {duration:.2f}s\n"
+        info += f"🎬 帧率: {fps:.2f} fps\n"
+        info += f"📊 总帧数: {total_frames}\n"
+        info += f"📐 分辨率: {width}x{height}\n"
+        info += f"🎞 编解码器: {codec}\n"
         if bitrate > 0:
-            info += f"📡 比特 {bitrate} kbps\n"""
-        info += f"💾 文件大小: {file_size:.2f} MB"""
+            info += f"📡 比特率: {bitrate} kbps\n"
+        info += f"💾 文件大小: {file_size:.2f} MB"
         return (info, duration, fps, total_frames, width, height, video_path)
+
+
 __all__ = ["EagleBatchVideoLoader", "EagleVideoFrameExtractor", "EagleVideoInfo"]

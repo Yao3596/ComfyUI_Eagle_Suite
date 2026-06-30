@@ -641,18 +641,28 @@ function confirmSelection(state, node) {
     var selectionJson = JSON.stringify({ selections: selections });
 
     if (node) {
-        // 与 Wallhaven 版本对齐：先查 widgets，再查 inputs，最后 fallback
+        // 同时写入 widget、input 和 _selection_data，确保后端多路径读取都能命中
         var widget = node.widgets ? node.widgets.find(function (w) { return w.name === "selection_data"; }) : null;
         if (widget) {
             widget.value = selectionJson;
-        } else {
-            var input = node.inputs ? node.inputs.find(function (inp) { return inp.name === "selection_data"; }) : null;
-            if (input) {
-                input.value = selectionJson;
-            } else {
-                node._selection_data = selectionJson;
-            }
         }
+
+        var input = node.inputs ? node.inputs.find(function (inp) { return inp.name === "selection_data"; }) : null;
+        if (input) {
+            input.value = selectionJson;
+        }
+
+        node._selection_data = selectionJson;
+
+        // 关键：POST 到服务端缓存，绕过 widget 序列化不可靠的问题
+        try {
+            fetch("/eagle_gallery/cache_selection", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ node_id: node.id, selection_data: selectionJson }),
+            }).catch(function () {});
+        } catch (e) { /* 静默失败，不影响 UI 交互 */ }
+
         node.setDirtyCanvas(true, true);
         if (node.graph) {
             node.graph.change();

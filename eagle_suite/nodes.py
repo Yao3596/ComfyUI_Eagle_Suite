@@ -4,6 +4,7 @@ Eagle Suite 节点注册入口
 全部节点统一手动注册
 """
 
+from .eagle_client import eagle_client
 from .video_nodes import EagleImagesToVideo, EagleVideoConverter
 from .audio_nodes import EagleAudioExtractor, EagleAudioMixer
 from .eagle_loader import EagleLoader
@@ -17,9 +18,8 @@ from .gif_compressor import GifCompressorNode
 from .local_loader import LocalImageLoader
 from .wallhaven_gallery import WallhavenGalleryNode
 from .eagle_gallery import EagleGalleryNode
-from .eagle_gallery_vue import EagleGalleryVueNode
-# Pinterest Gallery 暂未发布（开发中）
-# from .pinterest_gallery import PinterestGalleryNode
+from .eagle_video_gallery import EagleVideoGalleryNode
+from .pinterest_gallery import PinterestGalleryNode
 
 # ── 工具节点 ─────────────────────────────────────────────
 from ..nodes.image_browser import EagleImageList
@@ -63,8 +63,8 @@ NODE_CLASS_MAPPINGS = {
     # 图库
     "WallhavenGalleryNode": WallhavenGalleryNode,
     "EagleGalleryNode": EagleGalleryNode,
-    "EagleGalleryVueNode": EagleGalleryVueNode,
-    # "PinterestGalleryNode": PinterestGalleryNode,  # 开发中
+    "EagleVideoGalleryNode": EagleVideoGalleryNode,
+    "PinterestGalleryNode": PinterestGalleryNode,
 
     # 工具
     "EagleImageList":       EagleImageList,
@@ -110,8 +110,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # 图库
     "WallhavenGalleryNode": "🌊 Wallhaven Gallery",
     "EagleGalleryNode": "🦅 Eagle Gallery",
-    "EagleGalleryVueNode": "🦅 Eagle Gallery (Vue)",
-    # "PinterestGalleryNode": "📌 Pinterest Gallery",  # 开发中
+    "EagleVideoGalleryNode": "🦅 Eagle Video Gallery",
+    "PinterestGalleryNode": "📌 Pinterest Gallery",
 
     # 工具
     "EagleImageList":     "🦅 图片浏览器",

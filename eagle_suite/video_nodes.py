@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Eagle Suite 视频节点 - 图像序列→视频+ 视频格式转换
+Eagle Suite 视频节点 - 图像序列→视频 + 视频格式转换
 重构版本，使用eagle_suite.utils 和 eagle_suite.logger
 """
 import os
@@ -331,14 +331,14 @@ class EagleImagesToVideo:
                 "frame_skip":    ("INT",     {
                     "default": 0, "min": 0, "max": 100, "step": 1,
                     "tooltip": (
-                        "每隔N帧取一帧，0=不跳过\n"""
-                        "输出fps = 节点fps设置 ÷ (frame_skip + 1)\n"""
-                        "\n"""
-                        "源序列帧     frame_skip   实际输出帧数   建议fps\n"""
-                        "30fps / 90      0           90         30\n"""
-                        "30fps / 90      1           45         15\n"""
-                        "30fps / 90      2           30         10\n"""
-                        "24fps / 120     3           30          6"""
+                        "每隔N帧取一帧，0=不跳过\n"
+                        "输出fps = 节点fps设置 ÷ (frame_skip + 1)\n"
+                        "\n"
+                        "源序列帧     frame_skip   实际输出帧数   建议fps\n"
+                        "30fps / 90      0           90         30\n"
+                        "30fps / 90      1           45         15\n"
+                        "30fps / 90      2           30         10\n"
+                        "24fps / 120     3           30          6"
                     ),
                 }),
                 "frame_limit":   ("INT",     {"default": 0, "min": 0,
@@ -372,7 +372,7 @@ class EagleImagesToVideo:
         save_to_eagle = bool(eagle_folder.strip())
         save_to_local = bool(local_save_path.strip())
         if not save_to_eagle and not save_to_local:
-            return ("", "请至少指Eagle 文件夹或本地保存路径", "", images, input_video)
+            return ("", "请至少指定 Eagle 文件夹或本地保存路径", "", images, input_video)
         if input_video is not None:
             video_path = _resolve_video_path(input_video)
             if video_path:
@@ -382,7 +382,7 @@ class EagleImagesToVideo:
             else:
                 return ("", "无法解析视频路径", "", images, input_video)
         elif images is None:
-            return ("", "请提images 图像序列input_video 视频路径", "", images, input_video)
+            return ("", "请提供 images 图像序列或 input_video 视频路径", "", images, input_video)
         if not isinstance(images, torch.Tensor):
             images = torch.as_tensor(images)
         if images.ndim == 3:
@@ -459,7 +459,9 @@ class EagleImagesToVideo:
             vf       = self._build_vf(W, H, out_w, out_h, eff_mode, t_w, t_h, use_alpha)
             # GIF
             if format == "gif":
-                # 参comfyui-videohelpersuite GIF 处理方式                # - 不使alpha_threshold 强制二值化，保留抖动效                # - transparency_color=ffffff 指定透明色为白色
+                # 参考 comfyui-videohelpersuite GIF 处理方式
+                # - 不使用 alpha_threshold 强制二值化，保留抖动效果
+                # - transparency_color=ffffff 指定透明色为白色
                 # - 使用 sierra2_4a 抖动算法获得更平滑的透明边缘
                 base_gif = f"fps={min(int(fps), 15)},scale={out_w}:{out_h}:flags=lanczos"
                 if use_alpha or input_pix_fmt == "rgba":
@@ -586,7 +588,8 @@ class EagleImagesToVideo:
             )
         elif out_w != in_w or out_h != in_h:
             filters.append(f"scale={out_w}:{out_h}:flags=lanczos")
-        # 确保透明通道在滤镜链中不被丢        if use_alpha:
+        # 确保透明通道在滤镜链中不被丢失
+        if use_alpha:
             filters.append("format=rgba")
         return ",".join(filters) if filters else ""
 # ============================================================================
@@ -659,7 +662,7 @@ class EagleVideoConverter:
         save_to_eagle = bool(eagle_folder.strip())
         save_to_local = bool(local_save_path.strip())
         if not save_to_eagle and not save_to_local:
-            return ("", "请至少指Eagle 文件夹或本地保存路径", "", video, images)
+            return ("", "请至少指定 Eagle 文件夹或本地保存路径", "", video, images)
         input_path     = None
         temp_video_path = None
         try:
@@ -864,7 +867,7 @@ class EagleVideoConverter:
                     )
         return (
             out_dir,
-            f"🖼序列已导出到: {os.path.basename(out_dir)}{eagle_result}",
+            f"🖼 序列已导出到: {os.path.basename(out_dir)}{eagle_result}",
             first_frame if os.path.exists(first_frame) else ""
         )
     def _create_temp_video(self, images, fps):

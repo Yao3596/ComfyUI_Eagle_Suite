@@ -60,32 +60,7 @@
         }
     }
 
-    function setupVideoPreview(node) {
-        // 扩展已有的 onExecuted 逻辑
-        const onExecuted = node.onExecuted;
-        node.onExecuted = function (output) {
-            if (onExecuted) onExecuted.apply(this, arguments);
-            if (!output || !output.video || !output.video[0]) return;
-            
-            const filename = output.video[0];
-            const url = `./view?filename=${encodeURIComponent(filename)}&type=output`;
-            
-            if (!this._eagle_video_el) {
-                const el = document.createElement("video");
-                el.controls = true;
-                el.loop = true;
-                el.style.width = "100%";
-                el.style.marginTop = "10px";
-                el.style.borderRadius = "8px";
-                el.style.boxShadow = "0 0 10px rgba(0,0,0,0.5)";
-                this._eagle_video_el = el;
-                // 将元素插入到 UI
-                this.addDOMWidget("video_preview", "PROVIEW", el);
-            }
-            this._eagle_video_el.src = url;
-            this._eagle_video_el.load();
-        };
-    }
+    // 视频预览功能已统一由 eagle_video_preview.js 处理
 
     if (typeof app !== "undefined" && app.registerExtension) {
         app.registerExtension({
@@ -93,7 +68,7 @@
             async nodeCreated(node) {
                 if (TARGET_NODES.includes(node.type) || TARGET_NODES.includes(node.constructor.name)) {
                     applyCollapsibleSections(node);
-                    setupVideoPreview(node);
+                    // 视频预览由 eagle_video_preview.js 统一处理，此处不再重复注册
                 }
             },
             async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -102,7 +77,6 @@
                     nodeType.prototype.onNodeCreated = function () {
                         if (onNodeCreated) onNodeCreated.apply(this, arguments);
                         applyCollapsibleSections(this);
-                        setupVideoPreview(this);
                     };
                 }
             },
