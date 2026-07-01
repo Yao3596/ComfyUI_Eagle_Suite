@@ -52,8 +52,7 @@ select.eg-btn{-webkit-appearance:none;-moz-appearance:none;appearance:none;backg
 .eg-folder-item:hover{background:#2a2a30;color:#ddd}
 .eg-folder-item.active{background:#2a4a8a;color:#fff}
 .eg-folder-item.all{font-weight:bold;color:#eee}
-.eg-folder-icon{font-size:10px;cursor:pointer;padding:1px 3px;border-radius:3px;transition:background .15s}
-.eg-folder-icon:hover{background:#3a3a45;color:#fff}
+.eg-folder-icon{font-size:10px}
 .eg-folder-children{padding-left:14px;border-left:1px solid #333;margin-left:6px}
 .eg-folder-mode-bar{padding:4px 8px;border-top:1px solid #333;display:flex;align-items:center;gap:4px;font-size:10px;color:#888}
 .eg-grid{flex:1;overflow-y:auto;padding:8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:100px;gap:8px;align-content:start;background:#1a1a1e}
@@ -330,33 +329,6 @@ const EagleGalleryApp = {
             else collapsedFolders.add(id);
         }
 
-        function collectFolderIds(nodes, ids = new Set()) {
-            for (const node of nodes) {
-                ids.add(node.id);
-                if (node.children && node.children.length) collectFolderIds(node.children, ids);
-            }
-            return ids;
-        }
-
-        function collapseAllFolders() {
-            collapsedFolders.clear();
-            collectFolderIds(folders.value, collapsedFolders);
-        }
-
-        function expandAllFolders() {
-            collapsedFolders.clear();
-        }
-
-        // 默认折叠子文件夹（保留顶层文件夹展开），初次加载数据后自动应用
-        watch(folders, (newFolders) => {
-            collapsedFolders.clear();
-            for (const folder of newFolders) {
-                if (folder.children && folder.children.length) {
-                    collectFolderIds(folder.children, collapsedFolders);
-                }
-            }
-        }, { immediate: true });
-
         watch(() => [filters.folderId, filters.star, filters.shape, filters.resolution, filters.ext.slice(), filters.tags.slice(), filters.colors.slice()],
             () => { loadItems(); }, { deep: false });
 
@@ -373,7 +345,7 @@ const EagleGalleryApp = {
             STAR_OPTIONS, SHAPE_OPTIONS, RESOLUTION_OPTIONS, EXT_OPTIONS, COLOR_OPTIONS,
             thumbUrl, loadItems, toggleSelect, removeSelection, clearSelection,
             jumpToIndex, openSettings, saveSettings, toggleDropdown, toggleArrayValue,
-            selectFolder, collapsedFolders, toggleFolderCollapse, collapseAllFolders, expandAllFolders,
+            selectFolder, collapsedFolders, toggleFolderCollapse,
             setGridEl: (el) => { node._egGridEl = el; },
         };
     },
@@ -449,8 +421,6 @@ const EagleGalleryApp = {
             </div>
 
             <button class="eg-btn" @click="sidebarVisible = !sidebarVisible" title="切换文件夹树">📂</button>
-            <button class="eg-btn" @click="collapseAllFolders" title="折叠全部文件夹">📁➖</button>
-            <button class="eg-btn" @click="expandAllFolders" title="展开全部文件夹">📁➕</button>
             <button class="eg-btn" :class="{active: folderOutputMode}" @click="folderOutputMode = !folderOutputMode; confirmSelection()" title="开启后输出整个文件夹，而非仅选中项">📦 整夹输出</button>
             <button class="eg-btn" @click="openSettings" title="设置">⚙️</button>
         </div>
@@ -572,8 +542,7 @@ app.registerExtension({
 
             const container = document.createElement("div");
             container.style.width = "100%";
-            container.style.height = "660px";
-            container.style.overflow = "hidden";
+            container.style.height = "100%";
             const widget = this.addDOMWidget("eagle_gallery", "div", container, { serialize: false });
             widget.computeSize = (w) => [w, 660];
 

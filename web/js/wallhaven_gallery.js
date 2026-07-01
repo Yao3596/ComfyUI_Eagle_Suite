@@ -447,8 +447,7 @@ app.registerExtension({
 
             const container = document.createElement("div");
             container.style.width = "100%";
-            container.style.height = "660px";
-            container.style.overflow = "hidden";
+            container.style.height = "100%";
             const widget = this.addDOMWidget("wallhaven_gallery", "div", container, { serialize: false });
             widget.computeSize = (w) => [w, 660];
 
