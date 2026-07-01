@@ -603,7 +603,6 @@ class EagleGalleryNode:
             "optional": {
                 "selection_data": ("STRING", {"default": "{}", "multiline": False}),
                 "sequence_mode": (["all_at_once", "sequential"], {"default": "all_at_once"}),
-                "sequence_index": ("INT", {"default": 0, "min": 0, "max": 9999, "step": 1}),
                 "output_rgba": ("BOOLEAN", {"default": False}),
             },
         }

@@ -380,6 +380,21 @@ function renderFolderTree(state) {
         return;
     }
 
+    // 顶部固定项：全部文件夹
+    var allItem = eg$("div.eg-folder-item", {
+        style: "font-weight:bold;color:#eee;",
+        title: "显示所有文件夹中的图片"
+    });
+    allItem.innerHTML = '<span class="eg-folder-icon">📁</span> 全部文件夹';
+    allItem.onclick = function () {
+        sidebar.querySelectorAll(".eg-folder-item.active").forEach(function (el) { el.classList.remove("active"); });
+        allItem.classList.add("active");
+        state.folderId = "";
+        if (state._folderSelect) state._folderSelect.value = "";
+        loadItems(state);
+    };
+    sidebar.appendChild(allItem);
+
     buildTree(state.folders, sidebar);
 }
 
