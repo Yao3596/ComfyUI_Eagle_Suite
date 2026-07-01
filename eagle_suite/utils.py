@@ -32,7 +32,8 @@ def generate_unique_filename(prefix="ComfyUI", extension="png"):
     """生成带时间戳和随机位的唯一文件名"""
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     short_id = uuid.uuid4().hex[:6]
-    return f"{prefix}_{date_str}_{short_id}.{extension}"
+    suffix = f".{extension}" if extension else ""
+    return f"{prefix}_{date_str}_{short_id}{suffix}"
 
 
 def parse_tags(tags_str):

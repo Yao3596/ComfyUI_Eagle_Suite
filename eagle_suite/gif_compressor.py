@@ -70,8 +70,8 @@ class GifCompressorNode:
             return (torch.zeros((1, 64, 64, 3)), "", "无有效帧")
 
         # 3. 确定路径
-        base_name = generate_unique_filename(filename_prefix, extension="")
-        gif_filename = f"{base_name}.gif"
+        base_name = generate_unique_filename(filename_prefix, extension="gif")
+        gif_filename = base_name
         
         if local_save_path.strip():
             output_dir = local_save_path.strip()

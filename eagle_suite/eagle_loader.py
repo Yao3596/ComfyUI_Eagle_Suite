@@ -181,11 +181,7 @@ class EagleLoader:
         return index % total
 
     def _format_info(self, folder, item, idx, total, size, cur_val, mode, filters):
-        return f"📁 文件夹: {folder}
-🖼️ 图片: {item.get('name')}
-📊 位置: {idx+1}/{total}
-📐 尺寸: {size[0]}x{size[1]}
-🎯 模式: {mode}({cur_val})"
+        return f"📁 文件夹: {folder}\n🖼️ 图片: {item.get('name')}\n📊 位置: {idx+1}/{total}\n📐 尺寸: {size[0]}x{size[1]}\n🎯 模式: {mode}({cur_val})"
 
     def _format_metadata(self, item, size):
         data = item.copy()

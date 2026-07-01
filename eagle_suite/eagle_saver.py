@@ -100,8 +100,8 @@ class EagleSaver:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
                 
-                base_name = generate_unique_filename(filename_prefix, extension="")
-                filename = f"{base_name}.png"
+                base_name = generate_unique_filename(filename_prefix, extension="png")
+                filename = base_name
 
                 # A. 本地保存
                 if save_to_local:
