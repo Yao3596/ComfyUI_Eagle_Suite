@@ -110,6 +110,28 @@ def _load_profile_names() -> list:
         return []
 
 
+def _load_profiles_from_bytes(content: bytes) -> tuple:
+    """从字节内容加载并校验 profile 配置。
+    返回 (success: bool, profiles_or_error: dict|str)
+    """
+    try:
+        data = json.loads(content.decode("utf-8"))
+    except Exception as e:
+        return False, f"文件内容不是有效 JSON: {e}"
+
+    if not isinstance(data, dict):
+        return False, "配置文件根必须是 JSON 对象（{profile_name: {...}}）"
+
+    valid_profiles = {
+        k: v for k, v in data.items()
+        if not k.startswith("_") and isinstance(v, dict)
+        and v.get("api_key") and v.get("base_url") and v.get("model")
+    }
+    if not valid_profiles:
+        return False, "未找到有效 profile（每个 profile 必须包含 api_key、base_url、model）"
+    return True, valid_profiles
+
+
 def _load_fallback_profile_names() -> list:
     """备用：尝试从 api_config.json 中读取最后一次使用的 model 作为 profile 选项。"""
     try:
@@ -124,6 +146,49 @@ def _load_fallback_profile_names() -> list:
     except Exception:
         pass
     return []
+
+
+def _load_profiles_file(path: str) -> tuple:
+    """加载并校验配置文件内容。
+    
+    返回: (success: bool, profiles_or_error: dict|str)
+    校验标准：
+    1. 文件必须是合法 JSON
+    2. 根必须是 JSON 对象（dict）
+    3. 至少包含一个有效的 profile（值为 dict 且含 api_key / base_url / model）
+    """
+    if not path:
+        return False, "配置文件路径为空"
+    if not os.path.exists(path):
+        return False, f"配置文件不存在: {path}"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        return False, f"JSON 解析失败: {e}"
+    except Exception as e:
+        return False, f"读取文件失败: {e}"
+
+    if not isinstance(data, dict):
+        return False, "配置文件根必须是 JSON 对象（{profile_name: {...}}）"
+
+    valid_profiles = {
+        k: v for k, v in data.items()
+        if not k.startswith("_") and isinstance(v, dict)
+        and v.get("api_key") and v.get("base_url") and v.get("model")
+    }
+    if not valid_profiles:
+        return False, "配置文件中没有找到有效的 profile（必须包含 api_key、base_url、model）"
+
+    return True, valid_profiles
+
+
+def _get_profile_names(path: str) -> list:
+    """从指定路径获取可用的 profile 名称列表。"""
+    ok, result = _load_profiles_file(path)
+    if not ok:
+        return []
+    return list(result.keys())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -186,27 +251,14 @@ class EagleAPILoader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        profiles = _load_profile_names()
-        if profiles:
-            return {
-                "required": {
-                    "model_name": (profiles, {"default": profiles[0]}),
-                },
-                "optional": {
-                    "config_path": ("STRING", {
-                        "default": "",
-                        "multiline": False,
-                        "placeholder": "配置文件路径（留空使用默认 api_profiles.json）"
-                    }),
-                }
-            }
-        # 配置文件不存在时：不设 COMBO 验证，JS 动态加载后替换为下拉
+        # model_name 始终作为 STRING 注册，避免静态 COMBO 列表与动态 config_path 冲突。
+        # 前端会在运行时把该 widget 替换为下拉列表，后端执行时再校验实际文件内容。
         return {
             "required": {
                 "model_name": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "点击「加载模型」自动填充"
+                    "placeholder": "点击「加载模型」或输入 profile 名称"
                 }),
             },
             "optional": {
@@ -240,31 +292,15 @@ class EagleAPILoader:
             else:
                 path = DEFAULT_PROFILES_PATH  # 都不存在，用默认路径（后续会报不存在错误）
 
-        # ── 加载配置文件 ───────────────────────────────────────
-        if not os.path.exists(path):
-            err = f"❌ 配置文件不存在: {path}"
-            logger.error(f"[EagleAPILoader] {err}")
-            return ("", err, "", ("", err, ""))
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                profiles = json.load(f)
-        except json.JSONDecodeError as e:
-            err = f"❌ JSON 解析失败: {e}"
-            logger.error(f"[EagleAPILoader] {err}")
-            return ("", err, "", ("", err, ""))
-        except Exception as e:
-            err = f"❌ 读取配置文件失败: {e}"
-            logger.error(f"[EagleAPILoader] {err}")
-            return ("", err, "", ("", err, ""))
-
-        if not isinstance(profiles, dict):
-            err = "❌ 配置文件根必须是 JSON 对象（{名称: {配置}}）"
-            logger.error(f"[EagleAPILoader] {err}")
+        # ── 加载并校验配置文件内容 ───────────────────────────────
+        ok, profiles = _load_profiles_file(path)
+        if not ok:
+            err = f"❌ {profiles}"
+            logger.error(f"[EagleAPILoader] {err} | path={path}")
             return ("", err, "", ("", err, ""))
 
         # ── 查找指定配置 ───────────────────────────────────────
-        name = model_name.strip()
+        name = (model_name or "").strip()
         if not name:
             err = "❌ 请输入 model_name（配置文件中的键名）"
             logger.warning(f"[EagleAPILoader] {err}")
@@ -275,11 +311,6 @@ class EagleAPILoader:
             available = ", ".join(profiles.keys())
             err = f"❌ 未找到配置 '{name}'。可用: {available}"
             logger.warning(f"[EagleAPILoader] {err}")
-            return ("", err, "", ("", err, ""))
-
-        if not isinstance(profile, dict):
-            err = f"❌ 配置 '{name}' 格式错误，必须是对象"
-            logger.error(f"[EagleAPILoader] {err}")
             return ("", err, "", ("", err, ""))
 
         # ── 提取字段并编码输出（保证所有端口传输 ENC:xxx）─────────
@@ -323,17 +354,12 @@ if _HAS_PROMPT_SERVER:
             config_path = _strip_path_quotes(data.get("config_path") or "")
 
             path = config_path if config_path else DEFAULT_PROFILES_PATH
-            if not os.path.exists(path):
-                return web.json_response({"success": False, "error": "配置文件不存在"})
-
-            with open(path, "r", encoding="utf-8") as f:
-                profiles = json.load(f)
-
-            if not isinstance(profiles, dict):
-                return web.json_response({"success": False, "error": "配置文件格式错误"})
+            ok, profiles = _load_profiles_file(path)
+            if not ok:
+                return web.json_response({"success": False, "error": profiles})
 
             profile = profiles.get(profile_name)
-            if not profile or not isinstance(profile, dict):
+            if not profile:
                 return web.json_response({"success": False, "error": f"未找到配置 '{profile_name}'"})
 
             # 返回时遮挡 api_key，防止后台/网络面板明文泄露
@@ -351,22 +377,19 @@ if _HAS_PROMPT_SERVER:
 
     @PromptServer.instance.routes.post("/api_loader/profiles")
     async def get_profiles_route(request):
-        """前端调用：传入 config_path，返回配置文件中所有 profile 名称列表。"""
+        """前端调用：传入 config_path，返回配置文件中所有 profile 名称列表。
+        以文件内容为准：只要 JSON 内容合法且包含有效 profile，即可返回名称列表。
+        """
         try:
             data = await request.json()
             config_path = _strip_path_quotes(data.get("config_path") or "")
 
             path = config_path if config_path else DEFAULT_PROFILES_PATH
-            if not os.path.exists(path):
-                return web.json_response({"success": False, "error": "配置文件不存在"})
+            ok, profiles = _load_profiles_file(path)
+            if not ok:
+                return web.json_response({"success": False, "error": profiles})
 
-            with open(path, "r", encoding="utf-8") as f:
-                profiles = json.load(f)
-
-            if not isinstance(profiles, dict):
-                return web.json_response({"success": False, "error": "配置文件格式错误"})
-
-            names = [k for k in profiles.keys() if not k.startswith("_") and isinstance(profiles[k], dict)]
+            names = list(profiles.keys())
             return web.json_response({"success": True, "profiles": names})
         except Exception as e:
             logger.error(f"[api_loader/profiles] 错误: {e}")
@@ -436,8 +459,10 @@ if _HAS_PROMPT_SERVER:
         """
         前端文件选择器回调：接收上传的 JSON 配置文件，写入 ComfyUI 临时目录，
         返回该文件的完整路径供 config_path widget 使用。
+        文件名不重要，只校验内容是否合法且包含有效 profile。
         """
         import tempfile
+        import uuid
         try:
             reader = await request.multipart()
             field = await reader.next()
@@ -446,15 +471,14 @@ if _HAS_PROMPT_SERVER:
 
             # 读取上传内容
             content = await field.read()
-            # 验证是合法 JSON
-            try:
-                json.loads(content)
-            except json.JSONDecodeError:
-                return web.json_response({"success": False, "error": "文件内容不是有效 JSON"})
+            # 验证是合法 JSON 且包含有效 profile
+            ok, msg = _load_profiles_from_bytes(content)
+            if not ok:
+                return web.json_response({"success": False, "error": msg})
 
-            # 写入临时目录
+            # 写入临时目录（使用唯一文件名，避免覆盖）
             temp_dir = tempfile.gettempdir()
-            dest_name = "eagle_api_profiles_uploaded.json"
+            dest_name = f"eagle_api_profiles_{uuid.uuid4().hex[:8]}.json"
             dest_path = os.path.join(temp_dir, dest_name)
             with open(dest_path, "wb") as f:
                 f.write(content)
@@ -484,9 +508,35 @@ if _HAS_PROMPT_SERVER:
 
 def _native_file_dialog() -> str:
     """打开原生 Windows 文件对话框，返回选中文件路径。
-    优先使用 tkinter（进程内调用，零延迟），兜底 PowerShell。
+    优先使用 PowerShell（在 Windows 桌面环境最稳定），兜底使用 tkinter。
     """
-    # ── 优先 tkinter（Python 进程内，无冷启动开销）──────────
+    # ── 优先 PowerShell（兼容 Windows 桌面与服务端环境）──
+    ps_code = '''
+Add-Type -AssemblyName System.Windows.Forms
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.Filter = "JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*"
+$d.Title = "选择 API 配置文件"
+$r = $d.ShowDialog()
+if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }
+'''
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_code],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            path = result.stdout.strip().split('\n')[-1].strip()
+            if path and os.path.exists(path):
+                return path
+        if result.stderr:
+            logger.warning(f"[EagleAPILoader] PowerShell 对话框错误: {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        logger.warning("[EagleAPILoader] 文件对话框超时")
+    except Exception as e:
+        logger.warning(f"[EagleAPILoader] PowerShell 对话框失败: {e}")
+
+    # ── 兜底 tkinter（Python 进程内，无冷启动开销）──────────
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -501,29 +551,6 @@ def _native_file_dialog() -> str:
             return path
     except Exception as e:
         logger.warning(f"[EagleAPILoader] tkinter 对话框失败: {e}")
-
-    # ── 兜底 PowerShell（冷启动慢，仅 tkinter 不可用时使用）──
-    import subprocess
-    ps_code = '''
-Add-Type -AssemblyName System.Windows.Forms
-$d = New-Object System.Windows.Forms.OpenFileDialog
-$d.Filter = "JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*"
-$d.Title = "选择 API 配置文件"
-$r = $d.ShowDialog()
-if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }
-'''
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_code],
-            capture_output=True, text=True, timeout=30
-        )
-        path = result.stdout.strip()
-        if path and os.path.exists(path):
-            return path
-    except subprocess.TimeoutExpired:
-        logger.warning("[EagleAPILoader] 文件对话框超时")
-    except Exception as e:
-        logger.warning(f"[EagleAPILoader] PowerShell 对话框失败: {e}")
 
     return ""
 

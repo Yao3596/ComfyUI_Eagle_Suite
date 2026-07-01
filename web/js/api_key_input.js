@@ -36,22 +36,22 @@ function _stripPath(val) {
 }
 
 /**
- * 将 ComfyUI 的 STRING widget 转换为 COMBO 下拉列表。
- * 覆盖 widget.draw 渲染为原生 <select> 元素。
+ * 将 ComfyUI 的 STRING widget 转换为 COMBO 下拉列表，并保留当前值。
  */
 function _convertToCombo(node, widget, values) {
-    if (!widget || !values?.length) return;
+    if (!widget) return;
     widget.type = 'combo';
     widget.options = widget.options || {};
-    widget.options.values = values;
-    // 强制重建 widget DOM
+    widget.options.values = values.length ? values : [''];
+    if (values.length && (!widget.value || !values.includes(widget.value))) {
+        widget.value = values[0];
+    }
     node.setDirtyCanvas(true, true);
 }
 
 // ── EagleAPILoader 模型预加载工具 ─────────────────────────────
 /**
- * 从配置文件读取 base_url 和 api_key，然后请求 /api_loader/models 获取模型列表，
- * 并更新 model_name 下拉 widget 的 options。
+ * 从后端返回的 Response 中安全解析 JSON。
  */
 async function _safeJson(res) {
     const text = await res.text();
@@ -63,10 +63,12 @@ async function _safeJson(res) {
 }
 
 /**
- * 读取配置文件，把所有 profile 名称填充到 model_name 下拉列表
+ * 读取配置文件，把所有 profile 名称填充到 model_name 下拉列表。
+ * 支持任意路径：默认路径、手动输入路径、选择文件路径。
  */
 async function _refreshProfileOptions(node, configPath) {
     const modelWidget = node.widgets?.find(w => w.name === 'model_name');
+    const configPathWidget = node.widgets?.find(w => w.name === 'config_path');
     if (!modelWidget) return;
 
     try {
@@ -84,23 +86,26 @@ async function _refreshProfileOptions(node, configPath) {
             return;
         }
         const data = await _safeJson(res);
-        if (!data.success || !data.profiles?.length) {
-            console.warn('[EagleAPILoader] 配置文件中无可用 profile');
+        if (!data.success) {
+            console.warn('[EagleAPILoader] 配置文件读取失败:', data.error);
+            // 保留当前输入，但提示用户
+            modelWidget.options = modelWidget.options || {};
+            modelWidget.options.values = [];
+            node.setDirtyCanvas(true, true);
             return;
         }
 
-        const profiles = data.profiles;
-        modelWidget.options = modelWidget.options || {};
-        modelWidget.options.values = profiles;
+        const profiles = data.profiles || [];
+        _convertToCombo(node, modelWidget, profiles);
 
-        // 如果 model_name 当前是 STRING 类型，转为 COMBO 下拉
-        if (modelWidget.type === 'string' || !modelWidget.type) {
-            _convertToCombo(node, modelWidget, profiles);
+        const current = (modelWidget.value || '').trim();
+        if (profiles.length && (!current || !profiles.includes(current))) {
+            modelWidget.value = profiles[0];
         }
 
-        const current = modelWidget.value?.trim();
-        if (!current || !profiles.includes(current)) {
-            modelWidget.value = profiles[0];
+        // 如果 config_path 显示为引号包裹，同步清理
+        if (configPathWidget && configPathWidget.value !== configPath) {
+            configPathWidget.value = configPath;
         }
 
         console.log('[EagleAPILoader] 已加载', profiles.length, '个配置:', profiles);
@@ -143,9 +148,68 @@ async function _loadModelsForProfile(node, profileName) {
 /**
  * 打开文件选择器并上传选中的 JSON 配置文件到后端，
  * 返回服务器端保存的文件路径。
+ *
+ * 策略：
+ * 1. Electron 环境（ComfyUI 桌面版）：使用原生 <input type="file">，file.path 直接给出真实路径。
+ * 2. 浏览器环境：先尝试调用 /api_loader/pick_file 打开服务端原生对话框；
+ *    如果失败或无法获取路径，则回退到文件上传（/api_loader/select_config_file），
+ *    由后端校验文件内容并返回临时路径。
  */
 async function _selectConfigFile() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
+        // 检测是否为 Electron 环境（ComfyUI 桌面版）
+        const isElectron = () => {
+            try {
+                return !!(window.process && window.process.versions && window.process.versions.electron);
+            } catch { return false; }
+        };
+
+        // 浏览器环境：直接请求服务端打开文件对话框
+        if (!isElectron()) {
+            fetch('/api_loader/pick_file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            })
+            .then(_safeJson)
+            .then(data => {
+                if (data.success && data.path) {
+                    resolve(data.path);
+                } else {
+                    // 服务端对话框失败，回退到上传
+                    _uploadConfigFile().then(resolve);
+                }
+            })
+            .catch(() => _uploadConfigFile().then(resolve));
+            return;
+        }
+
+        // Electron 环境：使用原生文件选择器
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+
+        input.addEventListener('change', () => {
+            const file = input.files?.[0];
+            document.body.removeChild(input);
+            if (file && file.path) {
+                resolve(file.path);
+            } else {
+                resolve('');
+            }
+        });
+
+        input.click();
+    });
+}
+
+/**
+ * 通过文件上传方式选择配置文件（浏览器环境兜底）。
+ */
+async function _uploadConfigFile() {
+    return new Promise((resolve) => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.json,application/json';
@@ -159,37 +223,22 @@ async function _selectConfigFile() {
                 resolve('');
                 return;
             }
-
-            // Electron 环境：直接获取完整路径
-            if (file.path) {
-                document.body.removeChild(input);
-                resolve(file.path);
-                return;
-            }
-
-            // 浏览器环境：通过后端原生对话框获取真实路径
+            const formData = new FormData();
+            formData.append('file', file);
             try {
-                const res = await fetch('/api_loader/pick_file', {
+                const res = await fetch('/api_loader/select_config_file', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({}),
+                    body: formData,
                 });
                 const data = await _safeJson(res);
                 if (data.success && data.path) {
                     resolve(data.path);
                 } else {
-                    // 兜底：上传文件到临时目录
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    const res2 = await fetch('/api_loader/select_config_file', {
-                        method: 'POST',
-                        body: formData,
-                    });
-                    const data2 = await _safeJson(res2);
-                    resolve(data2.success ? data2.path : '');
+                    alert(data.error || '配置文件上传失败');
+                    resolve('');
                 }
             } catch (e) {
-                console.warn('[EagleAPILoader] 文件选择失败:', e);
+                console.warn('[EagleAPILoader] 文件上传失败:', e);
                 resolve('');
             } finally {
                 document.body.removeChild(input);
@@ -353,15 +402,16 @@ app.registerExtension({
 
           if (!configPathWidget || !modelWidget) return;
 
+          // 强制将 model_name 转为 COMBO 下拉框（后端注册为 STRING，避免静态校验冲突）
+          _convertToCombo(node, modelWidget, []);
+
           // ── 📁 选择文件 按钮 ───────────────────────────────────
           node.addWidget('button', '📁 选择文件', null, async () => {
             const filePath = await _selectConfigFile();
             if (filePath) {
               configPathWidget.value = filePath;
-              // 触发刷新
-              await _refreshProfileOptions(node, _stripPath(filePath));
-              const selected = modelWidget.value?.trim();
-              if (selected) _loadModelsForProfile(node, selected);
+              const cleaned = _stripPath(filePath);
+              await _refreshProfileOptions(node, cleaned);
             }
           });
 
@@ -369,9 +419,6 @@ app.registerExtension({
           node.addWidget('button', '🔄 加载模型', null, async () => {
             const configPath = _stripPath(configPathWidget.value);
             await _refreshProfileOptions(node, configPath);
-            // 下拉列表刷新后，加载当前选中 profile 的详细信息
-            const selected = modelWidget.value?.trim();
-            if (selected) _loadModelsForProfile(node, selected);
           });
 
           // config_path 变化时：去引号 + 自动刷新下拉列表
