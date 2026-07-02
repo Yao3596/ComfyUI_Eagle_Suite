@@ -19,7 +19,7 @@ import { createApp, reactive, ref, onMounted, computed, watch } from "../lib/vue
 
 // ── 样式（沿用原版 CSS class 前缀 eg-，保证视觉一致） ──────────────────────────
 const CSS = `
-.eg-root{display:flex;flex-direction:column;width:100%;height:100%;background:#1a1a1e;font-size:12px;color:#ddd;box-sizing:border-box;font-family:sans-serif;overflow:hidden}
+.eg-root{display:flex;flex-direction:column;width:100%;height:100%;max-height:100%;background:#1a1a1e;font-size:12px;color:#ddd;box-sizing:border-box;font-family:sans-serif;overflow:hidden}
 .eg-preview{display:flex;gap:6px;padding:8px 10px;background:#1e1e22;border-bottom:1px solid #333;min-height:70px;max-height:90px;overflow-x:auto;overflow-y:hidden;flex-shrink:0}
 .eg-preview::-webkit-scrollbar{height:4px}
 .eg-preview::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
@@ -600,7 +600,7 @@ app.registerExtension({
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             onNodeCreated?.apply(this, arguments);
-            this.setSize([960, 760]);
+            this.setSize([960, 660]);
 
             // 隐藏 selection_data 文本 widget（数据通过本组件写入，无需展示）
             const hideSel = (node) => {
@@ -629,12 +629,13 @@ app.registerExtension({
 
             const widget = this.addDOMWidget("eagle_gallery", "div", container, { serialize: false });
 
-            // 统一的高度应用函数：不用 100%（相对未定高的父容器在浏览器里会失效，
-            // 导致内容把容器撑到多高就是多高，节点因此"无限往下增高"）。
-            // 而是每次都直接给一个确定的像素高度。
+            // 统一的高度应用函数：容器高度必须有硬上限，否则侧边栏文件夹树一长
+            // 会把 DOM 容器撑高，ComfyUI 节点随之无限向下延伸。
+            const MAX_H = 660;
             const applyHeight = (nodeHeight) => {
-                const h = Math.max(400, nodeHeight - 100);
+                const h = Math.min(Math.max(400, nodeHeight - 100), MAX_H);
                 container.style.height = h + "px";
+                container.style.maxHeight = MAX_H + "px";
                 widget.computeSize = (w) => [w, h];
                 return h;
             };
