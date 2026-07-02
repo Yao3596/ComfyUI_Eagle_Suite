@@ -156,7 +156,7 @@ class EagleLoader:
         return sorted(items, key=lambda x: x.get(key, 0), reverse=rev)
 
     def _load_item_image(self, item_id, item_data):
-        """加载 Eagle 图片。优先使用资源库原图，失败再回退到 API 缩略图。
+        """加载 Eagle 图片。优先使用资源库原图，失败再回退到缩略图。
         Eagle V1 API 不返回 filePath，因此根据 item_data 中的 name + ext
         直接定位 {library}/images/{item_id}.info/{name}.{ext}。
         """
@@ -171,21 +171,32 @@ class EagleLoader:
                 candidate = os.path.join(info_dir, f"{name}.{ext}")
                 img = self._open_image(candidate)
                 if img:
+                    logger.info(f"[EagleLoader] 加载原图: {candidate}")
                     return img, candidate
 
-            # 2. 扫描 .info 目录，排除缩略图，选面积最大的图片
-            scanned = self._scan_info_folder(info_dir)
+            # 2. 扫描 .info 目录，优先非缩略图原图
+            scanned = self._scan_info_folder(info_dir, prefer_original=True)
             if scanned:
                 img = self._open_image(scanned)
                 if img:
+                    logger.info(f"[EagleLoader] 扫描加载原图: {scanned}")
                     return img, scanned
 
-        # 3. 缩略图回退
+            # 3. 只有缩略图时，显式降级加载
+            scanned_thumb = self._scan_info_folder(info_dir, prefer_original=False)
+            if scanned_thumb:
+                img = self._open_image(scanned_thumb)
+                if img:
+                    logger.warning(f"[EagleLoader] 未找到原图，降级加载缩略图: {scanned_thumb}")
+                    return img, scanned_thumb
+
+        # 4. Eagle HTTP 缩略图回退
         thumb = eagle_client.get_item_thumbnail(item_id)
         if thumb:
             try:
                 img = Image.open(io.BytesIO(thumb))
                 img.load()
+                logger.warning(f"[EagleLoader] 未找到本地文件，使用 Eagle HTTP 缩略图 id={item_id}")
                 return img, f"eagle://thumb/{item_id}"
             except Exception as e:
                 logger.warning(f"[EagleLoader] 缩略图加载失败 {item_id}: {e}")
@@ -204,11 +215,12 @@ class EagleLoader:
             logger.warning(f"[EagleLoader] 打开图片失败 {path}: {e}")
             return None
 
-    def _scan_info_folder(self, info_dir):
-        """扫描 Eagle 的 .info 文件夹，优先返回原图路径。
-        策略：
-        1. 读取 metadata.json 中的 name + ext 组合成文件名
-        2. 排除 _thumbnail* 缩略图，选择面积最大的图片
+    def _scan_info_folder(self, info_dir, prefer_original=True):
+        """扫描 Eagle 的 .info 文件夹，返回图片路径。
+
+        Args:
+            prefer_original: True 时跳过缩略图（_thumbnail 开头或结尾），
+                             False 时只返回缩略图文件作为降级。
         """
         if not info_dir or not os.path.isdir(info_dir):
             return None
@@ -228,22 +240,38 @@ class EagleLoader:
                 except Exception as e:
                     logger.warning(f"[EagleLoader] 读取 metadata.json 失败: {e}")
 
-            # 2. 扫描目录，排除缩略图，选面积最大的
-            candidates = []
+            # 2. 扫描目录
+            original_candidates = []
+            thumb_candidates = []
             for fname in os.listdir(info_dir):
                 low = fname.lower()
-                if low == "metadata.json" or low.startswith("_thumbnail"):
+                if low == "metadata.json":
                     continue
+                base, _ = os.path.splitext(low)
+                is_thumb = low.startswith("_thumbnail") or base.endswith("_thumbnail")
                 if low.endswith(tuple(self.SUPPORTED_EXT)):
                     fpath = os.path.join(info_dir, fname)
                     try:
                         w, h = self._fast_image_size(fpath)
-                        candidates.append((w * h, fpath))
+                        area = w * h
                     except Exception:
-                        candidates.append((0, fpath))
-            if candidates:
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                return candidates[0][1]
+                        area = 0
+                    if is_thumb:
+                        thumb_candidates.append((area, fpath))
+                    else:
+                        original_candidates.append((area, fpath))
+
+            if prefer_original:
+                if original_candidates:
+                    original_candidates.sort(key=lambda x: x[0], reverse=True)
+                    return original_candidates[0][1]
+                return None
+            else:
+                all_thumbs = thumb_candidates
+                if all_thumbs:
+                    all_thumbs.sort(key=lambda x: x[0], reverse=True)
+                    return all_thumbs[0][1]
+                return None
         except Exception as e:
             logger.warning(f"[EagleLoader] 扫描目录失败 {info_dir}: {e}")
         return None
