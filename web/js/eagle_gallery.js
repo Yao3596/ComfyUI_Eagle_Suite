@@ -1,660 +1,712 @@
 /**
- * Eagle Gallery - Eagle 图片浏览器节点（Vue 3 重构版）
- * 单文件、自包含，仅依赖 ../lib/vue.esm-browser.js（官方 Vue 3 生产构建）
- *
- * 后端接口（eagle_gallery.py）：
- *   GET  /eagle_gallery/settings
- *   POST /eagle_gallery/settings
- *   GET  /eagle_gallery/folders
- *   GET  /eagle_gallery/tags
- *   POST /eagle_gallery/items      body: {folderId, keywords, star, shape, ext[], tags[], colors, resolution, all}
- *   GET  /eagle_gallery/thumbnail?id=
- *   POST /eagle_gallery/cache_selection  body: {selections, outputMode, folderId}
- *
- * 节点 EagleGalleryNode 的 widget：
- *   selection_data (隐藏，由本组件写入) / sequence_mode（原生 widget，保留）/ output_rgba（原生 widget，保留）
+ * Eagle Gallery Vue — 无限滚动懒加载 + 已选图像预览条
  */
 import { app } from "../../../scripts/app.js";
-import { createApp, reactive, ref, onMounted, computed, watch } from "../lib/vue.esm-browser.js";
+import { createApp, h, ref, computed, onMounted } from "../lib/vue.esm-browser.js";
 
-// ── 样式（沿用原版 CSS class 前缀 eg-，保证视觉一致） ──────────────────────────
-const CSS = `
-.eg-root{display:flex;flex-direction:column;width:100%;height:100%;background:#1a1a1e;font-size:12px;color:#ddd;box-sizing:border-box;font-family:sans-serif;overflow:hidden}
-.eg-preview{display:flex;gap:6px;padding:8px 10px;background:#1e1e22;border-bottom:1px solid #333;min-height:70px;max-height:90px;overflow-x:auto;overflow-y:hidden;flex-shrink:0}
-.eg-preview::-webkit-scrollbar{height:4px}
-.eg-preview::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
-.eg-preview-thumb{flex-shrink:0;width:80px;height:60px;border-radius:4px;overflow:hidden;border:1px solid #444;position:relative;background:#25252a}
-.eg-preview-thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.eg-preview-empty{color:#666;font-size:11px;display:flex;align-items:center;justify-content:center;width:100%}
-.eg-toolbar{padding:6px 10px;background:#25252a;border-bottom:1px solid #333;display:flex;flex-wrap:wrap;gap:6px;align-items:center;position:relative}
-.eg-search{flex:1;min-width:100px;padding:4px 8px;background:#1e1e22;border:1px solid #444;border-radius:4px;color:#eee;font-size:12px;outline:none}
-.eg-search:focus{border-color:#5a8fe0}
-.eg-btn{padding:4px 10px;background:#333;border:1px solid #444;border-radius:4px;color:#ddd;font-size:11px;cursor:pointer;white-space:nowrap}
-.eg-btn:hover{background:#3a3a40}
-.eg-btn.primary{background:#4a7de0;border-color:#4a7de0;color:#fff}
-.eg-btn.primary:hover{background:#5a8fe0}
-.eg-btn.active{background:#2a4a8a;border-color:#4a7de0}
-.eg-btn:disabled{opacity:.4;cursor:not-allowed}
-.eg-btn:disabled:hover{background:#333}
-select.eg-btn{-webkit-appearance:none;-moz-appearance:none;appearance:none;background:#333 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='4' viewBox='0 0 8 4'%3E%3Cpath fill='%23aaa' d='M0 0h8L4 4z'/%3E%3C/svg%3E") no-repeat right 8px center;padding-right:22px}
-.eg-dropdown{position:relative;display:inline-block}
-.eg-dropdown-menu{display:none;position:absolute;top:100%;left:0;z-index:1000;background:#2a2a30;border:1px solid #444;border-radius:4px;padding:6px;min-width:160px;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.5)}
-.eg-dropdown-menu.show{display:block}
-.eg-dropdown-search{width:100%;box-sizing:border-box;margin-bottom:4px;padding:3px 6px;background:#1a1a1e;border:1px solid #444;border-radius:3px;color:#eee;font-size:11px}
-.eg-dropdown-item{padding:4px 6px;cursor:pointer;font-size:11px;color:#ccc;white-space:nowrap;border-radius:3px}
-.eg-dropdown-item:hover{background:#3a3a45}
-.eg-dropdown-item label{display:flex;align-items:center;gap:5px;cursor:pointer}
-.eg-dropdown-item input{margin:0}
-.eg-color-dot{width:12px;height:12px;border-radius:50%;border:1px solid #555;display:inline-block;flex-shrink:0}
-.eg-main{flex:1;display:flex;overflow:hidden;min-height:0;min-width:0}
-.eg-sidebar{width:200px;min-width:120px;max-width:280px;background:#1e1e22;border-right:1px solid #333;overflow-y:auto;overflow-x:hidden;flex-shrink:0;padding:6px;box-sizing:border-box}
-.eg-sidebar::-webkit-scrollbar{width:4px}
-.eg-sidebar::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
-.eg-sidebar-header{padding:4px 6px 8px;color:#888;font-size:11px;font-weight:700;letter-spacing:.02em}
-.eg-folder-search{width:100%;box-sizing:border-box;margin-bottom:6px;padding:4px 6px;background:#15151a;border:1px solid #333;border-radius:3px;color:#eee;font-size:11px;outline:none}
-.eg-folder-search:focus{border-color:#5a8fe0}
-.eg-folder-item{padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;color:#aaa;display:flex;align-items:center;gap:4px;white-space:nowrap}
-.eg-folder-item:hover{background:#2a2a30;color:#ddd}
-.eg-folder-item.active{background:#2a4a8a;color:#fff}
-.eg-folder-item.all{font-weight:bold;color:#eee}
-.eg-folder-icon{font-size:10px;flex-shrink:0}
-.eg-folder-arrow{width:14px;height:14px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#888;cursor:pointer;border-radius:2px}
-.eg-folder-arrow:hover{background:#3a3a45;color:#ddd}
-.eg-folder-arrow-spacer{width:14px;flex-shrink:0;display:inline-block}
-.eg-folder-name{flex:1;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.eg-folder-count{color:#666;font-size:10px;flex-shrink:0;margin-left:4px}
-.eg-folder-mode-bar{padding:4px 8px;border-top:1px solid #333;display:flex;align-items:center;gap:4px;font-size:10px;color:#888}
-.eg-grid{flex:1;min-width:0;min-height:0;overflow-y:auto;padding:8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:100px;gap:8px;align-content:start;background:#1a1a1e}
-.eg-grid::-webkit-scrollbar{width:6px}
-.eg-grid::-webkit-scrollbar-track{background:transparent}
-.eg-grid::-webkit-scrollbar-thumb{background:#444;border-radius:3px}
-.eg-thumb{position:relative;background:#222;border-radius:4px;overflow:hidden;cursor:pointer;border:2px solid transparent;transition:border-color .15s,transform .1s;height:100px}
-.eg-thumb:hover{border-color:#5a8fe0;transform:translateY(-1px)}
-.eg-thumb.selected{border-color:#4a7de0;box-shadow:0 0 0 1px #4a7de0}
-.eg-thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.eg-thumb-info{position:absolute;bottom:0;left:0;right:0;padding:3px 6px;background:linear-gradient(transparent,rgba(0,0,0,.85));font-size:10px;color:#aaa;display:flex;justify-content:space-between;gap:4px}
-.eg-thumb-star{position:absolute;top:3px;left:40px;color:#fc0;font-size:10px;text-shadow:0 1px 2px rgba(0,0,0,.8);z-index:1}
-.eg-thumb-res{position:absolute;top:3px;right:3px;padding:1px 4px;border-radius:2px;font-size:9px;background:rgba(0,0,0,.6);color:#ccc}
-.eg-thumb-index{position:absolute;top:3px;left:3px;padding:1px 5px;border-radius:2px;font-size:10px;background:rgba(74,125,224,.85);color:#fff;font-weight:700;z-index:2}
-.eg-footer{padding:5px 10px;background:#25252a;border-top:1px solid #333;display:flex;align-items:center;gap:8px;flex-shrink:0}
-.eg-pageinfo{flex:1;text-align:center;color:#888;font-size:11px}
-.eg-empty{text-align:center;padding:40px;color:#666;font-size:13px}
-.eg-load-more-hint{grid-column:1/-1;text-align:center;padding:14px;color:#666;font-size:11px}
-.eg-loading{text-align:center;padding:40px;color:#888}
-.eg-error{text-align:center;padding:40px;color:#e66}
-.eg-settings-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;display:flex;align-items:center;justify-content:center}
-.eg-settings-panel{background:#25252a;border:1px solid #444;border-radius:8px;padding:20px;width:360px;box-shadow:0 8px 24px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:12px}
-.eg-settings-panel h3{margin:0 0 4px;color:#eee;font-size:14px}
-.eg-settings-panel label{display:block;margin-bottom:4px;color:#aaa;font-size:12px}
-.eg-settings-panel input{width:100%;padding:6px 8px;background:#1e1e22;border:1px solid #444;border-radius:4px;color:#eee;font-size:12px;box-sizing:border-box}
-.eg-settings-panel input:focus{border-color:#5a8fe0;outline:none}
-.eg-settings-hint{color:#888;font-size:11px;margin-top:4px;line-height:1.4}
-.eg-settings-hint code{background:#1e1e22;padding:1px 4px;border-radius:3px;color:#aaa;font-family:monospace}
-.eg-settings-footer{margin-top:8px;padding-top:12px;border-top:1px solid #333;display:flex;align-items:center;justify-content:space-between;gap:8px}
-.eg-settings-github{display:inline-flex;align-items:center;gap:6px;color:#aaa;font-size:12px;text-decoration:none;padding:5px 10px;background:#1e1e22;border:1px solid #333;border-radius:4px;transition:.15s}
-.eg-settings-github:hover{color:#eee;border-color:#555}
-.eg-settings-author{color:#666;font-size:11px}
-.eg-settings-row{display:flex;gap:8px;justify-content:flex-end}
-.eg-preview-del{position:absolute;top:2px;right:2px;width:16px;height:16px;background:rgba(0,0,0,.7);color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;cursor:pointer;opacity:0;transition:opacity .15s;z-index:2}
-.eg-preview-thumb:hover .eg-preview-del{opacity:1}
-.eg-preview-del:hover{background:rgba(200,0,0,.8)}
-`;
+// ============================================================
+// 文件夹树
+// ============================================================
+var FolderTree = {
+  name: "FolderTree",
+  props: { folders: Array, selectedId: String, onSelect: Function },
+  setup: function(props) {
+    var expanded = ref({});
+    function toggle(f) { expanded.value[f.id] = !expanded.value[f.id]; }
+    function renderNode(folder, level) {
+      var hasKids = folder.children && folder.children.length > 0;
+      var isOpen = expanded.value[folder.id];
+      var isSel = props.selectedId === folder.id;
+      var indent = level * 16;
+      var arrow = hasKids ? "\u25B6" : "";
+      var arrCls = hasKids ? "ft-arr" + (isOpen ? " open" : "") : "ft-arr-place";
+      var row = [
+        h("span", { class: arrCls, onClick: function(e) { e.stopPropagation(); toggle(folder); } }, arrow),
+        h("span", { class: "ft-nm" }, folder.name || "")
+      ];
+      var children = [h("div", {
+        class: "ft-r" + (isSel ? " sel" : ""), style: "padding-left:" + (6 + indent) + "px;",
+        onClick: function() { props.onSelect(folder); }
+      }, row)];
+      if (hasKids && isOpen) {
+        var cn = []; folder.children.forEach(function(c) { cn.push(renderNode(c, level + 1)); });
+        children.push(h("div", cn));
+      }
+      return h("div", { key: folder.id }, children);
+    }
+    return function() {
+      var list = props.folders || [];
+      return h("div", { class: "ft-wrap" },
+        list.length === 0 ? h("div", { class: "ft-empty" }, "\u52A0\u8F7D\u4E2D\u2026") :
+          list.map(function(f) { return renderNode(f, 0); })
+      );
+    };
+  }
+};
 
-// ── 常量选项（与后端约定的取值保持一致，见 eagle_gallery.py items_route） ──────
-const STAR_OPTIONS = ["全部", "未评分", "1星", "2星", "3星", "4星", "5星"];
-const SHAPE_OPTIONS = [
-    { value: "全部", label: "全部比例" },
-    { value: "横向", label: "▬ 横向" },
-    { value: "纵向", label: "▮ 纵向" },
-    { value: "方形", label: "■ 方形" },
-];
-const RESOLUTION_OPTIONS = [
-    { value: "全部", label: "全部分辨率" },
-    { value: "4K", label: "≥4K" },
-    { value: "2K", label: "≥2K" },
-    { value: "1080p", label: "≥1080p" },
-    { value: "720p", label: "≥720p" },
-];
-const EXT_OPTIONS = ["jpg", "png", "webp", "gif", "mp4", "bmp", "psd", "tiff"];
-const COLOR_OPTIONS = [
-    { value: "F04A4A", label: "红" }, { value: "F0954A", label: "橙" },
-    { value: "F0E24A", label: "黄" }, { value: "6FCB4A", label: "绿" },
-    { value: "4AC6CB", label: "青" }, { value: "4A7DE0", label: "蓝" },
-    { value: "8A4AE0", label: "紫" }, { value: "E04AC6", label: "品红" },
-    { value: "222222", label: "黑" }, { value: "FFFFFF", label: "白" },
-    { value: "999999", label: "灰" },
-];
+// ============================================================
+// 图片网格（无限滚动）
+// ============================================================
+var ImageGrid = {
+  name: "ImageGrid",
+  props: { items: Array, selectedIds: Array, onSelect: Function, thumbUrl: Function, onLoadMore: Function, hasMore: Boolean, loading: Boolean, ratio: String },
+  setup: function(props) {
+    function onScroll(e) {
+      if (!props.hasMore || props.loading) return;
+      var el = e.target;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) props.onLoadMore();
+    }
+    return function() {
+      var list = props.items || [];
+      if (list.length === 0 && !props.loading) {
+        return h("div", { class: "g-empty" }, "\u6682\u65E0\u56FE\u7247");
+      }
+      var cards = list.map(function(item, idx) {
+        var sel = props.selectedIds && props.selectedIds.indexOf(item.id) >= 0;
+        var src = props.thumbUrl ? props.thumbUrl(item.id) : "";
+        var cardStyle = props.ratio && props.ratio !== "auto" ? "aspect-ratio:" + props.ratio + ";" : "";
+        
+        return h("div", {
+          key: item.id,
+          class: "g-card" + (sel ? " sel" : ""),
+          style: cardStyle,
+          onClick: function() { props.onSelect(item, idx); }
+        }, [
+          h("div", { class: "g-img-box" }, [
+            h("img", { src: src, class: "g-img",
+              onError: function(e) {
+                if (e.target._errFixed) return;
+                e.target._errFixed = true;
+                e.target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='75'%3E%3Crect width='100' height='75' fill='%23333'/%3E%3Ctext x='50' y='40' text-anchor='middle' fill='%23666' font-size='10'%3E无缩略图%3C/text%3E%3C/svg%3E";
+              }
+            })
+          ]),
+          h("div", { class: "g-idx-tag" }, "#" + idx),
+          h("div", { class: "g-size" }, (item.width || "?") + " \u00D7 " + (item.height || "?")),
+          item.star > 0 ? h("div", { class: "g-star" }, "\u2605".repeat(item.star)) : null,
+          sel ? h("div", { class: "g-check" }) : h("div")
+        ]);
+      });
+      if (props.loading) {
+        cards.push(h("div", { class: "g-load-more", key: "_loader" }, "\u52A0\u8F7D\u4E2D\u2026"));
+      }
+      return h("div", { class: "g-wrap", onScroll: onScroll }, cards);
+    };
+  }
+};
 
-const EagleGalleryApp = {
-    props: { node: { type: Object, required: true } },
-    setup(props) {
-        const node = props.node;
-
-        const searchQuery = ref("");
-        const jumpIndex = ref("");
-        const folders = ref([]);
-        const items = ref([]);
-        const total = ref(0);
-        const loading = ref(false);
-        const errorMsg = ref("");
-        const sidebarVisible = ref(true);
-        const openDropdown = ref("");
-        const tagSearch = ref("");
-
-        // ── 渲染层"懒加载"：元数据一次性拉全（很轻，纯文本 JSON），但渲染
-        // 时像 Wallhaven 一样按滚动位置一段段"露出"到 DOM 里，避免几千张
-        // <img> 同时挂载卡死浏览器。滚动到底部附近自动多显示一批。 ─────────
-        const RENDER_BATCH = 100;
-        const visibleCount = ref(RENDER_BATCH);
-        const visibleItems = computed(() => items.value.slice(0, visibleCount.value));
-        function onGridScroll(e) {
-            const el = e.target;
-            if (visibleCount.value >= items.value.length) return;
-            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) {
-                visibleCount.value = Math.min(items.value.length, visibleCount.value + RENDER_BATCH);
-            }
+// ============================================================
+// 已选图像预览条
+// ============================================================
+var SelectionBar = {
+  name: "SelectionBar",
+  props: { items: Array, selectedIds: Array, onRemove: Function, onClear: Function },
+  setup: function(props) {
+    return function() {
+      var selected = [];
+      props.items.forEach(function(item) {
+        if (props.selectedIds && props.selectedIds.indexOf(item.id) >= 0) {
+          selected.push(item);
         }
+      });
+      if (selected.length === 0) return h("div");
 
-        const filters = reactive({
-            folderId: "",
-            star: "全部",
-            shape: "全部",
-            resolution: "全部",
-            ext: [],
-            tags: [],
-            colors: [],
-        });
+      return h("div", { class: "sb-wrap" }, [
+        h("div", { class: "sb-list" }, selected.map(function(item) {
+          var src = item.id ? "/eagle_gallery/thumbnail?id=" + encodeURIComponent(item.id) : "";
+          return h("div", { class: "sb-item", key: item.id }, [
+            h("img", { src: src, class: "sb-thumb" }),
+            h("button", { class: "sb-remove", onClick: function() { props.onRemove(item); }, title: "\u79FB\u9664" }, "\u2715")
+          ]);
+        })),
+        h("div", { class: "sb-info" }, [
+          h("span", {}, "\u5DF2\u9009 " + selected.length + " \u5F20"),
+          h("button", { class: "eg-btn sb-clear", onClick: props.onClear }, "\u6E05\u9664")
+        ])
+      ]);
+    };
+  }
+};
 
-        const folderOutputMode = ref(false); // true = 整文件夹输出，忽略 selected
+// ============================================================
+// 颜色下拉
+// ============================================================
+var ColorDropdown = {
+  name: "ColorDropdown",
+  props: { modelValue: String, onChange: Function },
+  setup: function(props) {
+    var open = ref(false);
+    var palette = [
+      "#ffffff", "#f5f5f5", "#dcdcdc", "#8c8c8c", "#434343", "#000000",
+      "#f5222d", "#fa541c", "#fa8c16", "#faad14", "#fadb14", "#a0d911", "#52c41a", "#13c2c2",
+      "#1890ff", "#2f54eb", "#722ed1", "#eb2f96", "#9254de", "#f759ab",
+      "#b7eb8f", "#87e8de", "#91d5ff", "#adc6ff", "#d3adf7", "#ffadd2", "#ffd666", "#ffa940"
+    ].slice(0, 20); // 强制限制为 20 色 Ant Design 风格
+    function toggle(e) { e.stopPropagation(); open.value = !open.value; }
+    function pick(c) { props.onChange(props.modelValue === c ? "" : c); }
+    return function() {
+      var label = props.modelValue
+        ? h("span", { class: "cl-dot", style: "background:" + props.modelValue + ";border:1px solid #555" })
+        : h("span", {}, "\u2631 \u5168\u90E8\u989C\u8272");
+      var popup = null;
+      if (open.value) {
+        popup = h("div", { class: "cl-pop" }, [
+          h("div", { class: "cl-grd" }, palette.map(function(c) {
+            var active = props.modelValue === c;
+            return h("span", { key: c, class: "cl-c" + (active ? " on" : ""), style: "background:" + c + ";", onClick: function() { pick(c); } });
+          })),
+          h("div", { class: "cl-clr", onClick: function() { props.onChange(""); open.value = false; } }, "\u00D7 \u6E05\u9664")
+        ]);
+      }
+      return h("div", { class: "cl-wrap" }, [
+        h("div", { class: "cl-trig" + (open.value ? " open" : ""), onClick: toggle }, [
+          label, h("span", { class: "cl-arr" }, "\u25BC")
+        ]),
+        popup ? popup : h("div")
+      ]);
+    };
+  }
+};
 
-        const selected = reactive(new Set());
-        const selectedItems = ref([]);
+// ============================================================
+// 设置弹窗
+// ============================================================
+var SettingsDialog = {
+  name: "SettingsDialog",
+  props: { visible: Boolean, apiUrl: String, onClose: Function, onSave: Function },
+  setup: function(props) {
+    var url = ref(props.apiUrl || "");
+    return function() {
+      if (!props.visible) return h("div");
+      return h("div", { class: "sd-over", onClick: props.onClose }, [
+        h("div", { class: "sd-box", onClick: function(e) { e.stopPropagation(); } }, [
+          h("div", { class: "sd-hd" }, [h("span", {}, "\u2699 \u8BBE\u7F6E"), h("button", { class: "sd-x", onClick: props.onClose }, "\u2715")]),
+          h("div", { class: "sd-bd" }, [
+            h("label", { class: "sd-lbl" }, "Eagle API URL (含 Token)"), 
+            h("input", { 
+              class: "sd-inp", 
+              type: "text", 
+              value: url.value, 
+              placeholder: "http://localhost:41595?token=...",
+              onInput: function(e) { url.value = e.target.value; } 
+            }),
+            h("div", { style: "font-size:10px;color:#666;margin-top:8px;line-height:1.4" }, [
+              h("p", {}, "\u63D0\u793A\uFF1A\u8BF7\u8F93\u5165\u5305\u542B token \u7684\u5B8C\u6574\u94FE\u63A5\u3002"),
+              h("p", {}, "\u4F8B\u5982: http://127.0.0.1:41595?token=your_token")
+            ])
+          ]),
+          h("div", { class: "sd-ft" }, [
+            h("button", { class: "eg-btn", onClick: function() { props.onSave(url.value); } }, "\u4FDD\u5B58"),
+            h("button", { class: "eg-btn", onClick: props.onClose }, "\u53D6\u6D88")
+          ])
+        ])
+      ]);
+    };
+  }
+};
 
-        const availableTags = ref([]);
+// ============================================================
+// 主组件
+// ============================================================
+var EagleGallery = {
+  name: "EagleGallery",
+  props: { node: { type: Object, required: true } },
+  setup: function(props) {
+    // 修复：之前完全靠 document.querySelector(".eg-root") / 遍历
+    // app.graph._nodes 来猜自己属于哪个节点，画布上放两个 Eagle Gallery
+    // 节点时必定串数据。现在节点实例直接作为 prop 传进来，永远用
+    // props.node.id，准确且不用做 DOM 探测。
+    var rootElRef = null;
+    var query = ref("");
+    var folderId = ref("_all");
+    var star = ref("全部");
+    var shape = ref("全部");
+    var ratioMode = ref("16/9");
+    var color = ref("");
+    var outMode = ref("rgb");
+    var seqIdx = ref(0);
 
-        const isSettingsOpen = ref(false);
-        const eagleUrl = ref("");
+    var items = ref([]);
+    var folders = ref([]);
+    var selectedIds = ref([]);
+    var loading = ref(false);
+    var total = ref(0);
+    var err = ref("");
+    var setVis = ref(false);
+    var apiUrl = ref("http://localhost:41595");
+    var apiToken = ref("");
+    var offset = ref(0);
+    var hasMore = ref(true);
 
-        const filteredTags = computed(() => {
-            const q = tagSearch.value.trim().toLowerCase();
-            if (!q) return availableTags.value;
-            return availableTags.value.filter(t => (t.name || "").toLowerCase().includes(q));
-        });
+    function thumbUrl(id) {
+      // 主 URL: 通过 ComfyUI 代理
+      var url = "/eagle_gallery/thumbnail?id=" + encodeURIComponent(String(id));
+      return url;
+    }
 
-        function thumbUrl(id) {
-            return "/eagle_gallery/thumbnail?id=" + encodeURIComponent(id);
+    // ── API ──
+    function loadSettings() {
+      fetch("/eagle_gallery/settings").then(function(r){return r.json()}).then(function(d){
+        if(d.success&&d.settings){ apiUrl.value=d.settings.eagle_url||"http://localhost:41595"; }
+      }).catch(function(){});
+    }
+    function saveSettings(u){
+      fetch("/eagle_gallery/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({eagle_url:u})})
+        .then(function(r){return r.json()}).then(function(d){
+          if(d.success){apiUrl.value=u;setVis.value=false;resetAndLoad();}
+        }).catch(function(e){err.value="save: "+e.message;});
+    }
+    function loadFolders(){
+      fetch("/eagle_gallery/folders").then(function(r){return r.json()}).then(function(d){
+        if(d.success&&d.folders){
+          var f=d.folders;
+          if(Array.isArray(f)&&f.length>0&&f[0].id!=="_all") f.unshift({id:"_all",name:"\u5168\u90E8",children:[]});
+          folders.value=f;
         }
+      }).catch(function(e){});
+    }
 
-        // ── 数据加载 ──────────────────────────────────────────────────────
-        async function loadFolders() {
-            try {
-                const res = await fetch("/eagle_gallery/folders");
-                const data = await res.json();
-                if (data.success) {
-                    folders.value = data.folders || [];
-                    // 默认把所有含子文件夹的节点折叠起来，只显示顶层，减少初始渲染量
-                    const collapseAll = (list) => {
-                        for (const f of list) {
-                            if (f.children && f.children.length) {
-                                collapsedFolders.add(f.id);
-                                collapseAll(f.children);
-                            }
-                        }
-                    };
-                    collapseAll(folders.value);
-                }
-            } catch (e) { /* 静默，侧边栏会显示空态 */ }
-        }
+    // 重置并加载
+    function resetAndLoad() {
+      items.value = []; offset.value = 0; hasMore.value = true;
+      loadFolders(); loadMore();
+    }
 
-        async function loadTags() {
-            try {
-                const res = await fetch("/eagle_gallery/tags");
-                const data = await res.json();
-                if (data.success) availableTags.value = data.tags || [];
-            } catch (e) { /* 忽略 */ }
-        }
+    // 加载更多（无限滚动）
+    function loadMore() {
+      if (loading.value || !hasMore.value) return;
+      loading.value = true; err.value = "";
 
-        async function loadItems() {
-            if (loading.value) return;
-            loading.value = true;
-            errorMsg.value = "";
-            try {
-                const body = {
-                    folderId: filters.folderId,
-                    keywords: searchQuery.value.trim(),
-                    star: filters.star,
-                    shape: filters.shape,
-                    resolution: filters.resolution,
-                    ext: filters.ext,
-                    tags: filters.tags,
-                    colors: filters.colors.join(","),
-                    all: true,
-                };
-                const res = await fetch("/eagle_gallery/items", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body),
-                });
-                const data = await res.json();
-                if (data.success) {
-                    items.value = data.items || [];
-                    total.value = data.total || 0;
-                    visibleCount.value = RENDER_BATCH; // 新结果，重新从第一批开始露出
-                } else {
-                    errorMsg.value = "加载失败: " + (data.error || "未知错误");
-                    items.value = [];
-                }
-            } catch (e) {
-                errorMsg.value = "请求失败: " + e.message;
-                items.value = [];
-            } finally {
-                loading.value = false;
-            }
-        }
+      fetch("/eagle_gallery/items", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          offset: offset.value,
+          limit: 100,
+          folderId: folderId.value === "_all" ? "" : folderId.value,
+          keywords: query.value, star: star.value, shape: shape.value,
+          color: color.value || ""
+        })
+      }).then(function(r){return r.json()}).then(function(d){
+        loading.value = false;
+        if (d.success) {
+          var newItems = d.items || [];
+          items.value = items.value.concat(newItems);
+          offset.value = offset.value + newItems.length;
+          total.value = d.total || items.value.length;
+          hasMore.value = newItems.length >= 100;
+          if (newItems.length > 0 && !window._egLogged) {
+            window._egLogged = true;
+            console.log("[EG] first item keys:", Object.keys(newItems[0]), "| thumbnail:", newItems[0].thumbnail, "| id:", newItems[0].id);
+          }
+        } else { err.value = d.error || "fail"; }
+      }).catch(function(e){ loading.value = false; err.value = e.message; });
+    }
 
-        // ── 选择 ──────────────────────────────────────────────────────────
-        function toggleSelect(item) {
-            const id = item.id;
-            if (selected.has(id)) {
-                selected.delete(id);
-                selectedItems.value = selectedItems.value.filter(s => s.id !== id);
-            } else {
-                selected.add(id);
-                selectedItems.value.push({
-                    id,
-                    name: item.name || "",
-                    filePath: item.filePath || "",
-                    tags: item.tags || [],
-                    width: item.width || 0,
-                    height: item.height || 0,
-                    star: item.star || 0,
-                    ext: item.ext || "",
-                });
-            }
-            confirmSelection();
-        }
+    // 重新搜索
+    function doSearch() {
+      items.value = []; offset.value = 0; hasMore.value = true; err.value = "";
+      loadMore();
+    }
 
-        function removeSelection(id) {
-            selected.delete(id);
-            selectedItems.value = selectedItems.value.filter(s => s.id !== id);
-            confirmSelection();
-        }
+    function onFolder(f) { folderId.value = f.id; doSearch(); }
 
-        function clearSelection() {
-            selected.clear();
-            selectedItems.value = [];
-            confirmSelection();
-        }
+    // 将当前选中状态同步到后端缓存
+    function syncSelection() {
+      var nodeId = String(props.node.id);
+      if (!nodeId) return;
 
-        function jumpToIndex() {
-            const idx = parseInt(jumpIndex.value, 10);
-            if (isNaN(idx) || idx < 0 || !items.value.length) return;
-            const target = Math.min(idx, items.value.length - 1);
-            // 目标索引可能还没被渐进渲染出来，先把可见数量扩到能包含它
-            if (target >= visibleCount.value) {
-                visibleCount.value = Math.min(items.value.length, target + 1);
-            }
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => { // 等 DOM 渲染完成
-                    const grid = node._egGridEl;
-                    if (!grid) return;
-                    const card = grid.querySelectorAll(".eg-thumb")[target];
-                    if (!card) return;
-                    card.scrollIntoView({ behavior: "smooth", block: "center" });
-                    card.style.boxShadow = "0 0 12px 2px #4a7de0";
-                    setTimeout(() => { card.style.boxShadow = ""; }, 1200);
-                });
+      var sels = [];
+      selectedIds.value.forEach(function(sid) {
+        for (var i = 0; i < items.value.length; i++) {
+          if (items.value[i].id === sid) {
+            sels.push({
+              id: sid,
+              filePath: items.value[i].filePath || items.value[i].thumbnail || "",
+              tags: items.value[i].tags || [],
+              name: items.value[i].name || "",
+              width: items.value[i].width || 0,
+              height: items.value[i].height || 0,
             });
+            break;
+          }
         }
+      });
 
-        // ── 同步选中数据到节点（widget + 服务端缓存） ───────────────────────
-        function confirmSelection() {
-            const payload = {
-                selections: selectedItems.value,
-                outputMode: folderOutputMode.value ? "folder" : "selection",
-                folderId: filters.folderId,
-            };
-            const selectionJson = JSON.stringify(payload);
+      fetch("/eagle_gallery/cache_selection", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node_id: nodeId,
+          selections: sels,
+          output_mode: outMode.value,
+          selections_data: JSON.stringify({ selections: sels }), // 冗余一份用于前端回显
+          sequence_index: seqIdx.value
+        })
+      }).catch(function(){});
 
-            const widget = node.widgets ? node.widgets.find(w => w.name === "selection_data") : null;
-            if (widget) widget.value = selectionJson;
-            const input = node.inputs ? node.inputs.find(i => i.name === "selection_data") : null;
-            if (input) input.value = selectionJson;
-            node._selection_data = selectionJson;
-
-            fetch("/eagle_gallery/cache_selection", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            }).catch(() => {});
-
-            node.setDirtyCanvas(true, true);
-            if (node.graph) node.graph.change();
+      // 同步到 ComfyUI 原生 widget 以便后端读取（直接用 props.node，
+      // 不用再去 graph._nodes 里按 id 找一遍）
+      try {
+        var widget = (props.node.widgets || []).find(function(w) { return w.name === "selection_data"; });
+        if (widget) {
+          widget.value = JSON.stringify({ selections: sels });
+          if (props.node.graph) props.node.graph.setDirtyCanvas(true, true);
         }
+      } catch (e) {}
+    }
 
-        // ── 设置弹窗 ──────────────────────────────────────────────────────
-        async function openSettings() {
-            isSettingsOpen.value = true;
-            try {
-                const res = await fetch("/eagle_gallery/settings");
-                const data = await res.json();
-                if (data.success && data.settings) eagleUrl.value = data.settings.eagle_url || "";
-            } catch (e) { /* 忽略 */ }
+    function onImg(item, index) {
+      if (window.event && window.event.shiftKey && selectedIds.value.length > 0) {
+        // 实现 Shift 连选逻辑
+        var lastId = selectedIds.value[selectedIds.value.length - 1];
+        var lastIdx = -1;
+        for(var k=0; k<items.value.length; k++) if(items.value[k].id === lastId) { lastIdx = k; break; }
+        if (lastIdx !== -1) {
+          var start = Math.min(lastIdx, index);
+          var end = Math.max(lastIdx, index);
+          for (var j = start; j <= end; j++) {
+            var id = items.value[j].id;
+            if (selectedIds.value.indexOf(id) === -1) selectedIds.value.push(id);
+          }
+          syncSelection();
+          return;
         }
-        async function saveSettings() {
-            try {
-                await fetch("/eagle_gallery/settings", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ eagle_url: eagleUrl.value.trim() || "http://localhost:41595" }),
-                });
-            } catch (e) { /* 忽略 */ }
-            isSettingsOpen.value = false;
-        }
+      }
+      var i = selectedIds.value.indexOf(item.id);
+      if (i >= 0) selectedIds.value.splice(i, 1);
+      else selectedIds.value.push(item.id);
+      syncSelection();
+    }
 
-        // ── 下拉筛选辅助 ──────────────────────────────────────────────────
-        function toggleDropdown(name) {
-            openDropdown.value = openDropdown.value === name ? "" : name;
-        }
-        function toggleArrayValue(arr, value) {
-            const idx = arr.indexOf(value);
-            if (idx >= 0) arr.splice(idx, 1); else arr.push(value);
-        }
+    function jumpTo(idx) {
+      // 修复：改用节点自己的根元素查找 .g-wrap，而不是全局
+      // document.querySelector（画布上多个节点时会永远找到第一个）。
+      var grid = rootElRef ? rootElRef.querySelector(".g-wrap") : null;
+      if (!grid) return;
+      var cards = grid.querySelectorAll(".g-card");
+      if (cards[idx]) {
+        cards[idx].scrollIntoView({ behavior: "smooth", block: "center" });
+        cards[idx].classList.add("jump-hit");
+        setTimeout(function(){ cards[idx].classList.remove("jump-hit"); }, 2000);
+      }
+    }
 
-        function selectFolder(id) {
-            filters.folderId = id;
-        }
+    function removeSelected(item) {
+      var i = selectedIds.value.indexOf(item.id);
+      if (i >= 0) selectedIds.value.splice(i, 1);
+      syncSelection();
+    }
 
-        // 折叠文件夹树的展开状态
-        const collapsedFolders = reactive(new Set());
-        function toggleFolderCollapse(id) {
-            if (collapsedFolders.has(id)) collapsedFolders.delete(id);
-            else collapsedFolders.add(id);
-        }
+    function clearSel() { selectedIds.value = []; syncSelection(); }
 
-        // 文件夹搜索：扁平匹配所有层级（不区分是否折叠），类似 Eagle 原生的"筛选"
-        const folderSearch = ref("");
-        function flattenFolders(list, acc) {
-            for (const f of list) {
-                acc.push(f);
-                if (f.children && f.children.length) flattenFolders(f.children, acc);
-            }
-            return acc;
-        }
-        const allFoldersFlat = computed(() => flattenFolders(folders.value, []));
-        const totalFolderCount = computed(() => allFoldersFlat.value.length);
-        const flatFilteredFolders = computed(() => {
-            const q = folderSearch.value.trim().toLowerCase();
-            if (!q) return [];
-            return allFoldersFlat.value.filter(f => (f.name || "").toLowerCase().includes(q));
-        });
+    function onColor(c) { color.value = c; doSearch(); }
 
-        watch(() => [filters.folderId, filters.star, filters.shape, filters.resolution, filters.ext.slice(), filters.tags.slice(), filters.colors.slice()],
-            () => { loadItems(); }, { deep: false });
+    // 修复：不再依赖前面通过 DOM CustomEvent 转发的恢复数据（那套逻辑
+    // 挂在 document 上查找 .eg-root，多节点场景下会拿错），直接用
+    // props.node.id 请求一次缓存的选中数据。
+    function restoreSelection() {
+      var nodeId = String(props.node.id);
+      fetch("/eagle_gallery/cache_selection?node_id=" + encodeURIComponent(nodeId))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (d.success && d.selections && d.selections.length > 0) {
+            var ids = [];
+            d.selections.forEach(function(s) { ids.push(s.id); });
+            selectedIds.value = ids;
+            outMode.value = d.output_mode || "rgb";
+            seqIdx.value = d.sequence_index || 0;
+          }
+        }).catch(function() {});
+    }
 
-        onMounted(() => {
-            loadFolders();
-            loadTags();
-            loadItems();
-        });
+    onMounted(function() {
+      loadSettings(); loadFolders(); loadMore();
+      // ComfyUI 节点创建之初 id 可能还是临时 id，稍等一下再按最终 id 恢复
+      setTimeout(restoreSelection, 500);
+    });
 
-        return {
-            searchQuery, jumpIndex, folders, items, total, loading, errorMsg,
-            sidebarVisible, openDropdown, tagSearch, filters, filteredTags,
-            folderOutputMode, selected, selectedItems, isSettingsOpen, eagleUrl,
-            STAR_OPTIONS, SHAPE_OPTIONS, RESOLUTION_OPTIONS, EXT_OPTIONS, COLOR_OPTIONS,
-            thumbUrl, loadItems, toggleSelect, removeSelection, clearSelection,
-            jumpToIndex, openSettings, saveSettings, toggleDropdown, toggleArrayValue,
-            selectFolder, collapsedFolders, toggleFolderCollapse,
-            folderSearch, totalFolderCount, flatFilteredFolders,
-            setGridEl: (el) => { node._egGridEl = el; },
-            visibleItems, visibleCount, onGridScroll,
-        };
-    },
-    template: `
-    <div class="eg-root" @click="openDropdown = ''">
-        <!-- 预览条 -->
-        <div class="eg-preview">
-            <template v-if="selectedItems.length === 0">
-                <div class="eg-preview-empty">选中图片将显示在这里</div>
-            </template>
-            <template v-else>
-                <div class="eg-preview-thumb" v-for="sel in selectedItems" :key="sel.id">
-                    <img :src="thumbUrl(sel.id)" :title="sel.name" @error="$event.target.style.display='none'">
-                    <div class="eg-preview-del" @click.stop="removeSelection(sel.id)">×</div>
-                </div>
-                <button class="eg-btn" style="flex-shrink:0;height:60px;align-self:center;margin-left:4px" @click.stop="clearSelection">清除</button>
-            </template>
-        </div>
+    return function() {
+      var mainKids = [];
+      if (err.value) mainKids.push(h("div", { class: "eg-err" }, err.value));
+      mainKids.push(h(ImageGrid, {
+        items: items.value, selectedIds: selectedIds.value, onSelect: onImg,
+        thumbUrl: thumbUrl, onLoadMore: loadMore, hasMore: hasMore.value, loading: loading.value,
+        ratio: ratioMode.value
+      }));
 
-        <!-- 工具栏 -->
-        <div class="eg-toolbar" @click.stop>
-            <input class="eg-search" type="text" v-model="searchQuery" placeholder="搜索关键词..." @keydown.enter="loadItems">
-            <button class="eg-btn primary" @click="loadItems">🔍 搜索</button>
+      return h("div", { class: "eg-root", ref: function(el) { rootElRef = el; } }, [
+        setVis.value ? h(SettingsDialog, { visible: true, apiUrl: apiUrl.value,
+          onClose: function() { setVis.value = false; }, onSave: saveSettings
+        }) : h("div"),
 
-            <input class="eg-search" type="number" v-model="jumpIndex" placeholder="# 索引" style="min-width:60px;max-width:80px;flex:0" title="输入数字跳转到对应索引（0起）" @keydown.enter="jumpToIndex">
-            <button class="eg-btn" @click="jumpToIndex" title="跳转到指定索引">↗ 跳转</button>
+        // ═══ 工具栏 ═══
+        h("div", { class: "eg-bar" }, [
+          h("input", { class: "eg-srch", type: "text", value: query.value, placeholder: "\u641C\u7D22\u2026",
+            onInput: function(e) { query.value = e.target.value; },
+            onKeyup: function(e) { if (e.key === "Enter") doSearch(); }
+          }),
+          h(ColorDropdown, { modelValue: color.value, onChange: onColor }),
+          h("select", { class: "eg-sel", value: shape.value,
+            onChange: function(e) { shape.value = e.target.value; doSearch(); }
+          }, [
+            h("option", { value: "\u5168\u90E8" }, "\u25A1 \u5168\u90E8\u5F62\u72B6"),
+            h("option", { value: "\u6A2A\u5411" }, "\u25AC \u6A2A\u5411"),
+            h("option", { value: "\u7EB5\u5411" }, "\u25AE \u7EB5\u5411"),
+            h("option", { value: "\u65B9\u5F62" }, "\u25A0 \u65B9\u5F62")
+          ]),
+          h("select", { class: "eg-sel", value: star.value,
+            onChange: function(e) { star.value = e.target.value; doSearch(); }
+          }, [
+            h("option", { value: "\u5168\u90E8" }, "\u2605 \u5168\u90E8\u8BC4\u5206"),
+            h("option", { value: "5" }, "\u2605\u2605\u2605\u2605\u2605"),
+            h("option", { value: "4" }, "\u2605\u2605\u2605\u2605"),
+            h("option", { value: "3" }, "\u2605\u2605\u2605"),
+            h("option", { value: "2" }, "\u2605\u2605"),
+            h("option", { value: "1" }, "\u2605")
+          ]),
+          h("select", { class: "eg-sel", value: ratioMode.value, 
+            onChange: function(e) { ratioMode.value = e.target.value; } 
+          }, [
+            h("option", { value: "1/1" }, "1:1 \u65B9\u5F62"),
+            h("option", { value: "16/9" }, "16:9 \u5BBD\u5C4F"),
+            h("option", { value: "4/3" }, "4:3 \u6807\u51C6"),
+            h("option", { value: "2/3" }, "2:3 \u7EB5\u5411"),
+            h("option", { value: "auto" }, "\u81EA\u9002\u5E94")
+          ]),
+          h("div", { class: "eg-idx" }, [
+            h("label", { class: "eg-idl" }, "\u8DF3\u8F6C:"),
+            h("input", { class: "eg-idi", type: "number", placeholder: "#",
+              onKeyup: function(e) { if(e.key === "Enter") jumpTo(parseInt(e.target.value)||0); }
+            })
+          ]),
+          h("div", { class: "eg-mode" }, [
+            h("button", { class: "eg-mo" + (outMode.value === "rgb" ? " on" : ""), onClick: function() { outMode.value = "rgb"; syncSelection(); } }, "RGB"),
+            h("button", { class: "eg-mo" + (outMode.value === "rgba" ? " on" : ""), onClick: function() { outMode.value = "rgba"; syncSelection(); } }, "RGBA")
+          ]),
+          h("div", { class: "eg-idx" }, [
+            h("label", { class: "eg-idl" }, "\u8D77\u59CB:"),
+            h("input", { class: "eg-idi", type: "number", min: "0", value: seqIdx.value,
+              onInput: function(e) { seqIdx.value = parseInt(e.target.value) || 0; syncSelection(); }
+            })
+          ]),
+          h("button", { class: "eg-btn eg-bt1", onClick: doSearch, title: "\u5237\u65B0" }, "\u21BB"),
+          h("button", { class: "eg-btn eg-bt1", onClick: clearSel, title: "\u6E05\u9664\u9009\u4E2D" }, "\u2715"),
+          h("button", { class: "eg-btn eg-bt1", onClick: function() { setVis.value = true; }, title: "\u8BBE\u7F6E" }, "\u2699")
+        ]),
 
-            <span style="color:#888;font-size:11px;white-space:nowrap">共 {{ total }} 张</span>
+        // ═══ 主体 ═══
+        h("div", { class: "eg-body" }, [
+          h("div", { class: "eg-side" }, [
+            h(FolderTree, { folders: folders.value, selectedId: folderId.value, onSelect: onFolder })
+          ]),
+          h("div", { class: "eg-main" }, mainKids)
+        ]),
 
-            <select class="eg-btn" v-model="filters.star" style="min-width:80px">
-                <option v-for="s in STAR_OPTIONS" :key="s" :value="s">{{ s === '全部' ? '⭐ 全部' : '⭐ ' + s }}</option>
-            </select>
-
-            <select class="eg-btn" v-model="filters.shape" style="min-width:80px">
-                <option v-for="s in SHAPE_OPTIONS" :key="s.value" :value="s.value">{{ s.label }}</option>
-            </select>
-
-            <select class="eg-btn" v-model="filters.resolution" style="min-width:90px">
-                <option v-for="r in RESOLUTION_OPTIONS" :key="r.value" :value="r.value">{{ r.label }}</option>
-            </select>
-
-            <!-- 格式（多选） -->
-            <div class="eg-dropdown">
-                <button class="eg-btn" :class="{active: filters.ext.length}" @click.stop="toggleDropdown('ext')">格式{{ filters.ext.length ? '('+filters.ext.length+')' : '' }} ▼</button>
-                <div class="eg-dropdown-menu" :class="{show: openDropdown==='ext'}" @click.stop>
-                    <div class="eg-dropdown-item" v-for="ex in EXT_OPTIONS" :key="ex">
-                        <label><input type="checkbox" :checked="filters.ext.includes(ex)" @change="toggleArrayValue(filters.ext, ex)"> {{ ex.toUpperCase() }}</label>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 标签（多选+搜索） -->
-            <div class="eg-dropdown">
-                <button class="eg-btn" :class="{active: filters.tags.length}" @click.stop="toggleDropdown('tags')">标签{{ filters.tags.length ? '('+filters.tags.length+')' : '' }} ▼</button>
-                <div class="eg-dropdown-menu" :class="{show: openDropdown==='tags'}" @click.stop>
-                    <input class="eg-dropdown-search" type="text" v-model="tagSearch" placeholder="搜索标签...">
-                    <div class="eg-dropdown-item" v-for="t in filteredTags" :key="t.name">
-                        <label><input type="checkbox" :checked="filters.tags.includes(t.name)" @change="toggleArrayValue(filters.tags, t.name)"> {{ t.name }} <span style="color:#666">({{ t.count }})</span></label>
-                    </div>
-                    <div v-if="!filteredTags.length" style="color:#666;padding:4px 6px">无匹配标签</div>
-                </div>
-            </div>
-
-            <!-- 颜色（多选） -->
-            <div class="eg-dropdown">
-                <button class="eg-btn" :class="{active: filters.colors.length}" @click.stop="toggleDropdown('colors')">颜色{{ filters.colors.length ? '('+filters.colors.length+')' : '' }} ▼</button>
-                <div class="eg-dropdown-menu" :class="{show: openDropdown==='colors'}" @click.stop>
-                    <div class="eg-dropdown-item" v-for="c in COLOR_OPTIONS" :key="c.value">
-                        <label><input type="checkbox" :checked="filters.colors.includes(c.value)" @change="toggleArrayValue(filters.colors, c.value)">
-                        <span class="eg-color-dot" :style="{background:'#'+c.value}"></span> {{ c.label }}</label>
-                    </div>
-                </div>
-            </div>
-
-            <button class="eg-btn" @click="sidebarVisible = !sidebarVisible" title="切换文件夹树">📂</button>
-            <button class="eg-btn" :class="{active: folderOutputMode}" @click="folderOutputMode = !folderOutputMode; confirmSelection()" title="开启后输出整个文件夹，而非仅选中项">📦 整夹输出</button>
-            <button class="eg-btn" @click="openSettings" title="设置">⚙️</button>
-        </div>
-
-        <!-- 主体 -->
-        <div class="eg-main">
-            <div class="eg-sidebar" v-show="sidebarVisible">
-                <div class="eg-sidebar-header">文件夹 ({{ totalFolderCount }})</div>
-                <input class="eg-folder-search" type="text" v-model="folderSearch" placeholder="🔍 筛选文件夹...">
-                <div class="eg-folder-item all" :class="{active: filters.folderId===''}" @click="selectFolder('')">
-                    <span class="eg-folder-arrow-spacer"></span>
-                    <span class="eg-folder-icon">📁</span> <span class="eg-folder-name">全部文件夹</span>
-                </div>
-                <template v-if="folderSearch.trim()">
-                    <div class="eg-folder-item" v-for="f in flatFilteredFolders" :key="f.id"
-                         :class="{active: filters.folderId===f.id}" style="padding-left:6px" @click="selectFolder(f.id)">
-                        <span class="eg-folder-arrow-spacer"></span>
-                        <span class="eg-folder-icon">📁</span>
-                        <span class="eg-folder-name">{{ f.name || '未命名' }}</span>
-                        <span class="eg-folder-count" v-if="f.imageCount !== undefined && f.imageCount !== null">{{ f.imageCount }}</span>
-                    </div>
-                    <div class="eg-empty" v-if="!flatFilteredFolders.length" style="padding:16px 8px">无匹配文件夹</div>
-                </template>
-                <template v-else>
-                    <template v-if="folders.length">
-                        <FolderNode v-for="f in folders" :key="f.id" :folder="f" :active-id="filters.folderId"
-                                    :collapsed="collapsedFolders" @select="selectFolder" @toggle="toggleFolderCollapse" />
-                    </template>
-                    <div class="eg-empty" v-else>{{ folders.length === 0 ? '加载中或无文件夹' : '' }}</div>
-                </template>
-            </div>
-
-            <div class="eg-grid" :ref="setGridEl" @scroll="onGridScroll">
-                <div class="eg-loading" v-if="loading">🔄 加载中...</div>
-                <div class="eg-error" v-else-if="errorMsg">{{ errorMsg }}</div>
-                <div class="eg-empty" v-else-if="!items.length">暂无结果</div>
-                <template v-else>
-                    <div class="eg-thumb" v-for="(item, i) in visibleItems" :key="item.id"
-                         :class="{selected: selected.has(item.id)}"
-                         @click="toggleSelect(item)">
-                        <img :src="thumbUrl(item.id)" loading="lazy" :alt="item.name" @error="$event.target.style.display='none'">
-                        <span class="eg-thumb-index">#{{ i }}</span>
-                        <span class="eg-thumb-star" v-if="item.star">{{ '★'.repeat(item.star) }}</span>
-                        <span class="eg-thumb-res" v-if="item.width && item.height">{{ item.width }}x{{ item.height }}</span>
-                        <div class="eg-thumb-info">
-                            <span>{{ item.tags && item.tags.length ? '🏷 ' + item.tags.length : '' }}</span>
-                            <span>{{ (item.name || '未命名').slice(0, 12) }}</span>
-                        </div>
-                    </div>
-                    <div class="eg-load-more-hint" v-if="visibleCount < items.length">继续下滑加载更多…（已显示 {{ visibleItems.length }} / {{ total }}）</div>
-                </template>
-            </div>
-        </div>
-
-        <div class="eg-footer">
-            <span class="eg-pageinfo">共 {{ total }} 张 | 已加载显示 {{ visibleItems.length }} 张 | 选中 {{ selected.size }} 张{{ folderOutputMode ? ' | 整夹输出模式' : '' }}</span>
-        </div>
-
-        <!-- 设置弹窗 -->
-        <div class="eg-settings-backdrop" v-if="isSettingsOpen" @click.self="isSettingsOpen = false">
-            <div class="eg-settings-panel">
-                <h3>设置</h3>
-                <label>Eagle API URL</label>
-                <input type="text" v-model="eagleUrl" placeholder="http://localhost:41595">
-                <div class="eg-settings-hint">支持在 URL 末尾添加 <code>?token=xxx</code> 进行认证，如 <code>http://localhost:41595/?token=abc123</code></div>
-                <div class="eg-settings-footer">
-                    <a class="eg-settings-github" href="https://github.com/Yao3596/ComfyUI_Eagle_Suite" target="_blank" rel="noopener">
-                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> GitHub
-                    </a>
-                    <span class="eg-settings-author">Yao3596 / ComfyUI_Eagle_Suite</span>
-                </div>
-                <div class="eg-settings-row">
-                    <button class="eg-btn" @click="isSettingsOpen = false">取消</button>
-                    <button class="eg-btn primary" @click="saveSettings">保存</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    `,
+        // ═══ 底栏：已选图像预览条 + 总数 ═══
+        h("div", { class: "eg-foot" }, [
+          h(SelectionBar, {
+            items: items.value, selectedIds: selectedIds.value,
+            onRemove: removeSelected, onClear: clearSel
+          }),
+          h("div", { class: "eg-sta" }, "\u5171 " + total.value + " \u5F20 \u2502 \u9009\u4E2D " + selectedIds.value.length + " \u5F20")
+        ])
+      ]);
+    };
+  }
 };
 
-// ── 文件夹树子组件（递归，原生 Eagle 风格：展开箭头 + 数量 + 层级缩进） ──────
-const FolderNode = {
-    name: "FolderNode",
-    props: { folder: Object, activeId: String, collapsed: Object, depth: { type: Number, default: 0 } },
-    emits: ["select", "toggle"],
-    template: `
-    <div>
-        <div class="eg-folder-item" :class="{active: activeId === folder.id}"
-             :style="{paddingLeft: (6 + depth * 14) + 'px'}" @click="$emit('select', folder.id)">
-            <span class="eg-folder-arrow" v-if="folder.children && folder.children.length"
-                  @click.stop="$emit('toggle', folder.id)">{{ collapsed.has(folder.id) ? '▶' : '▼' }}</span>
-            <span class="eg-folder-arrow-spacer" v-else></span>
-            <span class="eg-folder-icon">📁</span>
-            <span class="eg-folder-name">{{ folder.name || '未命名' }}</span>
-            <span class="eg-folder-count" v-if="folder.imageCount !== undefined && folder.imageCount !== null">{{ folder.imageCount }}</span>
-        </div>
-        <div v-if="folder.children && folder.children.length && !collapsed.has(folder.id)">
-            <FolderNode v-for="c in folder.children" :key="c.id" :folder="c" :active-id="activeId"
-                        :collapsed="collapsed" :depth="depth + 1"
-                        @select="$emit('select', $event)" @toggle="$emit('toggle', $event)" />
-        </div>
-    </div>
-    `,
-};
-EagleGalleryApp.components = { FolderNode };
+// ============================================================
+// CSS
+// ============================================================
+var CSS = [
+  ".eg-root{display:flex;flex-direction:column;height:100%;background:#121216;color:#bbb;font:12px/1.5 system-ui}",
+  ".eg-bar{display:flex;gap:6px;padding:6px 8px;background:#1a1a22;border-bottom:1px solid #2a2a32;align-items:center;flex-wrap:wrap}",
+  ".eg-srch{flex:1;min-width:100px;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:12px}",
+  ".eg-srch:focus{outline:none;border-color:#4a7de0}",
+  ".eg-sel{padding:5px 6px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:11px;cursor:pointer}",
+  ".eg-mode{display:flex;border:1px solid #333;border-radius:4px;overflow:hidden;height:26px}",
+  ".eg-mo{padding:4px 9px;border:none;background:#0e0e12;color:#777;font-size:10px;cursor:pointer;line-height:16px}",
+  ".eg-mo.on{background:#4a7de0;color:#fff;font-weight:600}",
+  ".eg-idx{display:flex;align-items:center;gap:3px}",
+  ".eg-idl{font-size:10px;color:#777}",
+  ".eg-idi{width:36px;padding:3px;border:1px solid #333;border-radius:3px;background:#0e0e12;color:#c8c8cc;font-size:10px;text-align:center}",
+  ".eg-btn{padding:5px 12px;border:1px solid #333;border-radius:6px;background:#1c1c26;color:#c8c8cc;font-size:11px;cursor:pointer;transition:all .2s;box-shadow:0 1px 2px rgba(0,0,0,0.2)}",
+  ".eg-btn:hover{background:#2a2a36;border-color:#4a7de0;color:#fff;transform:translateY(-1px)}",
+  ".eg-bt1{padding:5px 8px;font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center}",
+  /* 颜色下拉优化 */
+  ".cl-wrap{position:relative;display:inline-block;min-width:90px}",
+  ".cl-trig{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 10px;border:1px solid #333;border-radius:6px;background:#0e0e12;cursor:pointer;user-select:none;transition:border-color .2s}",
+  ".cl-trig:hover{border-color:#555;background:#16161e}",
+  ".cl-trig.open{border-color:#4a7de0;background:#16161e}",
+  ".cl-dot{width:14px;height:14px;border-radius:50%;display:inline-block;box-shadow:0 0 4px rgba(0,0,0,0.5)}",
+  ".cl-arr{font-size:8px;color:#666;transition:transform .2s}",
+  ".cl-trig.open .cl-arr{transform:rotate(180deg)}",
+  ".cl-pop{position:absolute;top:100%;left:0;margin-top:8px;background:#1a1a24;border:1px solid #333;border-radius:10px;padding:12px;z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,0.7);animation:clFadeIn .2s ease-out}",
+  "@keyframes clFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}",
+  ".cl-grd{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;width:150px}",
+  ".cl-c{width:24px;height:24px;border-radius:6px;cursor:pointer;border:1px solid rgba(255,255,255,.05);display:inline-block;box-sizing:border-box;transition:all .15s;position:relative}",
+  ".cl-c:hover{transform:scale(1.15);border-color:rgba(255,255,255,.3);z-index:2;box-shadow:0 4px 8px rgba(0,0,0,0.3)}",
+  ".cl-c.on{border:2px solid #fff;box-shadow:0 0 10px rgba(255,255,255,0.6);transform:scale(1.05)}",
+  ".cl-c.on::after{content:'\u2714';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,0.8)}",
+  ".cl-clr{margin-top:10px;padding:6px;font-size:11px;color:#888;cursor:pointer;text-align:center;border-radius:4px;background:rgba(255,255,255,0.03);transition:all .2s}",
+  ".cl-clr:hover{color:#fff;background:rgba(255,255,255,0.08)}",
+  /* 主体 */
+  ".eg-body{display:flex;flex:1;overflow:hidden;background:#0e0e12}",
+  ".eg-side{width:220px;min-width:180px;max-width:280px;border-right:1px solid #2a2a32;background:#16161e;overflow:auto;padding:8px 0;scrollbar-width:thin;flex-shrink:0}",
+  ".ft-wrap{user-select:none}",
+  ".ft-empty{padding:12px;color:#555;font-size:11px;text-align:center}",
+  ".ft-r{display:flex;align-items:center;padding:6px 12px;cursor:pointer;white-space:nowrap;overflow:hidden;border-radius:0 20px 20px 0;margin:1px 0;transition:all .15s;font-size:11px;color:#999;position:relative}",
+  ".ft-r:hover{background:rgba(255,255,255,0.05);color:#ccc}",
+  ".ft-r.sel{background:linear-gradient(90deg, #3a5a8a, #4a7de0);color:#fff;font-weight:600;box-shadow:0 2px 4px rgba(0,0,0,0.2)}",
+  ".ft-arr,.ft-arr-place{width:18px;font-size:10px;color:#555;text-align:center;flex-shrink:0;transition:transform .25s}",
+  ".ft-arr.open{transform:rotate(90deg);color:#999}",
+  ".ft-ico{flex-shrink:0;margin:0 6px;font-size:12px}",
+  ".ft-nm{overflow:hidden;text-overflow:ellipsis;flex:1}",
+  ".eg-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:400px;background:#0f0f14;position:relative}",
+  ".eg-err{padding:12px;color:#f66;font-size:12px;text-align:center;background:rgba(255,0,0,0.05)}",
+  /* 图片网格 - 响应式列数，最小160px，使用 auto-fill 确保列数随宽度变化 */
+  ".g-wrap{display:grid;grid-template-columns:repeat(auto-fill, minmax(160px, 1fr));gap:12px;padding:16px;overflow-y:auto;flex:1;align-content:start;width:100%;box-sizing:border-box;min-height:0}",
+  ".g-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#555;font-size:14px;gap:10px}",
+  ".g-card{position:relative;border-radius:10px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#1a1a24;transition:all .2s;display:flex;flex-direction:column;width:100%;min-height:80px;box-shadow:0 4px 12px rgba(0,0,0,0.3)}",
+  ".g-card.jump-hit{box-shadow:0 0 15px 3px #4a7de0;border-color:#4a7de0;transform:scale(1.02)}",
+  ".g-idx-tag{position:absolute;top:6px;left:6px;padding:2px 5px;background:rgba(74,125,224,0.85);color:#fff;font-size:10px;border-radius:4px;font-weight:bold;z-index:5}",
+  ".g-star{position:absolute;bottom:6px;left:6px;color:#fc0;font-size:10px;text-shadow:0 1px 2px rgba(0,0,0,0.8);z-index:5}",
+  ".g-card:hover{border-color:#4a7de0;transform:translateY(-4px);box-shadow:0 8px 20px rgba(0,0,0,0.5);z-index:10}",
+  ".g-card.sel{border-color:#4a7de0;background:#1e2a40;box-shadow:inset 0 0 0 2px #4a7de0}",
+  ".g-img-box{position:relative;width:100%;height:100%;min-height:100px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000}",
+  ".g-img{width:100%;height:100%;object-fit:cover;display:block;background:#222;transition:opacity .3s ease}",
+  ".g-badge{position:absolute;top:6px;left:6px;background:linear-gradient(135deg, #4a7de0, #2a4a8a);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;line-height:1;box-shadow:0 2px 4px rgba(0,0,0,0.3);z-index:2}",
+  ".g-size{position:absolute;top:6px;right:6px;padding:2px 6px;background:rgba(0,0,0,0.8);color:#fff;font-size:10px;border-radius:4px;z-index:5;pointer-events:none;backdrop-filter:blur(2px);font-family:monospace}",
+  ".g-check{position:absolute;inset:0;background:rgba(74,125,224,0.3);display:flex;align-items:center;justify-content:center;z-index:6;pointer-events:none;animation:checkPop .2s cubic-bezier(0.175, 0.885, 0.32, 1.275)}",
+  "@keyframes checkPop{from{transform:scale(0.8);opacity:0}to{transform:scale(1);opacity:1}}",
+  ".g-check::after{content:'\u2714';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}",
+  ".g-load-more{padding:30px;color:#777;font-size:13px;text-align:center;grid-column:1/-1;background:linear-gradient(transparent, rgba(26,26,36,0.8));border-radius:0 0 10px 10px}",
+  /* 已选图像预览条 */
+  ".eg-foot{display:flex;align-items:center;padding:4px 8px;border-top:1px solid #2a2a32;background:#1a1a22;min-height:56px;box-shadow:0 -4px 10px rgba(0,0,0,.2);z-index:100}",
+  ".sb-wrap{display:flex;align-items:center;flex:1;overflow:hidden;gap:12px;padding:0 4px}",
+  ".sb-list{display:flex;gap:6px;overflow-x:auto;flex:1;padding:6px 0;scrollbar-width:thin;mask-image: linear-gradient(to right, black 95%, transparent);}",
+  ".sb-list::-webkit-scrollbar {height:4px;}",
+  ".sb-list::-webkit-scrollbar-thumb {background:#333;border-radius:2px;}",
+  ".sb-item{position:relative;flex-shrink:0;width:48px;height:48px;border-radius:6px;overflow:hidden;border:1px solid #333;background:#000;transition:transform .1s, border-color .2s;box-shadow:0 2px 5px rgba(0,0,0,0.5)}",
+  ".sb-item:hover{transform:scale(1.1);border-color:#4a7de0;z-index:5}",
+  ".sb-thumb{width:100%;height:100%;object-fit:cover}",
+  ".sb-remove{position:absolute;top:-2px;right:-2px;width:18px;height:18px;background:rgba(229,85,85,0.95);color:#fff;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;z-index:10;border:1.5px solid #1a1a22;opacity:0;transition:opacity 0.2s}",
+  ".sb-item:hover .sb-remove{opacity:1}",
+  ".sb-info{display:flex;align-items:center;gap:10px;font-size:11px;color:#999;white-space:nowrap;flex-shrink:0;border-left:1px solid #333;padding-left:12px}",
+  ".sb-clear{padding:3px 7px;font-size:10px}",
+  ".eg-sta{font-size:10px;color:#777;white-space:nowrap;padding:0 8px}",
+  /* 设置弹窗 */
+  ".sd-over{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:9999}",
+  ".sd-box{background:#1c1c26;border:1px solid #444;border-radius:7px;width:340px;max-width:90vw;box-shadow:0 6px 24px rgba(0,0,0,.6)}",
+  ".sd-hd{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid #333;font-size:14px;font-weight:600;color:#ddd}",
+  ".sd-x{background:none;border:none;color:#777;font-size:18px;cursor:pointer}.sd-x:hover{color:#fff}",
+  ".sd-bd{padding:16px}",
+  ".sd-lbl{display:block;margin-bottom:4px;margin-top:10px;font-size:11px;color:#999}.sd-lbl:first-child{margin-top:0}",
+  ".sd-inp{width:100%;padding:6px 9px;border:1px solid #444;border-radius:4px;background:#0e0e12;color:#ccc;font-size:12px;box-sizing:border-box}",
+  ".sd-inp:focus{outline:none;border-color:#4a7de0}",
+  ".sd-ft{display:flex;justify-content:flex-end;gap:6px;padding:10px 16px;border-top:1px solid #333}"
+].join("\n");
 
-// ── ComfyUI 扩展注册 ─────────────────────────────────────────────────────────
+// ============================================================
 app.registerExtension({
-    name: "EagleSuite.EagleGallery",
+  // 修复：统一只保留这一个注册名/一份前端文件。之前 eagle_gallery.js（旧版）
+  // 和 eagle_gallery_vue.js 两份脚本会同时给 EagleGalleryNode 挂
+  // onNodeCreated，各自创建一个 DOM widget、一个 Vue 实例，画面上叠出两个
+  // 画廊、高度互相打架——这也是节点会"无限往下长"的原因之一。
+  // web/js 目录下现在应当只放这一份文件。
+  name: "EagleSuite.EagleGallery",
+  async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name !== "EagleGalleryNode") return;
 
-    beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "EagleGalleryNode") return;
+    // 隐藏原生 widgets：trigger（隐藏触发用）/ selection_data（由本组件写入，
+    // 无需展示）。用 setTimeout 重试而不是依赖 onDrawBackground 硬压 y/height，
+    // 后者只是不画出来，widget 占的布局空间还在，容易和 DOM widget 高度计算打架。
+    var hideWidgets = function(node) {
+      if (!node.widgets || !node.widgets.length) return false;
+      var names = ["trigger", "selection_data"];
+      var found = false;
+      for (var i = 0; i < node.widgets.length; i++) {
+        var w = node.widgets[i];
+        if (names.indexOf(w.name) === -1) continue;
+        w.type = "hidden";
+        w.computeSize = function () { return [0, -4]; };
+        w.hidden = true;
+        w.draw = function () {};
+        found = true;
+      }
+      if (found) node.setDirtyCanvas(true, true);
+      return found;
+    };
 
-        const onNodeCreated = nodeType.prototype.onNodeCreated;
-        nodeType.prototype.onNodeCreated = function () {
-            onNodeCreated?.apply(this, arguments);
-            this.setSize([960, 760]);
+    var orig = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function() {
+      if (orig) orig.apply(this, arguments);
+      if (this._egInit) return; // 防止同一节点被重复初始化
+      this._egInit = true;
 
-            // 隐藏 selection_data 文本 widget（数据通过本组件写入，无需展示）
-            const hideSel = (node) => {
-                const w = node.widgets?.find(x => x.name === "selection_data");
-                if (!w) return false;
-                w.type = "hidden";
-                w.computeSize = () => [0, -4];
-                w.hidden = true;
-                w.draw = () => {};
-                node.setDirtyCanvas(true, true);
-                return true;
-            };
-            setTimeout(() => { if (!hideSel(this)) setTimeout(() => hideSel(this), 500); }, 300);
+      this.setSize([960, 760]);
+      setTimeout(function (node) {
+        return function () { if (!hideWidgets(node)) setTimeout(function () { hideWidgets(node); }, 500); };
+      }(this), 300);
 
-            if (!document.getElementById("eg-style")) {
-                const style = document.createElement("style");
-                style.id = "eg-style";
-                style.textContent = CSS;
-                document.head.appendChild(style);
-            }
+      if (!document.getElementById("eg-style")) {
+        var s = document.createElement("style"); s.id = "eg-style"; s.textContent = CSS; document.head.appendChild(s);
+      }
 
-            const container = document.createElement("div");
-            container.style.width = "100%";
-            container.style.boxSizing = "border-box";
-            container.style.overflow = "hidden"; // 防止内容把容器撑高，撑爆节点
+      var el = document.createElement("div");
+      el.style.width = "100%";
+      el.style.boxSizing = "border-box";
+      el.style.overflow = "hidden"; // 不设置 height:100%——相对未定高父容器会失效，
+                                      // 内容多高容器就撑多高，节点因此"无限往下增高"
 
-            const widget = this.addDOMWidget("eagle_gallery", "div", container, { serialize: false });
+      var widget = this.addDOMWidget("eagle_gallery", "div", el, { serialize: false });
 
-            // 统一的高度应用函数：不用 100%（相对未定高的父容器在浏览器里会失效，
-            // 导致内容把容器撑到多高就是多高，节点因此"无限往下增高"）。
-            // 而是每次都直接给一个确定的像素高度。
-            const applyHeight = (nodeHeight) => {
-                const h = Math.max(400, nodeHeight - 100);
-                container.style.height = h + "px";
-                widget.computeSize = (w) => [w, h];
-                return h;
-            };
-            applyHeight(this.size[1]); // 创建的那一刻立即定死高度，不等 onResize 触发
+      // 统一的高度应用函数：每次都给一个确定的像素高度，不依赖 %。
+      var applyHeight = function (nodeHeight) {
+        var h = Math.max(400, nodeHeight - 100);
+        el.style.height = h + "px";
+        widget.computeSize = function (w) { return [w, h]; };
+        return h;
+      };
+      applyHeight(this.size[1]); // 创建时立刻定死高度，不等 onResize 触发
 
-            const vueApp = createApp(EagleGalleryApp, { node: this });
-            vueApp.mount(container);
-            this._vueApp = vueApp;
+      var nodeRef = this;
+      var resizeObserver = new ResizeObserver(function (entries) {
+        for (var entry of entries) {
+          var width = entry.contentRect.width;
+          if (width > 0) el.style.width = width + "px";
+        }
+      });
+      setTimeout(function () {
+        if (nodeRef.domElem) resizeObserver.observe(nodeRef.domElem);
+      }, 100);
+      this._egResizeObserver = resizeObserver;
 
-            const onResize = this.onResize;
-            this.onResize = function (size) {
-                onResize?.apply(this, arguments);
-                applyHeight(size[1]);
-            };
-        };
+      try {
+        // 修复：把节点实例作为 prop 传进去，组件内部直接用 props.node.id，
+        // 不再需要靠 document.querySelector(".eg-root") 或遍历 graph 去猜
+        // "我是哪个节点"——画布上放多个 Eagle Gallery 节点时不会再串数据。
+        var appInstance = createApp(EagleGallery, { node: nodeRef });
+        appInstance.mount(el);
+        this._vueApp = appInstance;
+      } catch (e) {
+        console.error("[EagleGallery] mount failed:", e);
+        el.innerHTML = '<div style="padding:30px;color:#e55">Error: ' + e.message + '</div>';
+      }
 
-        const onRemoved = nodeType.prototype.onRemoved;
-        nodeType.prototype.onRemoved = function () {
-            if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
-            onRemoved?.apply(this, arguments);
-        };
-    },
+      var onResize = this.onResize;
+      this.onResize = function (size) {
+        if (onResize) onResize.apply(this, arguments);
+        applyHeight(size[1]);
+      };
+    };
+
+    // 修复：之前完全没有 onRemoved，节点删除后 Vue 实例和 ResizeObserver
+    // 都不会被清理，长时间在画布上增删节点会有内存泄漏。
+    var onRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
+      if (this._egResizeObserver) { this._egResizeObserver.disconnect(); this._egResizeObserver = null; }
+      if (onRemoved) onRemoved.apply(this, arguments);
+    };
+  }
 });
