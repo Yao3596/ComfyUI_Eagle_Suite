@@ -34,6 +34,8 @@ const CSS = `
 .eg-btn.primary{background:#4a7de0;border-color:#4a7de0;color:#fff}
 .eg-btn.primary:hover{background:#5a8fe0}
 .eg-btn.active{background:#2a4a8a;border-color:#4a7de0}
+.eg-btn:disabled{opacity:.4;cursor:not-allowed}
+.eg-btn:disabled:hover{background:#333}
 select.eg-btn{-webkit-appearance:none;-moz-appearance:none;appearance:none;background:#333 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='4' viewBox='0 0 8 4'%3E%3Cpath fill='%23aaa' d='M0 0h8L4 4z'/%3E%3C/svg%3E") no-repeat right 8px center;padding-right:22px}
 .eg-dropdown{position:relative;display:inline-block}
 .eg-dropdown-menu{display:none;position:absolute;top:100%;left:0;z-index:1000;background:#2a2a30;border:1px solid #444;border-radius:4px;padding:6px;min-width:160px;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.5)}
@@ -44,18 +46,25 @@ select.eg-btn{-webkit-appearance:none;-moz-appearance:none;appearance:none;backg
 .eg-dropdown-item label{display:flex;align-items:center;gap:5px;cursor:pointer}
 .eg-dropdown-item input{margin:0}
 .eg-color-dot{width:12px;height:12px;border-radius:50%;border:1px solid #555;display:inline-block;flex-shrink:0}
-.eg-main{flex:1;display:flex;overflow:hidden}
-.eg-sidebar{width:180px;background:#1e1e22;border-right:1px solid #333;overflow-y:auto;flex-shrink:0;padding:6px}
+.eg-main{flex:1;display:flex;overflow:hidden;min-height:0;min-width:0}
+.eg-sidebar{width:200px;min-width:120px;max-width:280px;background:#1e1e22;border-right:1px solid #333;overflow-y:auto;overflow-x:hidden;flex-shrink:0;padding:6px;box-sizing:border-box}
 .eg-sidebar::-webkit-scrollbar{width:4px}
 .eg-sidebar::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
-.eg-folder-item{padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;color:#aaa;display:flex;align-items:center;gap:4px}
+.eg-sidebar-header{padding:4px 6px 8px;color:#888;font-size:11px;font-weight:700;letter-spacing:.02em}
+.eg-folder-search{width:100%;box-sizing:border-box;margin-bottom:6px;padding:4px 6px;background:#15151a;border:1px solid #333;border-radius:3px;color:#eee;font-size:11px;outline:none}
+.eg-folder-search:focus{border-color:#5a8fe0}
+.eg-folder-item{padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;color:#aaa;display:flex;align-items:center;gap:4px;white-space:nowrap}
 .eg-folder-item:hover{background:#2a2a30;color:#ddd}
 .eg-folder-item.active{background:#2a4a8a;color:#fff}
 .eg-folder-item.all{font-weight:bold;color:#eee}
-.eg-folder-icon{font-size:10px}
-.eg-folder-children{padding-left:14px;border-left:1px solid #333;margin-left:6px}
+.eg-folder-icon{font-size:10px;flex-shrink:0}
+.eg-folder-arrow{width:14px;height:14px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:8px;color:#888;cursor:pointer;border-radius:2px}
+.eg-folder-arrow:hover{background:#3a3a45;color:#ddd}
+.eg-folder-arrow-spacer{width:14px;flex-shrink:0;display:inline-block}
+.eg-folder-name{flex:1;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.eg-folder-count{color:#666;font-size:10px;flex-shrink:0;margin-left:4px}
 .eg-folder-mode-bar{padding:4px 8px;border-top:1px solid #333;display:flex;align-items:center;gap:4px;font-size:10px;color:#888}
-.eg-grid{flex:1;overflow-y:auto;padding:8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:100px;gap:8px;align-content:start;background:#1a1a1e}
+.eg-grid{flex:1;min-width:0;min-height:0;overflow-y:auto;padding:8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:100px;gap:8px;align-content:start;background:#1a1a1e}
 .eg-grid::-webkit-scrollbar{width:6px}
 .eg-grid::-webkit-scrollbar-track{background:transparent}
 .eg-grid::-webkit-scrollbar-thumb{background:#444;border-radius:3px}
@@ -70,6 +79,7 @@ select.eg-btn{-webkit-appearance:none;-moz-appearance:none;appearance:none;backg
 .eg-footer{padding:5px 10px;background:#25252a;border-top:1px solid #333;display:flex;align-items:center;gap:8px;flex-shrink:0}
 .eg-pageinfo{flex:1;text-align:center;color:#888;font-size:11px}
 .eg-empty{text-align:center;padding:40px;color:#666;font-size:13px}
+.eg-load-more-hint{grid-column:1/-1;text-align:center;padding:14px;color:#666;font-size:11px}
 .eg-loading{text-align:center;padding:40px;color:#888}
 .eg-error{text-align:center;padding:40px;color:#e66}
 .eg-settings-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2000;display:flex;align-items:center;justify-content:center}
@@ -131,6 +141,20 @@ const EagleGalleryApp = {
         const openDropdown = ref("");
         const tagSearch = ref("");
 
+        // ── 渲染层"懒加载"：元数据一次性拉全（很轻，纯文本 JSON），但渲染
+        // 时像 Wallhaven 一样按滚动位置一段段"露出"到 DOM 里，避免几千张
+        // <img> 同时挂载卡死浏览器。滚动到底部附近自动多显示一批。 ─────────
+        const RENDER_BATCH = 100;
+        const visibleCount = ref(RENDER_BATCH);
+        const visibleItems = computed(() => items.value.slice(0, visibleCount.value));
+        function onGridScroll(e) {
+            const el = e.target;
+            if (visibleCount.value >= items.value.length) return;
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) {
+                visibleCount.value = Math.min(items.value.length, visibleCount.value + RENDER_BATCH);
+            }
+        }
+
         const filters = reactive({
             folderId: "",
             star: "全部",
@@ -166,7 +190,19 @@ const EagleGalleryApp = {
             try {
                 const res = await fetch("/eagle_gallery/folders");
                 const data = await res.json();
-                if (data.success) folders.value = data.folders || [];
+                if (data.success) {
+                    folders.value = data.folders || [];
+                    // 默认把所有含子文件夹的节点折叠起来，只显示顶层，减少初始渲染量
+                    const collapseAll = (list) => {
+                        for (const f of list) {
+                            if (f.children && f.children.length) {
+                                collapsedFolders.add(f.id);
+                                collapseAll(f.children);
+                            }
+                        }
+                    };
+                    collapseAll(folders.value);
+                }
             } catch (e) { /* 静默，侧边栏会显示空态 */ }
         }
 
@@ -203,6 +239,7 @@ const EagleGalleryApp = {
                 if (data.success) {
                     items.value = data.items || [];
                     total.value = data.total || 0;
+                    visibleCount.value = RENDER_BATCH; // 新结果，重新从第一批开始露出
                 } else {
                     errorMsg.value = "加载失败: " + (data.error || "未知错误");
                     items.value = [];
@@ -251,16 +288,22 @@ const EagleGalleryApp = {
 
         function jumpToIndex() {
             const idx = parseInt(jumpIndex.value, 10);
-            if (isNaN(idx) || idx < 0 || !total.value) return;
-            const target = Math.min(idx, total.value - 1);
+            if (isNaN(idx) || idx < 0 || !items.value.length) return;
+            const target = Math.min(idx, items.value.length - 1);
+            // 目标索引可能还没被渐进渲染出来，先把可见数量扩到能包含它
+            if (target >= visibleCount.value) {
+                visibleCount.value = Math.min(items.value.length, target + 1);
+            }
             requestAnimationFrame(() => {
-                const grid = node._egGridEl;
-                if (!grid) return;
-                const card = grid.querySelectorAll(".eg-thumb")[target];
-                if (!card) return;
-                card.scrollIntoView({ behavior: "smooth", block: "center" });
-                card.style.boxShadow = "0 0 12px 2px #4a7de0";
-                setTimeout(() => { card.style.boxShadow = ""; }, 1200);
+                requestAnimationFrame(() => { // 等 DOM 渲染完成
+                    const grid = node._egGridEl;
+                    if (!grid) return;
+                    const card = grid.querySelectorAll(".eg-thumb")[target];
+                    if (!card) return;
+                    card.scrollIntoView({ behavior: "smooth", block: "center" });
+                    card.style.boxShadow = "0 0 12px 2px #4a7de0";
+                    setTimeout(() => { card.style.boxShadow = ""; }, 1200);
+                });
             });
         }
 
@@ -329,6 +372,23 @@ const EagleGalleryApp = {
             else collapsedFolders.add(id);
         }
 
+        // 文件夹搜索：扁平匹配所有层级（不区分是否折叠），类似 Eagle 原生的"筛选"
+        const folderSearch = ref("");
+        function flattenFolders(list, acc) {
+            for (const f of list) {
+                acc.push(f);
+                if (f.children && f.children.length) flattenFolders(f.children, acc);
+            }
+            return acc;
+        }
+        const allFoldersFlat = computed(() => flattenFolders(folders.value, []));
+        const totalFolderCount = computed(() => allFoldersFlat.value.length);
+        const flatFilteredFolders = computed(() => {
+            const q = folderSearch.value.trim().toLowerCase();
+            if (!q) return [];
+            return allFoldersFlat.value.filter(f => (f.name || "").toLowerCase().includes(q));
+        });
+
         watch(() => [filters.folderId, filters.star, filters.shape, filters.resolution, filters.ext.slice(), filters.tags.slice(), filters.colors.slice()],
             () => { loadItems(); }, { deep: false });
 
@@ -346,7 +406,9 @@ const EagleGalleryApp = {
             thumbUrl, loadItems, toggleSelect, removeSelection, clearSelection,
             jumpToIndex, openSettings, saveSettings, toggleDropdown, toggleArrayValue,
             selectFolder, collapsedFolders, toggleFolderCollapse,
+            folderSearch, totalFolderCount, flatFilteredFolders,
             setGridEl: (el) => { node._egGridEl = el; },
+            visibleItems, visibleCount, onGridScroll,
         };
     },
     template: `
@@ -428,22 +490,37 @@ const EagleGalleryApp = {
         <!-- 主体 -->
         <div class="eg-main">
             <div class="eg-sidebar" v-show="sidebarVisible">
+                <div class="eg-sidebar-header">文件夹 ({{ totalFolderCount }})</div>
+                <input class="eg-folder-search" type="text" v-model="folderSearch" placeholder="🔍 筛选文件夹...">
                 <div class="eg-folder-item all" :class="{active: filters.folderId===''}" @click="selectFolder('')">
-                    <span class="eg-folder-icon">📁</span> 全部文件夹
+                    <span class="eg-folder-arrow-spacer"></span>
+                    <span class="eg-folder-icon">📁</span> <span class="eg-folder-name">全部文件夹</span>
                 </div>
-                <template v-if="folders.length">
-                    <FolderNode v-for="f in folders" :key="f.id" :folder="f" :active-id="filters.folderId"
-                                :collapsed="collapsedFolders" @select="selectFolder" @toggle="toggleFolderCollapse" />
+                <template v-if="folderSearch.trim()">
+                    <div class="eg-folder-item" v-for="f in flatFilteredFolders" :key="f.id"
+                         :class="{active: filters.folderId===f.id}" style="padding-left:6px" @click="selectFolder(f.id)">
+                        <span class="eg-folder-arrow-spacer"></span>
+                        <span class="eg-folder-icon">📁</span>
+                        <span class="eg-folder-name">{{ f.name || '未命名' }}</span>
+                        <span class="eg-folder-count" v-if="f.imageCount !== undefined && f.imageCount !== null">{{ f.imageCount }}</span>
+                    </div>
+                    <div class="eg-empty" v-if="!flatFilteredFolders.length" style="padding:16px 8px">无匹配文件夹</div>
                 </template>
-                <div class="eg-empty" v-else>{{ folders.length === 0 ? '加载中或无文件夹' : '' }}</div>
+                <template v-else>
+                    <template v-if="folders.length">
+                        <FolderNode v-for="f in folders" :key="f.id" :folder="f" :active-id="filters.folderId"
+                                    :collapsed="collapsedFolders" @select="selectFolder" @toggle="toggleFolderCollapse" />
+                    </template>
+                    <div class="eg-empty" v-else>{{ folders.length === 0 ? '加载中或无文件夹' : '' }}</div>
+                </template>
             </div>
 
-            <div class="eg-grid" :ref="setGridEl">
+            <div class="eg-grid" :ref="setGridEl" @scroll="onGridScroll">
                 <div class="eg-loading" v-if="loading">🔄 加载中...</div>
                 <div class="eg-error" v-else-if="errorMsg">{{ errorMsg }}</div>
                 <div class="eg-empty" v-else-if="!items.length">暂无结果</div>
                 <template v-else>
-                    <div class="eg-thumb" v-for="(item, i) in items" :key="item.id"
+                    <div class="eg-thumb" v-for="(item, i) in visibleItems" :key="item.id"
                          :class="{selected: selected.has(item.id)}"
                          @click="toggleSelect(item)">
                         <img :src="thumbUrl(item.id)" loading="lazy" :alt="item.name" @error="$event.target.style.display='none'">
@@ -455,12 +532,13 @@ const EagleGalleryApp = {
                             <span>{{ (item.name || '未命名').slice(0, 12) }}</span>
                         </div>
                     </div>
+                    <div class="eg-load-more-hint" v-if="visibleCount < items.length">继续下滑加载更多…（已显示 {{ visibleItems.length }} / {{ total }}）</div>
                 </template>
             </div>
         </div>
 
         <div class="eg-footer">
-            <span class="eg-pageinfo">共 {{ total }} 张 | 选中 {{ selected.size }} 张{{ folderOutputMode ? ' | 整夹输出模式' : '' }}</span>
+            <span class="eg-pageinfo">共 {{ total }} 张 | 已加载显示 {{ visibleItems.length }} 张 | 选中 {{ selected.size }} 张{{ folderOutputMode ? ' | 整夹输出模式' : '' }}</span>
         </div>
 
         <!-- 设置弹窗 -->
@@ -486,22 +564,26 @@ const EagleGalleryApp = {
     `,
 };
 
-// ── 文件夹树子组件（递归） ─────────────────────────────────────────────────
+// ── 文件夹树子组件（递归，原生 Eagle 风格：展开箭头 + 数量 + 层级缩进） ──────
 const FolderNode = {
     name: "FolderNode",
-    props: { folder: Object, activeId: String, collapsed: Object },
+    props: { folder: Object, activeId: String, collapsed: Object, depth: { type: Number, default: 0 } },
     emits: ["select", "toggle"],
     template: `
     <div>
-        <div class="eg-folder-item" :class="{active: activeId === folder.id}" @click="$emit('select', folder.id)">
-            <span class="eg-folder-icon" v-if="folder.children && folder.children.length"
-                  @click.stop="$emit('toggle', folder.id)">{{ collapsed.has(folder.id) ? '📁' : '📂' }}</span>
-            <span class="eg-folder-icon" v-else>📄</span>
-            {{ folder.name || '未命名' }}
+        <div class="eg-folder-item" :class="{active: activeId === folder.id}"
+             :style="{paddingLeft: (6 + depth * 14) + 'px'}" @click="$emit('select', folder.id)">
+            <span class="eg-folder-arrow" v-if="folder.children && folder.children.length"
+                  @click.stop="$emit('toggle', folder.id)">{{ collapsed.has(folder.id) ? '▶' : '▼' }}</span>
+            <span class="eg-folder-arrow-spacer" v-else></span>
+            <span class="eg-folder-icon">📁</span>
+            <span class="eg-folder-name">{{ folder.name || '未命名' }}</span>
+            <span class="eg-folder-count" v-if="folder.imageCount !== undefined && folder.imageCount !== null">{{ folder.imageCount }}</span>
         </div>
-        <div class="eg-folder-children" v-if="folder.children && folder.children.length && !collapsed.has(folder.id)">
+        <div v-if="folder.children && folder.children.length && !collapsed.has(folder.id)">
             <FolderNode v-for="c in folder.children" :key="c.id" :folder="c" :active-id="activeId"
-                        :collapsed="collapsed" @select="$emit('select', $event)" @toggle="$emit('toggle', $event)" />
+                        :collapsed="collapsed" :depth="depth + 1"
+                        @select="$emit('select', $event)" @toggle="$emit('toggle', $event)" />
         </div>
     </div>
     `,
@@ -542,9 +624,21 @@ app.registerExtension({
 
             const container = document.createElement("div");
             container.style.width = "100%";
-            container.style.height = "100%";
+            container.style.boxSizing = "border-box";
+            container.style.overflow = "hidden"; // 防止内容把容器撑高，撑爆节点
+
             const widget = this.addDOMWidget("eagle_gallery", "div", container, { serialize: false });
-            widget.computeSize = (w) => [w, 660];
+
+            // 统一的高度应用函数：不用 100%（相对未定高的父容器在浏览器里会失效，
+            // 导致内容把容器撑到多高就是多高，节点因此"无限往下增高"）。
+            // 而是每次都直接给一个确定的像素高度。
+            const applyHeight = (nodeHeight) => {
+                const h = Math.max(400, nodeHeight - 100);
+                container.style.height = h + "px";
+                widget.computeSize = (w) => [w, h];
+                return h;
+            };
+            applyHeight(this.size[1]); // 创建的那一刻立即定死高度，不等 onResize 触发
 
             const vueApp = createApp(EagleGalleryApp, { node: this });
             vueApp.mount(container);
@@ -553,9 +647,7 @@ app.registerExtension({
             const onResize = this.onResize;
             this.onResize = function (size) {
                 onResize?.apply(this, arguments);
-                const h = Math.max(400, size[1] - 100);
-                container.style.height = h + "px";
-                widget.computeSize = (w) => [w, h];
+                applyHeight(size[1]);
             };
         };
 

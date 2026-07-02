@@ -112,13 +112,18 @@ class EagleClient:
         return search(folders)
 
     def get_library_path(self):
-        """获取资源库真实路径"""
+        """获取资源库真实路径。V1 API 返回 data.path，部分旧版返回 data.library.path。"""
         try:
             resp = requests.get(f"{self.base_url}/library/info", timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("status") == "success":
-                    return data.get("data", {}).get("library", {}).get("path", "")
+                    d = data.get("data", {})
+                    # V1 API 标准字段
+                    path = d.get("path", "")
+                    if path: return path
+                    # 兼容旧版/嵌套结构
+                    return d.get("library", {}).get("path", "")
         except Exception as e:
             logger.warning(f"获取 Eagle 资源库路径失败: {e}")
         return None

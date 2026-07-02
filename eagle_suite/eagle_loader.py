@@ -4,6 +4,7 @@ Eagle 图片加载器 (重构版)
 """
 
 import os
+import json
 import random
 import io
 import torch
@@ -104,8 +105,8 @@ class EagleLoader:
             raise Exception(f"❌ 无法加载图片: {target_item.get('name')}")
 
         # 6. 后处理与预览
-        img = img.convert("RGB")
-        img_tensor = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
+        actual_size = img.size
+        img_tensor = self._pil_to_rgb_tensor(img)
 
         preview_ui = []
         if preview:
@@ -114,8 +115,8 @@ class EagleLoader:
             img.save(tmp_path, compress_level=4)
             preview_ui.append({"filename": tmp_name, "subfolder": "", "type": "temp"})
 
-        info = self._format_info(folder_input, target_item, image_index, total, img.size, index, control_mode, filters_applied)
-        metadata = self._format_metadata(target_item, img.size)
+        info = self._format_info(folder_input, target_item, image_index, total, actual_size, index, control_mode, filters_applied)
+        metadata = self._format_metadata(target_item, actual_size)
 
         return {
             "ui": {"images": preview_ui},
@@ -155,25 +156,112 @@ class EagleLoader:
         return sorted(items, key=lambda x: x.get(key, 0), reverse=rev)
 
     def _load_item_image(self, item_id, item_data):
-        # 1. API 路径
-        info = eagle_client.get_item_info(item_id)
-        if info and info.get("filePath"):
-            p = info["filePath"]
-            if os.path.exists(p):
-                return Image.open(p), p
-        
-        # 2. 资源库猜测
+        """加载 Eagle 图片。优先使用资源库原图，失败再回退到 API 缩略图。
+        Eagle V1 API 不返回 filePath，因此根据 item_data 中的 name + ext
+        直接定位 {library}/images/{item_id}.info/{name}.{ext}。
+        """
         lib = eagle_client.get_library_path()
         if lib:
-            p = os.path.join(lib, "images", f"{item_id}.info", f"{item_data.get('name')}.{item_data.get('ext')}")
-            if os.path.exists(p): return Image.open(p), p
-            
+            info_dir = os.path.join(lib, "images", f"{item_id}.info")
+
+            # 1. 确定性原图路径：name + ext
+            name = (item_data or {}).get("name", "")
+            ext = (item_data or {}).get("ext", "")
+            if name and ext:
+                candidate = os.path.join(info_dir, f"{name}.{ext}")
+                img = self._open_image(candidate)
+                if img:
+                    return img, candidate
+
+            # 2. 扫描 .info 目录，排除缩略图，选面积最大的图片
+            scanned = self._scan_info_folder(info_dir)
+            if scanned:
+                img = self._open_image(scanned)
+                if img:
+                    return img, scanned
+
         # 3. 缩略图回退
         thumb = eagle_client.get_item_thumbnail(item_id)
         if thumb:
-            return Image.open(io.BytesIO(thumb)), f"eagle://thumb/{item_id}"
-            
+            try:
+                img = Image.open(io.BytesIO(thumb))
+                img.load()
+                return img, f"eagle://thumb/{item_id}"
+            except Exception as e:
+                logger.warning(f"[EagleLoader] 缩略图加载失败 {item_id}: {e}")
+
         return None, ""
+
+    def _open_image(self, path):
+        """打开本地图片并强制加载，失败返回 None"""
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            img = Image.open(path)
+            img.load()
+            return img
+        except Exception as e:
+            logger.warning(f"[EagleLoader] 打开图片失败 {path}: {e}")
+            return None
+
+    def _scan_info_folder(self, info_dir):
+        """扫描 Eagle 的 .info 文件夹，优先返回原图路径。
+        策略：
+        1. 读取 metadata.json 中的 name + ext 组合成文件名
+        2. 排除 _thumbnail* 缩略图，选择面积最大的图片
+        """
+        if not info_dir or not os.path.isdir(info_dir):
+            return None
+        try:
+            # 1. 优先从 metadata.json 读取 name + ext
+            meta_path = os.path.join(info_dir, "metadata.json")
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    name = meta.get("name", "")
+                    ext = meta.get("ext", "")
+                    if name and ext:
+                        candidate = os.path.join(info_dir, f"{name}.{ext}")
+                        if os.path.exists(candidate):
+                            return candidate
+                except Exception as e:
+                    logger.warning(f"[EagleLoader] 读取 metadata.json 失败: {e}")
+
+            # 2. 扫描目录，排除缩略图，选面积最大的
+            candidates = []
+            for fname in os.listdir(info_dir):
+                low = fname.lower()
+                if low == "metadata.json" or low.startswith("_thumbnail"):
+                    continue
+                if low.endswith(tuple(self.SUPPORTED_EXT)):
+                    fpath = os.path.join(info_dir, fname)
+                    try:
+                        w, h = self._fast_image_size(fpath)
+                        candidates.append((w * h, fpath))
+                    except Exception:
+                        candidates.append((0, fpath))
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return candidates[0][1]
+        except Exception as e:
+            logger.warning(f"[EagleLoader] 扫描目录失败 {info_dir}: {e}")
+        return None
+
+    def _fast_image_size(self, path):
+        """不加载完整图片即可获取尺寸"""
+        with Image.open(path) as im:
+            return im.size
+
+    def _pil_to_rgb_tensor(self, img):
+        """将 PIL Image 转为 RGB torch tensor [1,H,W,3]，RGBA 图片用白色背景合成"""
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
 
     def _select_index(self, mode, index, total):
         if mode == "随机":
