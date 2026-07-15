@@ -148,10 +148,8 @@ def _load_saved_base_url() -> str:
 def _load_saved_model() -> str:
     return _load_config().get("model", "")
 
-def _load_saved_prompt_model_type() -> str:
-    return _load_config().get("prompt_model_type", "自然语言")
-
-def _save_api_config(api_key: str = None, base_url: str = None, model: str = None, prompt_model_type: str = None) -> None:
+def _save_api_config(api_key: str = None, base_url: str = None, model: str = None) -> None:
+    """只保存 API 连接三要素，不保存 prompt_model_type 等运行时参数。"""
     config = _load_config()
     if api_key is not None:
         config["api_key"] = _decode_api_key(api_key.strip())
@@ -159,8 +157,6 @@ def _save_api_config(api_key: str = None, base_url: str = None, model: str = Non
         config["base_url"] = base_url.strip()
     if model is not None:
         config["model"] = model.strip()
-    if prompt_model_type is not None:
-        config["prompt_model_type"] = prompt_model_type.strip()
     _save_config(config)
 
 # ── 对话历史序列化（安全版）──────────────────────────────────
@@ -386,7 +382,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 "api_config_key": ("STRING", {"default": _load_saved_key(), "multiline": False}),
                 "api_config_url": ("STRING", {"default": _load_saved_base_url(), "multiline": False}),
                 "api_config_model": ("STRING", {"default": _load_saved_model(), "multiline": False}),
-                "prompt_model_type": (list(PROMPT_FORMAT_TEMPLATES.keys()), {"default": _load_saved_prompt_model_type()}),
+                "prompt_model_type": (list(PROMPT_FORMAT_TEMPLATES.keys()), {"default": "自然语言"}),
                 "system_template": (["custom"] + list(SYSTEM_TEMPLATES.keys()), {"default": "default"}),
                 "system_prompt": ("STRING", {"default": "You are a helpful assistant.", "multiline": True}),
                 "user_prompt": ("STRING", {"default": "", "multiline": True}),
@@ -459,7 +455,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
             logger.error(f"[EagleAPI] {err}")
             return ("", err, history, None)
 
-        _save_api_config(api_key=key, base_url=url, model=mdl, prompt_model_type=prompt_model_type)
+        _save_api_config(api_key=key, base_url=url, model=mdl)
 
         sys_prompt = SYSTEM_TEMPLATES.get(system_template, system_prompt.strip())
         if prompt_model_type in PROMPT_FORMAT_TEMPLATES:

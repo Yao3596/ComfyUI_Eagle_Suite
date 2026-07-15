@@ -70,7 +70,6 @@ https://api.example.com/v1    → https://api.example.com/v1/chat/completions
 | `system_template` | 系统提示词模板 |
 | `system_prompt` | 自定义系统提示词（`custom` 时生效） |
 | `user_prompt` | 用户提示词 |
-| `prompt_model_type` | 输出格式：自然语言 / SDXL / SD3 / FLUX 等 |
 | `filter_intro` | 过滤模型开头自我介绍 |
 | `temperature` | 采样温度 |
 | `max_tokens` | 最大 token 数 |
@@ -86,6 +85,15 @@ https://api.example.com/v1    → https://api.example.com/v1/chat/completions
 | `状态信息` | tokens、耗时、状态摘要 |
 | `对话历史` | user/assistant 历史（不含 system 和图像） |
 | `输出图像` | 当返回 Markdown/base64 图片时输出 IMAGE |
+
+### 其他参数
+
+| 参数 | 说明 |
+|------|------|
+| `response_format` | `text` 或 `json_object` |
+| `batch_mode` | `first` 只处理第一帧 / `all` 处理所有帧 |
+| `max_image_size` | 输入图像最大边尺寸 |
+| `timeout` | 请求超时 |
 
 ## 本地大模型节点
 
