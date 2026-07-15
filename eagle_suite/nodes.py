@@ -14,12 +14,14 @@ from .batch_video_nodes import (
 )
 from .api_key_node import EagleAPIKeyNode, EagleAPILoader
 from .api_model_loader import EagleAPIUnifiedNode
+from .local_llm_node import EagleLocalLLMNode, EagleLocalLLMServerNode
 from .gif_compressor import GifCompressorNode
 from .local_loader import LocalImageLoader
 from .wallhaven_gallery import WallhavenGalleryNode
+from .text_nodes import NODE_CLASS_MAPPINGS_TEXT, NODE_DISPLAY_NAME_MAPPINGS_TEXT
 from .eagle_gallery import EagleGalleryNode
 from .eagle_video_gallery import EagleVideoGalleryNode
-from .pinterest_gallery import PinterestGalleryNode
+from .lora_gallery import EagleLoraGalleryNode
 
 # ── 工具节点 ─────────────────────────────────────────────
 from ..nodes.image_browser import EagleImageList
@@ -56,6 +58,8 @@ NODE_CLASS_MAPPINGS = {
     "EagleAPIUnifiedNode": EagleAPIUnifiedNode,
     "EagleAPIKeyNode":      EagleAPIKeyNode,
     "EagleAPILoader":       EagleAPILoader,
+    "EagleLocalLLMNode":        EagleLocalLLMNode,
+    "EagleLocalLLMServerNode":  EagleLocalLLMServerNode,
 
     # 动画
     "GifCompressorNode": GifCompressorNode,
@@ -64,7 +68,7 @@ NODE_CLASS_MAPPINGS = {
     "WallhavenGalleryNode": WallhavenGalleryNode,
     "EagleGalleryNode": EagleGalleryNode,
     "EagleVideoGalleryNode": EagleVideoGalleryNode,
-    "PinterestGalleryNode": PinterestGalleryNode,
+    "EagleLoraGalleryNode": EagleLoraGalleryNode,
 
     # 工具
     "EagleImageList":       EagleImageList,
@@ -78,6 +82,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleFileCopy":        EagleFileCopy,
     "EagleHFDownload":      EagleHFDownload,
 }
+NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_TEXT)
 
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -103,6 +108,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleAPIUnifiedNode": "🦅 API 多功能调用",
     "EagleAPIKeyNode":      "🦅 API Key Input",
     "EagleAPILoader":       "🦅 API 配置加载器",
+    "EagleLocalLLMNode":        "🦅 本地大模型反推",
+    "EagleLocalLLMServerNode":  "🦅 本地大模型服务(OpenAI兼容)",
 
     # 动画
     "GifCompressorNode": "🦅 GIF 压缩保存",
@@ -111,7 +118,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WallhavenGalleryNode": "🌊 Wallhaven Gallery",
     "EagleGalleryNode": "🦅 Eagle Gallery",
     "EagleVideoGalleryNode": "🦅 Eagle Video Gallery",
-    "PinterestGalleryNode": "📌 Pinterest Gallery",
+    "EagleLoraGalleryNode": "🦅 LoRA 画廊加载器",
 
     # 工具
     "EagleImageList":     "🦅 图片浏览器",
@@ -125,5 +132,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleFileCopy":      "🦅 复制文件",
     "EagleHFDownload":    "🦅 HF 下载器",
 }
+NODE_DISPLAY_NAME_MAPPINGS.update(NODE_DISPLAY_NAME_MAPPINGS_TEXT)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

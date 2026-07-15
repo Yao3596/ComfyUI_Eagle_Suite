@@ -11,10 +11,12 @@ import os
 import json
 import base64
 import io
+import re
 import time
 import requests
 import torch
 import numpy as np
+import urllib.request
 from PIL import Image
 
 # ── 配置文件路径 ──────────────────────────────────────────
@@ -28,11 +30,9 @@ from .logger import logger
 PROMPT_FORMAT_TEMPLATES = {
     "自然语言": "[输出格式] 使用流畅的自然语言描述画面，像写一段场景描写文字一样，无需特别的关键词标签格式。",
     "SDXL": "[输出格式] 使用英文逗号分隔的关键词标签(tag)形式，如 'masterpiece, best quality, 1girl, blue hair, sunlight'。只输出标签列表，不要写完整句子或段落。每个标签尽量简洁，控制在3个英文单词以内。",
-    "SD1.5": "[输出格式] 使用英文逗号分隔的关键词标签(tag)形式，权重可用括号包裹如 '(masterpiece:1.2)'。只输出标签列表，不要写完整句子。",
     "SD3": "[输出格式] 使用英文逗号分隔的关键词标签(tag)形式，可混合少量自然语言短语增强描述。保持简洁，不要写长段落。",
     "FLUX": "[输出格式] 使用详细的自然语言描述，包含场景、主体、光照、风格、构图、氛围、色彩等细节。可用英文关键词穿插增强。输出应为一段完整的描述文字，而非标签列表。",
     "Klein": "[输出格式] 使用自然语言描述，可混合英文关键词增强表达。适合通用图像生成理解即可。",
-    "Wan": "[输出格式] 针对视频生成优化，需描述动态场景、镜头运动（如 pan, zoom, tracking shot）、时间变化、动作序列。使用简洁的自然语言，突出时间维度 and 动态感。",
     "Qwen": "[输出格式] 自然语言描述，适合多模态大模型理解。可中英混合表达。",
     "GPT": "[输出格式] 自然语言描述，适合通用大模型理解。",
     "Gemini": "[输出格式] 自然语言描述，适合多模态大模型理解。",
@@ -48,7 +48,7 @@ def _format_prompt_output(text: str, model_type: str) -> str:
         return text
     text = text.strip()
 
-    tag_like_types = ("SDXL", "SD1.5", "SD3")
+    tag_like_types = ("SDXL", "SD3")
 
     if model_type in tag_like_types:
         # 如果看起来已经是逗号分隔的 tag 格式（有逗号、无句号、无换行），保持原样
@@ -257,6 +257,79 @@ def _normalize_url(url: str) -> str:
         url = url + "/v1"
     return url
 
+
+# ── 输出图像提取 ──────────────────────────────────────────────
+_IMAGE_URL_PATTERNS = [
+    re.compile(r'!\[.*?\]\((https?://[^\s\)]+)\)', re.IGNORECASE),
+    re.compile(r'\b(https?://[^\s\)]+\.(?:png|jpg|jpeg|gif|webp|bmp))\b', re.IGNORECASE),
+    re.compile(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', re.IGNORECASE),
+]
+
+
+def _extract_image_urls(text: str) -> list:
+    """从文本/Markdown 中提取图片 URL 列表（去重）。"""
+    if not text:
+        return []
+    urls = []
+    for pat in _IMAGE_URL_PATTERNS:
+        for m in pat.finditer(text):
+            url = m.group(1).strip()
+            if url and url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _download_image(url: str, timeout: int = 30) -> Image.Image:
+    """下载网络图片为 PIL RGB 图像。"""
+    headers = {"User-Agent": "ComfyUI-EagleSuite/1.0"}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+    img = Image.open(io.BytesIO(data))
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    return img
+
+
+def _decode_base64_image(b64_text: str) -> Image.Image:
+    """解码 base64 图片字符串为 PIL RGB 图像。"""
+    data = base64.b64decode(b64_text)
+    img = Image.open(io.BytesIO(data))
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    return img
+
+
+def _extract_images_from_text(text: str) -> list:
+    """从文本中提取所有图片（URL 或 base64），返回 PIL 列表。"""
+    images = []
+    if not text:
+        return images
+
+    # 1) Markdown 图片 / 直接 URL
+    for url in _extract_image_urls(text):
+        try:
+            images.append(_download_image(url))
+        except Exception as e:
+            logger.warning(f"[EagleAPI] 下载输出图片失败 {url}: {e}")
+
+    # 2) base64 图片（data:image/...;base64,...）
+    b64_pattern = re.compile(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)')
+    for m in b64_pattern.finditer(text):
+        try:
+            images.append(_decode_base64_image(m.group(1)))
+        except Exception as e:
+            logger.warning(f"[EagleAPI] 解码 base64 图片失败: {e}")
+
+    return images
+
+
+def _pil_to_tensor(img: Image.Image) -> torch.Tensor:
+    """PIL RGB -> ComfyUI IMAGE 张量 (1, H, W, 3)。"""
+    arr = np.array(img).astype(np.float32) / 255.0
+    return torch.from_numpy(arr).unsqueeze(0)
+
+
 # ── API 请求基类 ───────────────────────────────────────────────
 
 class _BaseAPI:
@@ -324,6 +397,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
                 "response_format": (["text", "json_object"], {"default": "text"}),
                 "batch_mode": (["first", "all"], {"default": "first"}),
+                "max_image_size": ("INT", {"default": 1024, "min": 224, "max": 4096, "step": 64}),
                 "timeout": ("INT", {"default": 120, "min": 10, "max": 600}),
             },
             "optional": {
@@ -335,8 +409,8 @@ class EagleAPIUnifiedNode(_BaseAPI):
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("输出结果", "状态信息", "对话历史")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("输出结果", "状态信息", "对话历史", "输出图像")
     FUNCTION = "process"
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
@@ -345,7 +419,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 prompt_model_type,
                 system_template, system_prompt, user_prompt, filter_intro,
                 temperature, max_tokens, seed, top_p,
-                response_format, batch_mode, timeout,
+                response_format, batch_mode, max_image_size, timeout,
                 api_config=None, history="", **kwargs):
 
         self.timeout = timeout
@@ -383,7 +457,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
             if not mdl: missing.append("model")
             err = f"❌ 缺失配置: {', '.join(missing)}（请连接 API 配置加载器或填写独立字段）"
             logger.error(f"[EagleAPI] {err}")
-            return ("", err, history)
+            return ("", err, history, None)
 
         _save_api_config(api_key=key, base_url=url, model=mdl, prompt_model_type=prompt_model_type)
 
@@ -397,19 +471,27 @@ class EagleAPIUnifiedNode(_BaseAPI):
 
         image_tensors = [(k, v) for k, v in kwargs.items() if k.startswith("image_") and v is not None]
         
+        failed_images = []
         if image_tensors:
             content = []
-            for _, img in image_tensors:
-                b64s = _tensor_to_base64(img, batch_mode=batch_mode)
+            for img_name, img in image_tensors:
+                b64s = _tensor_to_base64(img, batch_mode=batch_mode, max_size=max_image_size)
+                if not b64s:
+                    failed_images.append(img_name)
+                    continue
                 for b64 in b64s:
                     content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            
+
+            if not content:
+                return ("", "❌ 所有图像编码失败", history, None)
+
             prompt_txt = user_prompt.strip() or ("描述这些图片" if len(content) > 1 else "描述这张图片")
             content.append({"type": "text", "text": prompt_txt})
             api_messages.append({"role": "user", "content": content})
         else:
             prompt_txt = user_prompt.strip()
-            if not prompt_txt: return ("", "❌ 请输入提示词", history)
+            if not prompt_txt:
+                return ("", "❌ 请输入提示词", history, None)
             api_messages.append({"role": "user", "content": prompt_txt})
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -417,15 +499,19 @@ class EagleAPIUnifiedNode(_BaseAPI):
             "model": mdl, "messages": api_messages, "max_tokens": max_tokens,
             "temperature": temperature, "top_p": top_p, "stream": False
         }
-        if seed >= 0: payload["seed"] = seed
-        if response_format == "json_object": payload["response_format"] = {"type": "json_object"}
+        if seed >= 0:
+            payload["seed"] = seed
+        if response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
 
         ok, data, err, elapsed = self._request(f"{url}/chat/completions", headers, payload)
-        if not ok: return ("", f"❌ {err}", history)
+        if not ok:
+            return ("", f"❌ {err}", history, None)
 
         try:
             text = data["choices"][0]["message"]["content"].strip()
-            if filter_intro: text = _filter_intro(text)
+            if filter_intro:
+                text = _filter_intro(text)
             text = _format_prompt_output(text, prompt_model_type)
 
             new_history = _serialize_history(history_msgs + [
@@ -433,10 +519,29 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 {"role": "assistant", "content": text}
             ])
 
+            # 尝试从响应中提取图片
+            out_images = _extract_images_from_text(text)
+            if out_images:
+                try:
+                    # 尺寸统一：以第一张图为基准，后续同尺寸则堆叠，否则只输出第一张
+                    base_w, base_h = out_images[0].size
+                    same_size = all(img.size == (base_w, base_h) for img in out_images)
+                    if same_size and len(out_images) > 1:
+                        image_tensor = torch.cat([_pil_to_tensor(img) for img in out_images], dim=0)
+                    else:
+                        image_tensor = _pil_to_tensor(out_images[0])
+                        if len(out_images) > 1:
+                            logger.info(f"[EagleAPI] 检测到 {len(out_images)} 张输出图像但尺寸不一致，仅输出第一张")
+                except Exception as e:
+                    logger.warning(f"[EagleAPI] 图像张量转换失败: {e}")
+                    image_tensor = None
+            else:
+                image_tensor = None
+
             usage = data.get("usage", {})
             status = f"✅ {usage.get('total_tokens', 0)} tokens | {elapsed:.2f}s"
-            return (text, status, new_history)
+            return (text, status, new_history, image_tensor)
         except Exception as e:
-            return ("", f"❌ 解析失败: {e}", history)
+            return ("", f"❌ 解析失败: {e}", history, None)
 
 __all__ = ["EagleAPIUnifiedNode"]

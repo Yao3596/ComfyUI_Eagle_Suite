@@ -22,8 +22,7 @@ import torch
 import numpy as np
 from PIL import Image
 from aiohttp import web
-from server import PromptServer
-
+from .route_registry import route
 from .logger import logger
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
@@ -153,7 +152,7 @@ def _eagle_request(method: str, endpoint: str, **kwargs):
 
 # ── aiohttp 路由 ──────────────────────────────────────────────────────────────
 
-@PromptServer.instance.routes.get("/eagle_video_gallery/settings")
+@route("GET", "/eagle_video_gallery/settings")
 async def get_video_settings_route(request):
     try:
         s = _load_settings()
@@ -162,7 +161,7 @@ async def get_video_settings_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.post("/eagle_video_gallery/cache_selection")
+@route("POST", "/eagle_video_gallery/cache_selection")
 async def cache_video_selection_route(request):
     """前端选中视频后，将选中数据 POST 到此路由缓存到服务端。
     绕过 ComfyUI widget 序列化机制，确保后端能可靠读取选中数据。
@@ -182,7 +181,7 @@ async def cache_video_selection_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.post("/eagle_video_gallery/settings")
+@route("POST", "/eagle_video_gallery/settings")
 async def save_video_settings_route(request):
     try:
         data = await request.json()
@@ -196,7 +195,7 @@ async def save_video_settings_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.get("/eagle_video_gallery/folders")
+@route("GET", "/eagle_video_gallery/folders")
 async def video_folders_route(request):
     ok, data = _eagle_request("GET", "/api/folder/list")
     if not ok:
@@ -204,7 +203,7 @@ async def video_folders_route(request):
     return web.json_response({"success": True, "folders": data})
 
 
-@PromptServer.instance.routes.get("/eagle_video_gallery/library")
+@route("GET", "/eagle_video_gallery/library")
 async def video_library_route(request):
     ok, data = _eagle_request("GET", "/api/library/info")
     if not ok:
@@ -212,7 +211,7 @@ async def video_library_route(request):
     return web.json_response({"success": True, "library": data})
 
 
-@PromptServer.instance.routes.get("/eagle_video_gallery/tags")
+@route("GET", "/eagle_video_gallery/tags")
 async def video_tags_route(request):
     """获取 Eagle 库中所有标签，供前端标签过滤下拉框使用。"""
     try:
@@ -226,7 +225,7 @@ async def video_tags_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.post("/eagle_video_gallery/items")
+@route("POST", "/eagle_video_gallery/items")
 async def video_items_route(request):
     try:
         body = await request.json()
@@ -334,7 +333,7 @@ def _read_local_image(file_path: str):
         return None, None
 
 
-@PromptServer.instance.routes.get("/eagle_video_gallery/thumbnail")
+@route("GET", "/eagle_video_gallery/thumbnail")
 async def video_thumbnail_route(request):
     """代理 Eagle 缩略图请求（视频文件）。
     
@@ -489,7 +488,7 @@ async def video_thumbnail_route(request):
         return web.Response(status=502, text="upstream error")
 
 
-@PromptServer.instance.routes.post("/eagle_video_gallery/item_info")
+@route("POST", "/eagle_video_gallery/item_info")
 async def video_item_info_route(request):
     """批量获取 item 详细信息（含构建的视频文件路径 filePath）。"""
     try:

@@ -22,8 +22,7 @@ import torch
 import numpy as np
 from PIL import Image
 from aiohttp import web
-from server import PromptServer
-
+from .route_registry import route
 from .logger import logger
 from .api_unified import _mask_url_token, _load_config
 
@@ -240,7 +239,7 @@ def _eagle_v1_thumbnail(item_id: str) -> str:
 
 # ── aiohttp 路由 ──────────────────────────────────────────────────────────────
 
-@PromptServer.instance.routes.get("/eagle_gallery/settings")
+@route("GET", "/eagle_gallery/settings")
 async def get_settings_route(request):
     try:
         s = _load_settings()
@@ -254,7 +253,7 @@ async def get_settings_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.post("/eagle_gallery/settings")
+@route("POST", "/eagle_gallery/settings")
 async def save_settings_route(request):
     try:
         data = await request.json()
@@ -310,7 +309,7 @@ async def save_settings_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.get("/eagle_gallery/folders")
+@route("GET", "/eagle_gallery/folders")
 async def folders_route(request):
     ok, data = _eagle_v2_request("/api/v2/folder/get")
     if not ok:
@@ -322,7 +321,7 @@ async def folders_route(request):
     return web.json_response({"success": True, "folders": folders})
 
 
-@PromptServer.instance.routes.get("/eagle_gallery/library")
+@route("GET", "/eagle_gallery/library")
 async def library_route(request):
     ok, data = _eagle_v2_request("/api/v2/library/info")
     if not ok:
@@ -330,7 +329,7 @@ async def library_route(request):
     return web.json_response({"success": True, "library": data})
 
 
-@PromptServer.instance.routes.post("/eagle_gallery/items")
+@route("POST", "/eagle_gallery/items")
 async def items_route(request):
     try:
         body = await request.json()
@@ -340,6 +339,8 @@ async def items_route(request):
         star = body.get("star", "")
         shape = body.get("shape", "")  # 横向 / 纵向 / 方形
         color = body.get("color", "")  # hex 颜色筛选
+        resolution = body.get("resolution", "")
+        fmt = body.get("format", "")
         offset = max(0, int(body.get("offset", body.get("page", 0))))
         limit = min(200, max(1, int(body.get("limit", PAGE_SIZE))))
 
@@ -347,7 +348,10 @@ async def items_route(request):
         need_shape_filter = shape and shape != "全部"
         need_color_filter = bool(color)
         need_star_filter = star and star != "全部"
-        need_extra = need_shape_filter or need_color_filter or need_star_filter
+        need_resolution_filter = resolution and resolution != "全部"
+        need_format_filter = fmt and fmt != "全部"
+        need_tags_filter = bool(tags)
+        need_extra = need_shape_filter or need_color_filter or need_star_filter or need_resolution_filter or need_format_filter or need_tags_filter
         fetch_limit = limit * 6 if need_extra else limit
 
         # ── 构建 V2 API 请求体 ──
@@ -435,6 +439,29 @@ async def items_route(request):
             if raw_count >= fetch_limit and len(color_filtered) >= limit:
                 total = offset + len(items) + 1
 
+        # ── 分辨率筛选 ──
+        if need_resolution_filter:
+            resolution_map = {
+                "<720p": (0, 1280 * 720),
+                "720p-1080p": (1280 * 720, 1920 * 1080),
+                "1080p-2k": (1920 * 1080, 2560 * 1440),
+                "2k-4k": (2560 * 1440, 3840 * 2160),
+                ">4k": (3840 * 2160, float('inf')),
+            }
+            min_px, max_px = resolution_map.get(resolution, (0, float('inf')))
+            items = [it for it in items if min_px <= (it.get("width", 0) * it.get("height", 0)) <= max_px]
+
+        # ── 格式筛选 ──
+        if need_format_filter:
+            items = [it for it in items if (it.get("ext", "") or "").lower() == fmt.lower()]
+
+        # ── 标签筛选（多选交集） ──
+        if need_tags_filter:
+            def _has_all_tags(item, required):
+                item_tags = set(str(t).lower() for t in item.get("tags", []))
+                return all(str(t).lower() in item_tags for t in required)
+            items = [it for it in items if _has_all_tags(it, tags)]
+
         # 批量获取缩略图路径（供前端直接使用）
         _batch_fetch_thumbnails(items)
 
@@ -442,6 +469,44 @@ async def items_route(request):
 
     except Exception as e:
         logger.error(f"[EagleGallery] items 路由错误: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("POST", "/eagle_gallery/tags")
+async def tags_route(request):
+    """获取当前文件夹/搜索条件下的标签列表及数量（用于标签弹窗）。"""
+    try:
+        body = await request.json()
+        folder_id = body.get("folderId", "")
+        keywords = body.get("keywords", "")
+
+        # 先拉取符合条件的 items（用较大 limit 保证标签覆盖）
+        v2_body = {"limit": 500, "offset": 0}
+        if folder_id:
+            v2_body["folders"] = [folder_id]
+        if keywords:
+            v2_body["keywords"] = [keywords]
+
+        ok, v2_data = _eagle_v2_request("/api/v2/item/get", v2_body)
+        if not ok:
+            return web.json_response({"success": False, "error": v2_data}, status=500)
+
+        items = v2_data.get("data", []) if isinstance(v2_data, dict) else []
+        if not isinstance(items, list):
+            items = []
+
+        counter = {}
+        for item in items:
+            for tag in item.get("tags", []) or []:
+                name = str(tag)
+                counter[name] = counter.get(name, 0) + 1
+
+        tags = [{"name": name, "count": count} for name, count in counter.items()]
+        tags.sort(key=lambda x: x["name"].lower())
+        return web.json_response({"success": True, "tags": tags, "total": len(tags)})
+
+    except Exception as e:
+        logger.error(f"[EagleGallery] tags 路由错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
@@ -467,6 +532,185 @@ def _eagle_v2_item_info(item_id: str):
     return {}
 
 
+# ── 原图路径解析 helpers ─────────────────────────────────────────────────────
+# 修复：Eagle API V2 返回的 filePath 在部分场景下是 URL 编码路径、缩略图路径，
+# 或者干脆缺失。这里做四层回退：URL 解码 → 同目录原图 → .info 目录扫描 → HTTP 缩略图。
+
+_SUPPORTED_IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif")
+
+
+def _get_eagle_library_path() -> str:
+    """同步获取 Eagle 资源库根目录（V2 API）。"""
+    try:
+        ok, data = _eagle_v2_request("/api/v2/library/info")
+        if ok and isinstance(data, dict):
+            if "path" in data and data["path"]:
+                return data["path"]
+            lib = data.get("library", {})
+            return lib.get("path", "")
+    except Exception as e:
+        logger.warning(f"[EagleGallery] 获取 Eagle 资源库路径失败: {e}")
+    return ""
+
+
+def _open_image(path: str):
+    """打开本地图片并强制加载，失败返回 None。"""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        img = Image.open(path)
+        img.load()
+        return img
+    except Exception as e:
+        logger.warning(f"[EagleGallery] 打开图片失败 {path}: {e}")
+        return None
+
+
+def _is_thumbnail_filename(fname: str) -> bool:
+    """判断文件名是否是 Eagle 缩略图。"""
+    if not fname:
+        return False
+    low = fname.lower()
+    base, _ = os.path.splitext(low)
+    return low.startswith("_thumbnail") or base.endswith("_thumbnail")
+
+
+def _scan_info_folder(info_dir: str, prefer_original: bool = True):
+    """扫描 Eagle .info 目录，返回最佳图片路径。"""
+    if not info_dir or not os.path.isdir(info_dir):
+        return None
+    try:
+        # 优先读取 metadata.json 中的 name + ext
+        meta_path = os.path.join(info_dir, "metadata.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                name = meta.get("name", "")
+                ext = meta.get("ext", "")
+                if name and ext:
+                    candidate = os.path.join(info_dir, f"{name}.{ext}")
+                    if os.path.exists(candidate):
+                        return candidate
+            except Exception as e:
+                logger.warning(f"[EagleGallery] 读取 metadata.json 失败: {e}")
+
+        originals = []
+        thumbs = []
+        for fname in os.listdir(info_dir):
+            low = fname.lower()
+            if low == "metadata.json" or not low.endswith(_SUPPORTED_IMG_EXT):
+                continue
+            fpath = os.path.join(info_dir, fname)
+            try:
+                with Image.open(fpath) as im:
+                    w, h = im.size
+                area = w * h
+            except Exception:
+                area = 0
+            if _is_thumbnail_filename(fname):
+                thumbs.append((area, fpath))
+            else:
+                originals.append((area, fpath))
+
+        if prefer_original:
+            if originals:
+                originals.sort(key=lambda x: x[0], reverse=True)
+                return originals[0][1]
+        if thumbs:
+            thumbs.sort(key=lambda x: x[0], reverse=True)
+            return thumbs[0][1]
+        return None
+    except Exception as e:
+        logger.warning(f"[EagleGallery] 扫描 .info 目录失败 {info_dir}: {e}")
+        return None
+
+
+def _http_thumbnail_image(item_id: str):
+    """从 Eagle HTTP 缩略图端点加载图片，返回 PIL Image。"""
+    if not item_id:
+        return None
+    try:
+        thumb_path = _eagle_v1_thumbnail(item_id)
+        if thumb_path:
+            thumb_path = urllib.parse.unquote(thumb_path)
+            if os.path.isfile(thumb_path):
+                img = _open_image(thumb_path)
+                if img:
+                    return img
+        # V1 路径也失败，尝试通过 V2 拿到 thumbnail 路径
+        v2_item = _eagle_v2_item_info(item_id)
+        for key in ("thumbnail", "thumbnailPath", "filePath"):
+            path = v2_item.get(key, "")
+            if path:
+                path = urllib.parse.unquote(path)
+                img = _open_image(path)
+                if img:
+                    return img
+    except Exception as e:
+        logger.warning(f"[EagleGallery] HTTP 缩略图加载失败 {item_id}: {e}")
+    return None
+
+
+def _resolve_image_path(sel: dict):
+    """解析选中项对应的真实图片路径（优先原图）。返回 (img, path_or_id)。"""
+    item_id = sel.get("id", "")
+    raw_path = sel.get("filePath", "") or ""
+    file_path = urllib.parse.unquote(raw_path) if raw_path else ""
+
+    # 1. 如果已有 filePath 且存在，并非常规缩略图，直接用
+    if file_path and os.path.isfile(file_path) and not _is_thumbnail_filename(file_path):
+        img = _open_image(file_path)
+        if img:
+            logger.info(f"[EagleGallery] 直接加载: {file_path}")
+            return img, file_path
+
+    # 2. filePath 指向缩略图时，到同目录找原图
+    if file_path and os.path.isfile(file_path):
+        parent = os.path.dirname(file_path)
+        scanned = _scan_info_folder(parent, prefer_original=True)
+        if scanned:
+            img = _open_image(scanned)
+            if img:
+                logger.info(f"[EagleGallery] 同目录扫描原图: {scanned}")
+                return img, scanned
+
+    # 3. 用 item_id + name/ext 构造确定性路径
+    lib_path = _get_eagle_library_path()
+    if lib_path and item_id:
+        info_dir = os.path.join(lib_path, "images", f"{item_id}.info")
+        name = sel.get("name", "")
+        ext = sel.get("ext", "")
+        if name and ext:
+            candidate = os.path.join(info_dir, f"{name}.{ext}")
+            img = _open_image(candidate)
+            if img:
+                logger.info(f"[EagleGallery] 确定性路径加载: {candidate}")
+                return img, candidate
+        # 4. 扫描 .info 目录
+        scanned = _scan_info_folder(info_dir, prefer_original=True)
+        if scanned:
+            img = _open_image(scanned)
+            if img:
+                logger.info(f"[EagleGallery] .info 扫描原图: {scanned}")
+                return img, scanned
+        # 5. 缩略图降级
+        scanned_thumb = _scan_info_folder(info_dir, prefer_original=False)
+        if scanned_thumb:
+            img = _open_image(scanned_thumb)
+            if img:
+                logger.warning(f"[EagleGallery] 未找到原图，降级加载缩略图: {scanned_thumb}")
+                return img, scanned_thumb
+
+    # 6. 最后回退：HTTP 缩略图
+    img = _http_thumbnail_image(item_id)
+    if img:
+        logger.warning(f"[EagleGallery] 未找到本地文件，使用 HTTP 缩略图 id={item_id}")
+        return img, f"eagle://thumb/{item_id}"
+
+    return None, ""
+
+
 def _generate_placeholder_image() -> bytes:
     """生成一个带'无缩略图'文字的 SVG 占位图（避免透明 PNG 在暗色背景上显示为黑块）。"""
     svg_text = """<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150">
@@ -479,7 +723,7 @@ def _generate_placeholder_image() -> bytes:
 _PLACEHOLDER_BYTES = _generate_placeholder_image()
 
 
-@PromptServer.instance.routes.get("/eagle_gallery/thumbnail")
+@route("GET", "/eagle_gallery/thumbnail")
 async def thumbnail_route(request):
     """代理 Eagle 缩略图 — 从 V1 端点获取路径后读磁盘返回图片；V1 失败时回退到 V2。"""
     item_id = request.query.get("id", "")
@@ -535,7 +779,7 @@ async def thumbnail_route(request):
             headers={"Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=60"})
 
 
-@PromptServer.instance.routes.post("/eagle_gallery/item_info")
+@route("POST", "/eagle_gallery/item_info")
 async def item_info_route(request):
     """批量获取 item 详细信息（含 filePath）。"""
     try:
@@ -570,7 +814,7 @@ async def item_info_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.post("/eagle_gallery/cache_selection")
+@route("POST", "/eagle_gallery/cache_selection")
 async def cache_selection_post_route(request):
     """缓存节点选中数据 + 前端配置（output_mode / sequence_index）。"""
     try:
@@ -598,7 +842,7 @@ async def cache_selection_post_route(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.get("/eagle_gallery/cache_selection")
+@route("GET", "/eagle_gallery/cache_selection")
 async def cache_selection_get_route(request):
     """获取节点缓存的选中数据。"""
     try:
@@ -659,7 +903,11 @@ class EagleGalleryNode:
             try:
                 data = json.loads(selection_data)
                 selections = data.get("selections", [])
-                _selection_cache[node_id] = selections
+                _selection_cache[node_id] = {
+                    "selections": selections,
+                    "output_mode": data.get("output_mode", "rgb"),
+                    "sequence_index": data.get("sequence_index", 0),
+                }
                 logger.info(f"[EagleGallery] 内存缓存丢失，从节点属性恢复了 {len(selections)} 个选中项")
             except: pass
 
@@ -697,17 +945,15 @@ class EagleGalleryNode:
         tags_list = []
 
         for sel in target_selections:
-            file_path = sel.get("filePath", "")
             tags = sel.get("tags", [])
 
             tags_str = ", ".join([str(t) for t in tags if t]) if tags else ""
             tags_list.append(tags_str)
 
-            if file_path and os.path.exists(file_path):
+            # 使用多级回退解析原图路径（URL 解码 / 同目录扫描 / .info 扫描 / HTTP 缩略图）
+            img, resolved_path = _resolve_image_path(sel)
+            if img:
                 try:
-                    img = Image.open(file_path)
-                    img.load()
-
                     if return_rgba:
                         # RGBA 模式：保留透明通道
                         if img.mode != "RGBA":
@@ -728,10 +974,12 @@ class EagleGalleryNode:
 
                     images.append(tensor)
                 except Exception as e:
-                    logger.error(f"[EagleGallery] 加载图片失败 {file_path}: {e}")
+                    logger.error(f"[EagleGallery] 转换图片失败 {resolved_path}: {e}")
                     dummy_shape = (1, 64, 64, 4) if return_rgba else (1, 64, 64, 3)
                     images.append(torch.zeros(dummy_shape))
             else:
+                item_id = sel.get("id", "")
+                logger.warning(f"[EagleGallery] 无法解析图片路径 id={item_id}")
                 dummy_shape = (1, 64, 64, 4) if return_rgba else (1, 64, 64, 3)
                 images.append(torch.zeros(dummy_shape))
 

@@ -18,7 +18,7 @@ import torch
 import numpy as np
 from PIL import Image
 from aiohttp import web
-from server import PromptServer
+from .route_registry import route
 from .logger import logger
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 BASE_URL = "https://wallhaven.cc/api/v1"""
@@ -123,7 +123,7 @@ def _get_image_proxy_sem():
         _image_proxy_semaphore = asyncio.Semaphore(3)
     return _image_proxy_semaphore
 # ── aiohttp 路由 ──────────────────────────────────────────────────────────────
-@PromptServer.instance.routes.get("/wallhaven_gallery/settings")
+@route("GET", "/wallhaven_gallery/settings")
 async def get_settings_route(request):
     try:
         s = _load_settings()
@@ -133,7 +133,7 @@ async def get_settings_route(request):
         return web.json_response({"success": True, "settings": safe})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.post("/wallhaven_gallery/settings")
+@route("POST", "/wallhaven_gallery/settings")
 async def save_settings_route(request):
     try:
         data = await request.json()
@@ -146,7 +146,7 @@ async def save_settings_route(request):
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
-@PromptServer.instance.routes.post("/wallhaven_gallery/verify_auth")
+@route("POST", "/wallhaven_gallery/verify_auth")
 async def verify_auth_route(request):
     try:
         data = await request.json()
@@ -172,7 +172,7 @@ async def verify_auth_route(request):
             return web.json_response({"success": True, "valid": False, "network_error": True, "error": str(e)})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.get("/wallhaven_gallery/search")
+@route("GET", "/wallhaven_gallery/search")
 async def search_route(request):
     try:
         q = request.query
@@ -217,7 +217,7 @@ async def search_route(request):
     except Exception as e:
         logger.error(f"[Wallhaven] 搜索路由错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.get("/wallhaven_gallery/wallpaper/{wid}")
+@route("GET", "/wallhaven_gallery/wallpaper/{wid}")
 async def wallpaper_detail_route(request):
     try:
         wid = request.match_info["wid"]
@@ -233,7 +233,7 @@ async def wallpaper_detail_route(request):
         return web.json_response(resp.json())
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.get("/wallhaven_gallery/collections")
+@route("GET", "/wallhaven_gallery/collections")
 async def collections_route(request):
     try:
         settings = _load_settings()
@@ -256,7 +256,7 @@ async def collections_route(request):
         return web.json_response({"success": True, "collections": data.get("data", [])})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.get("/wallhaven_gallery/collections/{username}/{collection_id}")
+@route("GET", "/wallhaven_gallery/collections/{username}/{collection_id}")
 async def collection_wallpapers_route(request):
     try:
         username = request.match_info["username"]
@@ -274,7 +274,7 @@ async def collection_wallpapers_route(request):
         return web.json_response(resp.json())
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.get("/wallhaven_gallery/tag/{tag_id}")
+@route("GET", "/wallhaven_gallery/tag/{tag_id}")
 async def tag_info_route(request):
     try:
         tag_id = request.match_info["tag_id"]
@@ -287,7 +287,7 @@ async def tag_info_route(request):
         return web.json_response(resp.json())
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
-@PromptServer.instance.routes.get("/wallhaven_gallery/image_proxy")
+@route("GET", "/wallhaven_gallery/image_proxy")
 async def image_proxy_route(request):
     """
     后端图片代理——只允许代理 wallhaven.cc 域名(SSRF 防护)    """
@@ -318,7 +318,7 @@ async def image_proxy_route(request):
             "Cache-Control": "public, max-age=86400",
         },
     )
-@PromptServer.instance.routes.get("/wallhaven_gallery/check_network")
+@route("GET", "/wallhaven_gallery/check_network")
 async def check_network_route(request):
     try:
         resp = await asyncio.to_thread(

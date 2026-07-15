@@ -8,17 +8,9 @@ import json
 
 from ..eagle_suite.logger import logger
 
-# ── 懒加载 aiohttp / PromptServer ──────────────────────────
-try:
-    from aiohttp import web
-    from server import PromptServer
-    _HAS_PROMPT_SERVER = True
-except Exception:
-    web = None
-    PromptServer = None
-    _HAS_PROMPT_SERVER = False
-
-
+# ── 延迟路由装饰器 ──────────────────────────
+from aiohttp import web
+from ..eagle_suite.route_registry import route
 PROMPT_TEMPLATES = {
     "图片编辑 (kontext)": [
         {"Label": "移除物体", "Instruction": "remove the __TARGET__",
@@ -91,34 +83,33 @@ class EaglePromptPresets:
 
 # ── 路由 ───────────────────────────────────────────────────
 
-if _HAS_PROMPT_SERVER:
 
-    @PromptServer.instance.routes.get("/eaglePromptPresets/search_template")
-    async def search_template(request):
-        try:
-            keyword = request.query.get("keyword", "").strip()
-            category = request.query.get("category", "图片编辑 (kontext)")
-            page = int(request.query.get("page", 1))
-            page_size = int(request.query.get("page_size", 10))
+@route("GET", "/eaglePromptPresets/search_template")
+async def search_template(request):
+    try:
+        keyword = request.query.get("keyword", "").strip()
+        category = request.query.get("category", "图片编辑 (kontext)")
+        page = int(request.query.get("page", 1))
+        page_size = int(request.query.get("page_size", 10))
 
-            items = PROMPT_TEMPLATES.get(category, [])
-            if keyword:
-                kw = keyword.lower()
-                items = [d for d in items if kw in d['Label'].lower() or kw in d['Instruction'].lower()]
+        items = PROMPT_TEMPLATES.get(category, [])
+        if keyword:
+            kw = keyword.lower()
+            items = [d for d in items if kw in d['Label'].lower() or kw in d['Instruction'].lower()]
 
-            total = len(items)
-            total_pages = max(1, math.ceil(total / page_size))
-            start = (page - 1) * page_size
-            paginated = items[start:start + page_size]
+        total = len(items)
+        total_pages = max(1, math.ceil(total / page_size))
+        start = (page - 1) * page_size
+        paginated = items[start:start + page_size]
 
-            return web.json_response({
-                "success": True, "data": {
-                    "list_data": paginated,
-                    "total_pagenum": total_pages,
-                    "total_count": total,
-                    "categories": list(PROMPT_TEMPLATES.keys()),
-                }
-            })
-        except Exception as e:
-            logger.error(f"[EagleFileTools] search_template 错误: {e}")
-            return web.json_response({"success": False, "error": str(e)}, status=500)
+        return web.json_response({
+            "success": True, "data": {
+                "list_data": paginated,
+                "total_pagenum": total_pages,
+                "total_count": total,
+                "categories": list(PROMPT_TEMPLATES.keys()),
+            }
+        })
+    except Exception as e:
+        logger.error(f"[EagleFileTools] search_template 错误: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)

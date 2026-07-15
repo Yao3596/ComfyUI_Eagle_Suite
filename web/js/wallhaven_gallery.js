@@ -446,10 +446,8 @@ app.registerExtension({
             }
 
             const container = document.createElement("div");
-            container.style.width = "100%";
-            container.style.height = "100%";
+            container.style.cssText = "width:100%;height:100%;overflow:hidden;";
             const widget = this.addDOMWidget("wallhaven_gallery", "div", container, { serialize: false });
-            widget.computeSize = (w) => [w, 660];
 
             const vueApp = createApp(WallhavenGalleryApp, { node: this });
             vueApp.mount(container);
@@ -460,7 +458,6 @@ app.registerExtension({
                 onResize?.apply(this, arguments);
                 const h = Math.max(400, size[1] - 100);
                 container.style.height = h + "px";
-                widget.computeSize = (w) => [w, h];
             };
         };
 

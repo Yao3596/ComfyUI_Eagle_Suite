@@ -341,11 +341,19 @@ class EagleAPILoader:
         return (api_key, base_url, model, (api_key, base_url, model))
 
 
-# ── aiohttp 路由（仅在 PromptServer 可用时注册）─────────────────────────
+# ── aiohttp 路由（延迟注册，避免导入时 PromptServer.instance 未就绪）──────
 
-if _HAS_PROMPT_SERVER:
+def register_routes():
+    """延迟注册 API Loader 路由。"""
+    if not _HAS_PROMPT_SERVER:
+        return
+    server = PromptServer.instance
+    if not server:
+        logger.warning("[APILoader] PromptServer.instance 未就绪，跳过路由注册")
+        return
+    routes = server.routes
 
-    @PromptServer.instance.routes.post("/api_loader/profile_info")
+    @routes.post("/api_loader/profile_info")
     async def get_profile_info_route(request):
         """前端调用：传入 profile_name + config_path，返回该 profile 的 base_url 和 api_key。"""
         try:
@@ -374,8 +382,7 @@ if _HAS_PROMPT_SERVER:
             logger.error(f"[api_loader/profile_info] 错误: {e}")
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
-
-    @PromptServer.instance.routes.post("/api_loader/profiles")
+    @routes.post("/api_loader/profiles")
     async def get_profiles_route(request):
         """前端调用：传入 config_path，返回配置文件中所有 profile 名称列表。
         以文件内容为准：只要 JSON 内容合法且包含有效 profile，即可返回名称列表。
@@ -395,8 +402,7 @@ if _HAS_PROMPT_SERVER:
             logger.error(f"[api_loader/profiles] 错误: {e}")
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
-
-    @PromptServer.instance.routes.post("/api_loader/models")
+    @routes.post("/api_loader/models")
     async def get_models_route(request):
         """
         前端调用：传入 base_url + api_key，返回该端点的可用模型列表。
@@ -453,8 +459,7 @@ if _HAS_PROMPT_SERVER:
             logger.error(f"[api_loader/models] 错误: {e}")
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
-
-    @PromptServer.instance.routes.post("/api_loader/select_config_file")
+    @routes.post("/api_loader/select_config_file")
     async def select_config_file_route(request):
         """
         前端文件选择器回调：接收上传的 JSON 配置文件，写入 ComfyUI 临时目录，
@@ -489,8 +494,7 @@ if _HAS_PROMPT_SERVER:
             logger.error(f"[api_loader/select_config_file] 错误: {e}")
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
-
-    @PromptServer.instance.routes.post("/api_loader/pick_file")
+    @routes.post("/api_loader/pick_file")
     async def pick_file_route(request):
         """
         在服务端打开原生 Windows 文件选择对话框，返回真实的文件路径。
@@ -504,6 +508,12 @@ if _HAS_PROMPT_SERVER:
         except Exception as e:
             logger.error(f"[api_loader/pick_file] 错误: {e}")
             return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    logger.info("[APILoader] API Loader 路由已注册")
+
+
+# 注意：路由由 eagle_suite/__init__.py 统一调用 register_routes() 注册，
+# 避免在 PromptServer.instance 未就绪时自动注册导致 AttributeError。
 
 
 def _native_file_dialog() -> str:

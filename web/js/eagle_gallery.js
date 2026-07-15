@@ -9,13 +9,36 @@ import { createApp, h, ref, computed, onMounted } from "../lib/vue.esm-browser.j
 // ============================================================
 var FolderTree = {
   name: "FolderTree",
-  props: { folders: Array, selectedId: String, onSelect: Function },
+  props: { folders: Array, selectedId: String, onSelect: Function, query: String },
   setup: function(props) {
     var expanded = ref({});
     function toggle(f) { expanded.value[f.id] = !expanded.value[f.id]; }
+    function matchQuery(name) {
+      var q = (props.query || "").trim().toLowerCase();
+      if (!q) return true;
+      return (name || "").toLowerCase().indexOf(q) >= 0;
+    }
+    function anyChildMatch(folder) {
+      if (!folder.children || folder.children.length === 0) return false;
+      for (var i = 0; i < folder.children.length; i++) {
+        var c = folder.children[i];
+        if (matchQuery(c.name) || anyChildMatch(c)) return true;
+      }
+      return false;
+    }
+    function filterFolders(list) {
+      var q = (props.query || "").trim().toLowerCase();
+      if (!q) return list;
+      return list.filter(function(f) {
+        if (matchQuery(f.name)) return true;
+        return anyChildMatch(f);
+      });
+    }
     function renderNode(folder, level) {
+      var q = (props.query || "").trim().toLowerCase();
+      if (q && !matchQuery(folder.name) && !anyChildMatch(folder)) return null;
       var hasKids = folder.children && folder.children.length > 0;
-      var isOpen = expanded.value[folder.id];
+      var isOpen = expanded.value[folder.id] || (q && anyChildMatch(folder)); // 搜索时自动展开含匹配子项的父级
       var isSel = props.selectedId === folder.id;
       var indent = level * 16;
       var arrow = hasKids ? "\u25B6" : "";
@@ -29,15 +52,19 @@ var FolderTree = {
         onClick: function() { props.onSelect(folder); }
       }, row)];
       if (hasKids && isOpen) {
-        var cn = []; folder.children.forEach(function(c) { cn.push(renderNode(c, level + 1)); });
-        children.push(h("div", cn));
+        var cn = [];
+        folder.children.forEach(function(c) {
+          var node = renderNode(c, level + 1);
+          if (node) cn.push(node);
+        });
+        if (cn.length > 0) children.push(h("div", cn));
       }
       return h("div", { key: folder.id }, children);
     }
     return function() {
-      var list = props.folders || [];
+      var list = filterFolders(props.folders || []);
       return h("div", { class: "ft-wrap" },
-        list.length === 0 ? h("div", { class: "ft-empty" }, "\u52A0\u8F7D\u4E2D\u2026") :
+        list.length === 0 ? h("div", { class: "ft-empty" }, "\u65E0\u5339\u914D\u6587\u4EF6\u5939") :
           list.map(function(f) { return renderNode(f, 0); })
       );
     };
@@ -70,7 +97,7 @@ var ImageGrid = {
           key: item.id,
           class: "g-card" + (sel ? " sel" : ""),
           style: cardStyle,
-          onClick: function() { props.onSelect(item, idx); }
+          onClick: function(e) { props.onSelect(item, idx, e); }
         }, [
           h("div", { class: "g-img-box" }, [
             h("img", { src: src, class: "g-img",
@@ -206,6 +233,82 @@ var SettingsDialog = {
 };
 
 // ============================================================
+// 标签筛选弹窗
+// ============================================================
+var TagFilterDialog = {
+  name: "TagFilterDialog",
+  props: { visible: Boolean, tags: Array, selectedTags: Array, onClose: Function, onChange: Function, loading: Boolean },
+  setup: function(props) {
+    var tagQuery = ref("");
+    function toggleTag(tagName) {
+      var sels = (props.selectedTags || []).slice();
+      var idx = sels.indexOf(tagName);
+      if (idx >= 0) sels.splice(idx, 1);
+      else sels.push(tagName);
+      props.onChange(sels);
+    }
+    function clearAll() { props.onChange([]); }
+    function groupedTags() {
+      var q = (tagQuery.value || "").trim().toLowerCase();
+      var list = (props.tags || []).filter(function(t) {
+        if (!q) return true;
+        return (t.name || "").toLowerCase().indexOf(q) >= 0;
+      });
+      var groups = {};
+      list.forEach(function(t) {
+        var name = t.name || "";
+        var first = name.charAt(0).toUpperCase();
+        if (!first || !/[A-Z\u4e00-\u9fa5]/.test(first)) first = "#";
+        if (!groups[first]) groups[first] = [];
+        groups[first].push(t);
+      });
+      var keys = Object.keys(groups).sort();
+      return keys.map(function(k) { return { key: k, tags: groups[k] }; });
+    }
+    return function() {
+      if (!props.visible) return h("div");
+      var selected = props.selectedTags || [];
+      return h("div", { class: "sd-over", onClick: props.onClose }, [
+        h("div", { class: "sd-box tg-box", onClick: function(e) { e.stopPropagation(); } }, [
+          h("div", { class: "sd-hd" }, [
+            h("span", {}, "\u{1F3F7} \u6807\u7B7E\u7B5B\u9009"),
+            h("button", { class: "sd-x", onClick: props.onClose }, "\u2715")
+          ]),
+          h("div", { class: "tg-hd" }, [
+            h("input", { class: "sd-inp", placeholder: "\u641C\u7D22\u6807\u7B7E...", value: tagQuery.value,
+              onInput: function(e) { tagQuery.value = e.target.value; }
+            }),
+            selected.length > 0 ? h("button", { class: "eg-btn tg-clr", onClick: clearAll }, "\u6E05\u9664 (" + selected.length + ")") : null
+          ]),
+          h("div", { class: "tg-sel" }, selected.length === 0 ? h("span", { class: "tg-sel-empty" }, "\u672A\u9009\u6807\u7B7E") :
+            selected.map(function(t) {
+              return h("span", { class: "tg-chip", key: t, onClick: function() { toggleTag(t); } }, [t, h("b", {}, " \u2715")]);
+            })
+          ),
+          h("div", { class: "tg-bd" }, props.loading ? h("div", { class: "tg-loading" }, "\u52A0\u8F7D\u4E2D...") :
+            groupedTags().map(function(g) {
+              return h("div", { class: "tg-grp", key: g.key }, [
+                h("div", { class: "tg-grp-h" }, g.key + " (" + g.tags.length + ")"),
+                h("div", { class: "tg-list" }, g.tags.map(function(t) {
+                  var active = selected.indexOf(t.name) >= 0;
+                  return h("div", { class: "tg-it" + (active ? " on" : ""), key: t.name, onClick: function() { toggleTag(t.name); } }, [
+                    h("span", { class: "tg-nm" }, t.name),
+                    h("span", { class: "tg-cnt" }, t.count || 0)
+                  ]);
+                }))
+              ]);
+            })
+          ),
+          h("div", { class: "sd-ft" }, [
+            h("button", { class: "eg-btn", onClick: props.onClose }, "\u5B8C\u6210")
+          ])
+        ])
+      ]);
+    };
+  }
+};
+
+// ============================================================
 // 主组件
 // ============================================================
 var EagleGallery = {
@@ -225,6 +328,20 @@ var EagleGallery = {
     var color = ref("");
     var outMode = ref("rgb");
     var seqIdx = ref(0);
+
+    // 新增：分辨率 / 格式 / 标签筛选
+    var resolution = ref("全部");
+    var format = ref("全部");
+    var selectedTags = ref([]);
+    var tagPopupVisible = ref(false);
+    var allTags = ref([]);
+    var tagsLoading = ref(false);
+
+    // 新增：文件夹搜索
+    var folderQuery = ref("");
+
+    // 新增：整夹输出状态
+    var wholeFolderOutput = ref(false);
 
     var items = ref([]);
     var folders = ref([]);
@@ -283,7 +400,10 @@ var EagleGallery = {
           limit: 100,
           folderId: folderId.value === "_all" ? "" : folderId.value,
           keywords: query.value, star: star.value, shape: shape.value,
-          color: color.value || ""
+          color: color.value || "",
+          resolution: resolution.value,
+          format: format.value,
+          tags: selectedTags.value
         })
       }).then(function(r){return r.json()}).then(function(d){
         loading.value = false;
@@ -301,35 +421,60 @@ var EagleGallery = {
       }).catch(function(e){ loading.value = false; err.value = e.message; });
     }
 
+    // 加载标签列表（按使用数量排序）
+    function loadTags() {
+      tagsLoading.value = true;
+      fetch("/eagle_gallery/tags", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          folderId: folderId.value === "_all" ? "" : folderId.value,
+          keywords: query.value
+        })
+      }).then(function(r){return r.json();}).then(function(d){
+        tagsLoading.value = false;
+        if (d.success && Array.isArray(d.tags)) {
+          allTags.value = d.tags;
+        }
+      }).catch(function(){ tagsLoading.value = false; });
+    }
+
     // 重新搜索
     function doSearch() {
       items.value = []; offset.value = 0; hasMore.value = true; err.value = "";
-      loadMore();
+      loadTags(); loadMore();
     }
 
     function onFolder(f) { folderId.value = f.id; doSearch(); }
 
     // 将当前选中状态同步到后端缓存
-    function syncSelection() {
+    function syncSelection(customSelections) {
       var nodeId = String(props.node.id);
       if (!nodeId) return;
 
       var sels = [];
-      selectedIds.value.forEach(function(sid) {
-        for (var i = 0; i < items.value.length; i++) {
-          if (items.value[i].id === sid) {
-            sels.push({
-              id: sid,
-              filePath: items.value[i].filePath || items.value[i].thumbnail || "",
-              tags: items.value[i].tags || [],
-              name: items.value[i].name || "",
-              width: items.value[i].width || 0,
-              height: items.value[i].height || 0,
-            });
-            break;
-          }
-        }
+      var srcSels = customSelections || [];
+      srcSels.forEach(function(sel) {
+        sels.push(sel);
       });
+      // 未传自定义时使用当前选中
+      if (srcSels.length === 0) {
+        selectedIds.value.forEach(function(sid) {
+          for (var i = 0; i < items.value.length; i++) {
+            if (items.value[i].id === sid) {
+              sels.push({
+                id: sid,
+                filePath: items.value[i].filePath || items.value[i].thumbnail || "",
+                tags: items.value[i].tags || [],
+                name: items.value[i].name || "",
+                ext: items.value[i].ext || "",
+                width: items.value[i].width || 0,
+                height: items.value[i].height || 0,
+              });
+              break;
+            }
+          }
+        });
+      }
 
       fetch("/eagle_gallery/cache_selection", {
         method: "POST",
@@ -338,24 +483,43 @@ var EagleGallery = {
           node_id: nodeId,
           selections: sels,
           output_mode: outMode.value,
-          selections_data: JSON.stringify({ selections: sels }), // 冗余一份用于前端回显
+          selections_data: JSON.stringify({ selections: sels }),
           sequence_index: seqIdx.value
         })
       }).catch(function(){});
 
-      // 同步到 ComfyUI 原生 widget 以便后端读取（直接用 props.node，
-      // 不用再去 graph._nodes 里按 id 找一遍）
+      // 同步到 ComfyUI 原生 widget（用于工作流保存时持久化选择数据）。
+      // 注意：不调用 setDirtyCanvas，避免每次选图都触发 ComfyUI 重绘节点，
+      // 重绘会把 DOM widget 宽度重新计算，导致画面被压缩。
       try {
         var widget = (props.node.widgets || []).find(function(w) { return w.name === "selection_data"; });
         if (widget) {
-          widget.value = JSON.stringify({ selections: sels });
-          if (props.node.graph) props.node.graph.setDirtyCanvas(true, true);
+          widget.value = JSON.stringify({ selections: sels, output_mode: outMode.value, sequence_index: seqIdx.value });
         }
       } catch (e) {}
     }
 
-    function onImg(item, index) {
-      if (window.event && window.event.shiftKey && selectedIds.value.length > 0) {
+    // 整夹输出：将当前筛选结果下已加载的全部图片作为选中项
+    function selectAllForOutput() {
+      var sels = [];
+      items.value.forEach(function(item) {
+        sels.push({
+          id: item.id,
+          filePath: item.filePath || item.thumbnail || "",
+          tags: item.tags || [],
+          name: item.name || "",
+          ext: item.ext || "",
+          width: item.width || 0,
+          height: item.height || 0,
+        });
+      });
+      selectedIds.value = sels.map(function(s){ return s.id; });
+      syncSelection(sels);
+    }
+
+    function onImg(item, index, e) {
+      e = e || window.event;
+      if (e && e.shiftKey && selectedIds.value.length > 0) {
         // 实现 Shift 连选逻辑
         var lastId = selectedIds.value[selectedIds.value.length - 1];
         var lastIdx = -1;
@@ -388,6 +552,43 @@ var EagleGallery = {
         cards[idx].classList.add("jump-hit");
         setTimeout(function(){ cards[idx].classList.remove("jump-hit"); }, 2000);
       }
+    }
+
+    // 根据编号（支持单个、逗号分隔、或 始-终 范围）选中对应图片
+    function selectByIndex(input) {
+      if (!input) return;
+      var list = [];
+      var part = String(input).trim().replace(/[\[\]\s]/g, "");
+      if (!part) return;
+
+      part.split(",").forEach(function(seg) {
+        if (!seg) return;
+        if (seg.indexOf("-") >= 0) {
+          var range = seg.split("-");
+          var start = parseInt(range[0], 10) || 0;
+          var end = parseInt(range[1], 10);
+          if (isNaN(end)) end = start;
+          for (var i = Math.min(start, end); i <= Math.max(start, end); i++) {
+            list.push(i);
+          }
+        } else {
+          var n = parseInt(seg, 10);
+          if (!isNaN(n)) list.push(n);
+        }
+      });
+
+      if (list.length === 0) return;
+
+      list.forEach(function(idx) {
+        if (idx >= 0 && idx < items.value.length) {
+          var id = items.value[idx].id;
+          if (selectedIds.value.indexOf(id) === -1) selectedIds.value.push(id);
+        }
+      });
+
+      // 滚动到最后选中的项
+      jumpTo(list[list.length - 1]);
+      syncSelection();
     }
 
     function removeSelected(item) {
@@ -444,6 +645,7 @@ var EagleGallery = {
             onInput: function(e) { query.value = e.target.value; },
             onKeyup: function(e) { if (e.key === "Enter") doSearch(); }
           }),
+          h("button", { class: "eg-btn eg-btn-primary", onClick: doSearch, title: "\u641C\u7D22" }, "\u641C\u7D22"),
           h(ColorDropdown, { modelValue: color.value, onChange: onColor }),
           h("select", { class: "eg-sel", value: shape.value,
             onChange: function(e) { shape.value = e.target.value; doSearch(); }
@@ -463,25 +665,41 @@ var EagleGallery = {
             h("option", { value: "2" }, "\u2605\u2605"),
             h("option", { value: "1" }, "\u2605")
           ]),
-          h("select", { class: "eg-sel", value: ratioMode.value, 
-            onChange: function(e) { ratioMode.value = e.target.value; } 
+          h("select", { class: "eg-sel", value: resolution.value,
+            onChange: function(e) { resolution.value = e.target.value; doSearch(); }
           }, [
-            h("option", { value: "1/1" }, "1:1 \u65B9\u5F62"),
-            h("option", { value: "16/9" }, "16:9 \u5BBD\u5C4F"),
-            h("option", { value: "4/3" }, "4:3 \u6807\u51C6"),
-            h("option", { value: "2/3" }, "2:3 \u7EB5\u5411"),
-            h("option", { value: "auto" }, "\u81EA\u9002\u5E94")
+            h("option", { value: "\u5168\u90E8" }, "\u5168\u90E8\u5206\u8FA8\u7387"),
+            h("option", { value: "<720p" }, "<720p"),
+            h("option", { value: "720p-1080p" }, "720p-1080p"),
+            h("option", { value: "1080p-2k" }, "1080p-2K"),
+            h("option", { value: "2k-4k" }, "2K-4K"),
+            h("option", { value: ">4k" }, ">4K")
           ]),
+          h("select", { class: "eg-sel", value: format.value,
+            onChange: function(e) { format.value = e.target.value; doSearch(); }
+          }, [
+            h("option", { value: "\u5168\u90E8" }, "\u5168\u90E8\u683C\u5F0F"),
+            h("option", { value: "jpg" }, "JPEG"),
+            h("option", { value: "png" }, "PNG"),
+            h("option", { value: "webp" }, "WEBP"),
+            h("option", { value: "gif" }, "GIF"),
+            h("option", { value: "bmp" }, "BMP")
+          ]),
+          h("button", { class: "eg-btn" + (selectedTags.value.length > 0 ? " on" : ""), onClick: function() { tagPopupVisible.value = true; } },
+            "\u{1F3F7} \u6807\u7B7E" + (selectedTags.value.length > 0 ? "(" + selectedTags.value.length + ")" : "")
+          ),
+          // 合并 #索引 / 跳转：输入编号直接选中对应图片；支持单个数字、逗号分隔、或 始-终 范围
           h("div", { class: "eg-idx" }, [
-            h("label", { class: "eg-idl" }, "\u8DF3\u8F6C:"),
-            h("input", { class: "eg-idi", type: "number", placeholder: "#",
-              onKeyup: function(e) { if(e.key === "Enter") jumpTo(parseInt(e.target.value)||0); }
+            h("label", { class: "eg-idl" }, "# \u9009\u62E9"),
+            h("input", { class: "eg-idi", type: "text", placeholder: "# / #-#",
+              onKeyup: function(e) {
+                if (e.key !== "Enter") return;
+                selectByIndex(e.target.value);
+                e.target.value = "";
+              }
             })
           ]),
-          h("div", { class: "eg-mode" }, [
-            h("button", { class: "eg-mo" + (outMode.value === "rgb" ? " on" : ""), onClick: function() { outMode.value = "rgb"; syncSelection(); } }, "RGB"),
-            h("button", { class: "eg-mo" + (outMode.value === "rgba" ? " on" : ""), onClick: function() { outMode.value = "rgba"; syncSelection(); } }, "RGBA")
-          ]),
+          h("button", { class: "eg-btn eg-alpha" + (outMode.value === "rgba" ? " on" : ""), onClick: function() { outMode.value = (outMode.value === "rgba" ? "rgb" : "rgba"); syncSelection(); }, title: "Alpha \u901A\u9053" }, "\u03B1 Alpha"),
           h("div", { class: "eg-idx" }, [
             h("label", { class: "eg-idl" }, "\u8D77\u59CB:"),
             h("input", { class: "eg-idi", type: "number", min: "0", value: seqIdx.value,
@@ -493,21 +711,35 @@ var EagleGallery = {
           h("button", { class: "eg-btn eg-bt1", onClick: function() { setVis.value = true; }, title: "\u8BBE\u7F6E" }, "\u2699")
         ]),
 
-        // ═══ 主体 ═══
-        h("div", { class: "eg-body" }, [
-          h("div", { class: "eg-side" }, [
-            h(FolderTree, { folders: folders.value, selectedId: folderId.value, onSelect: onFolder })
-          ]),
-          h("div", { class: "eg-main" }, mainKids)
-        ]),
-
-        // ═══ 底栏：已选图像预览条 + 总数 ═══
+        // ═══ 状态栏：已选图像预览条 + 总数 + 整夹输出（移到工具栏下方，方便预览） ═══
         h("div", { class: "eg-foot" }, [
+          h("button", { class: "eg-btn eg-folder-out", onClick: selectAllForOutput, title: "\u8F93\u51FA\u5F53\u524D\u6587\u4EF6\u5939/\u7B5B\u9009\u7ED3\u679C\u7684\u5168\u90E8\u56FE\u7247" }, "\u6574\u5939\u8F93\u51FA"),
           h(SelectionBar, {
             items: items.value, selectedIds: selectedIds.value,
             onRemove: removeSelected, onClear: clearSel
           }),
           h("div", { class: "eg-sta" }, "\u5171 " + total.value + " \u5F20 \u2502 \u9009\u4E2D " + selectedIds.value.length + " \u5F20")
+        ]),
+
+        // 标签筛选弹窗
+        tagPopupVisible.value ? h(TagFilterDialog, {
+          visible: true, tags: allTags.value, selectedTags: selectedTags.value,
+          loading: tagsLoading.value,
+          onClose: function() { tagPopupVisible.value = false; },
+          onChange: function(sels) { selectedTags.value = sels; doSearch(); }
+        }) : h("div"),
+
+        // ═══ 主体 ═══
+        h("div", { class: "eg-body" }, [
+          h("div", { class: "eg-side" }, [
+            h("div", { class: "eg-folder-hd" }, [
+              h("input", { class: "eg-folder-srch", type: "text", value: folderQuery.value, placeholder: "\u641C\u7D22\u6587\u4EF6\u5939...",
+                onInput: function(e) { folderQuery.value = e.target.value; }
+              })
+            ]),
+            h(FolderTree, { folders: folders.value, selectedId: folderId.value, onSelect: onFolder, query: folderQuery.value })
+          ]),
+          h("div", { class: "eg-main" }, mainKids)
         ])
       ]);
     };
@@ -572,7 +804,7 @@ var CSS = [
   ".g-star{position:absolute;bottom:6px;left:6px;color:#fc0;font-size:10px;text-shadow:0 1px 2px rgba(0,0,0,0.8);z-index:5}",
   ".g-card:hover{border-color:#4a7de0;transform:translateY(-4px);box-shadow:0 8px 20px rgba(0,0,0,0.5);z-index:10}",
   ".g-card.sel{border-color:#4a7de0;background:#1e2a40;box-shadow:inset 0 0 0 2px #4a7de0}",
-  ".g-img-box{position:relative;width:100%;height:100%;min-height:100px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000}",
+  ".g-img-box{position:relative;width:100%;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000}",
   ".g-img{width:100%;height:100%;object-fit:cover;display:block;background:#222;transition:opacity .3s ease}",
   ".g-badge{position:absolute;top:6px;left:6px;background:linear-gradient(135deg, #4a7de0, #2a4a8a);color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;line-height:1;box-shadow:0 2px 4px rgba(0,0,0,0.3);z-index:2}",
   ".g-size{position:absolute;top:6px;right:6px;padding:2px 6px;background:rgba(0,0,0,0.8);color:#fff;font-size:10px;border-radius:4px;z-index:5;pointer-events:none;backdrop-filter:blur(2px);font-family:monospace}",
@@ -581,7 +813,7 @@ var CSS = [
   ".g-check::after{content:'\u2714';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}",
   ".g-load-more{padding:30px;color:#777;font-size:13px;text-align:center;grid-column:1/-1;background:linear-gradient(transparent, rgba(26,26,36,0.8));border-radius:0 0 10px 10px}",
   /* 已选图像预览条 */
-  ".eg-foot{display:flex;align-items:center;padding:4px 8px;border-top:1px solid #2a2a32;background:#1a1a22;min-height:56px;box-shadow:0 -4px 10px rgba(0,0,0,.2);z-index:100}",
+  ".eg-foot{display:flex;align-items:center;padding:4px 8px;border-bottom:1px solid #2a2a32;background:#1a1a22;min-height:56px;box-shadow:0 4px 10px rgba(0,0,0,.2);z-index:100}",
   ".sb-wrap{display:flex;align-items:center;flex:1;overflow:hidden;gap:12px;padding:0 4px}",
   ".sb-list{display:flex;gap:6px;overflow-x:auto;flex:1;padding:6px 0;scrollbar-width:thin;mask-image: linear-gradient(to right, black 95%, transparent);}",
   ".sb-list::-webkit-scrollbar {height:4px;}",
@@ -594,6 +826,39 @@ var CSS = [
   ".sb-info{display:flex;align-items:center;gap:10px;font-size:11px;color:#999;white-space:nowrap;flex-shrink:0;border-left:1px solid #333;padding-left:12px}",
   ".sb-clear{padding:3px 7px;font-size:10px}",
   ".eg-sta{font-size:10px;color:#777;white-space:nowrap;padding:0 8px}",
+  /* 搜索按钮、Alpha 开关、标签按钮 */
+  ".eg-btn-primary{background:#2a4a8a;border-color:#4a7de0;color:#fff}",
+  ".eg-btn-primary:hover{background:#3a5a9a;border-color:#5a8df0;color:#fff}",
+  ".eg-alpha{min-width:48px;background:#1c1c26}",
+  ".eg-alpha.on{background:#4a7de0;border-color:#4a7de0;color:#fff}",
+  ".eg-btn.on{background:#2a3a5a;border-color:#4a7de0;color:#fff}",
+  /* 文件夹搜索 */
+  ".eg-folder-hd{padding:8px 10px;border-bottom:1px solid #2a2a32}",
+  ".eg-folder-srch{width:100%;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:11px;box-sizing:border-box}",
+  ".eg-folder-srch:focus{outline:none;border-color:#4a7de0}",
+  /* 整夹输出 */
+  ".eg-folder-out{flex-shrink:0;margin-right:8px;background:#2a3a2a;border-color:#4a8a5a}",
+  ".eg-folder-out:hover{background:#3a4a3a;border-color:#5a9a6a}",
+  /* 标签弹窗 */
+  ".tg-box{width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column}",
+  ".tg-hd{display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid #333}",
+  ".tg-hd .sd-inp{flex:1}",
+  ".tg-clr{padding:5px 10px;font-size:11px}",
+  ".tg-sel{display:flex;flex-wrap:wrap;gap:6px;min-height:34px;padding:10px 16px;border-bottom:1px solid #2a2a32;background:rgba(255,255,255,0.02)}",
+  ".tg-sel-empty{font-size:11px;color:#666;align-self:center}",
+  ".tg-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:12px;background:#2a3a5a;color:#c8d8ff;font-size:11px;cursor:pointer;border:1px solid #3a4a7a}",
+  ".tg-chip:hover{background:#3a4a6a}",
+  ".tg-bd{flex:1;overflow:auto;padding:12px 16px;scrollbar-width:thin}",
+  ".tg-loading{padding:40px;color:#777;text-align:center}",
+  ".tg-grp{margin-bottom:16px}",
+  ".tg-grp-h{font-size:12px;font-weight:700;color:#4a7de0;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #2a3a4a}",
+  ".tg-list{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}",
+  ".tg-it{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;border-radius:4px;background:#0e0e12;border:1px solid #2a2a32;cursor:pointer;font-size:11px;color:#bbb}",
+  ".tg-it:hover{background:#1a1a24;border-color:#555}",
+  ".tg-it.on{background:#2a3a5a;border-color:#4a7de0;color:#fff}",
+  ".tg-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px}",
+  ".tg-cnt{color:#777;font-size:10px;margin-left:4px}",
+  ".tg-it.on .tg-cnt{color:#aac8ff}",
   /* 设置弹窗 */
   ".sd-over{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:9999}",
   ".sd-box{background:#1c1c26;border:1px solid #444;border-radius:7px;width:340px;max-width:90vw;box-shadow:0 6px 24px rgba(0,0,0,.6)}",
@@ -653,34 +918,22 @@ app.registerExtension({
       }
 
       var el = document.createElement("div");
-      el.style.width = "100%";
-      el.style.boxSizing = "border-box";
-      el.style.overflow = "hidden"; // 不设置 height:100%——相对未定高父容器会失效，
-                                      // 内容多高容器就撑多高，节点因此"无限往下增高"
+      el.style.cssText = "width:100%;height:100%;overflow:hidden;";
 
       var widget = this.addDOMWidget("eagle_gallery", "div", el, { serialize: false });
 
-      // 统一的高度应用函数：每次都给一个确定的像素高度，不依赖 %。
+      // 高度应用：ComfyUI 的 DOM widget 父容器未必有确定高度，这里给 el 一个
+      // 明确的像素高度，避免内容多高容器就撑多高，导致节点无限往下增长。
+      // 宽度不设置 computeSize / 不监听 domElem，避免选择图像后触发重绘时
+      // 把宽度锁死在很小的初始值上。
       var applyHeight = function (nodeHeight) {
         var h = Math.max(400, nodeHeight - 100);
         el.style.height = h + "px";
-        widget.computeSize = function (w) { return [w, h]; };
         return h;
       };
-      applyHeight(this.size[1]); // 创建时立刻定死高度，不等 onResize 触发
+      applyHeight(this.size[1]); // 创建时立刻定死高度
 
       var nodeRef = this;
-      var resizeObserver = new ResizeObserver(function (entries) {
-        for (var entry of entries) {
-          var width = entry.contentRect.width;
-          if (width > 0) el.style.width = width + "px";
-        }
-      });
-      setTimeout(function () {
-        if (nodeRef.domElem) resizeObserver.observe(nodeRef.domElem);
-      }, 100);
-      this._egResizeObserver = resizeObserver;
-
       try {
         // 修复：把节点实例作为 prop 传进去，组件内部直接用 props.node.id，
         // 不再需要靠 document.querySelector(".eg-root") 或遍历 graph 去猜
@@ -700,12 +953,11 @@ app.registerExtension({
       };
     };
 
-    // 修复：之前完全没有 onRemoved，节点删除后 Vue 实例和 ResizeObserver
-    // 都不会被清理，长时间在画布上增删节点会有内存泄漏。
+    // 修复：之前完全没有 onRemoved，节点删除后 Vue 实例不会被清理，
+    // 长时间在画布上增删节点会有内存泄漏。
     var onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
-      if (this._egResizeObserver) { this._egResizeObserver.disconnect(); this._egResizeObserver = null; }
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }
