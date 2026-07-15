@@ -1,7 +1,25 @@
-// api_unified.js - Eagle API 节点前端扩展（稳定版 v3.3）
-// 功能：API Key 密码框、右键菜单显示/隐藏切换、安全保存、连线状态提示
+// api_unified.js - Eagle API 节点前端扩展（稳定版 v3.4）
+// 功能：API Key 密码框、ENC:Base64 混淆存储、右键菜单显示/隐藏切换、安全保存、连线状态提示
 
 import { app } from "../../../scripts/app.js";
+
+// ── 与 Python decode_api_key 对应的编码/解码工具 ─────────────────────
+const _ENC_PREFIX = "ENC:";
+
+function _encodeKey(str) {
+    if (!str) return "";
+    if (typeof str !== "string") str = String(str);
+    // 已经是编码格式则不再重复编码
+    if (str.startsWith(_ENC_PREFIX)) return str;
+    try { return _ENC_PREFIX + btoa(encodeURIComponent(str)); } catch { return str; }
+}
+
+function _decodeKey(str) {
+    if (!str) return "";
+    if (typeof str !== "string") str = String(str);
+    if (!str.startsWith(_ENC_PREFIX)) return str;
+    try { return decodeURIComponent(atob(str.slice(_ENC_PREFIX.length))); } catch { return str; }
+}
 
 app.registerExtension({
     name: "ComfyUI_Eagle_Suite.APIUnified",
@@ -191,7 +209,29 @@ app.registerExtension({
     _setupSecureSave(node, apiKeyWidget) {
         if (!apiKeyWidget) return;
 
-        // 在序列化时清空 API Key（防止随工作流分享）
+        // 加载工作流时：如果值是 ENC:xxx，解码回明文显示给用户
+        const originalOnConfigure = node.onConfigure;
+        node.onConfigure = function(config) {
+            if (originalOnConfigure) {
+                originalOnConfigure.apply(this, arguments);
+            }
+            try {
+                const idx = this.widgets.indexOf(apiKeyWidget);
+                if (config?.widgets_values && idx >= 0 && idx < config.widgets_values.length) {
+                    const val = config.widgets_values[idx];
+                    if (val && typeof val === "string" && val.startsWith(_ENC_PREFIX)) {
+                        const plain = _decodeKey(val);
+                        apiKeyWidget.value = plain;
+                        config.widgets_values[idx] = plain; // 保持运行时明文显示
+                        console.log("[EagleAPI] 工作流加载时解码 API Key");
+                    }
+                }
+            } catch (e) {
+                console.log("[EagleAPI] 解码工作流 API Key 失败:", e);
+            }
+        };
+
+        // 序列化工作流时：将 API Key 编码为 ENC:xxx，防止明文泄露
         const originalSerialize = node.serialize;
         node.serialize = function() {
             try {
@@ -200,8 +240,11 @@ app.registerExtension({
                 if (data.widgets_values && apiKeyWidget) {
                     const idx = this.widgets.indexOf(apiKeyWidget);
                     if (idx !== -1 && idx < data.widgets_values.length) {
-                        console.log("[EagleAPI] 保存前清空 API Key");
-                        data.widgets_values[idx] = "";
+                        const plain = data.widgets_values[idx] || "";
+                        if (plain && typeof plain === "string" && !plain.startsWith(_ENC_PREFIX)) {
+                            data.widgets_values[idx] = _encodeKey(plain);
+                            console.log("[EagleAPI] 保存前编码 API Key");
+                        }
                     }
                 }
 
