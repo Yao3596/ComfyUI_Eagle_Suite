@@ -89,6 +89,7 @@ var LoraGallery = {
 
     var selectedIds = ref([]);
     var weights = ref({});
+    var selectedItems = ref({}); // id -> item 全局缓存，已选项跨文件夹保持可见
     var sortBy = ref("name");
     var sortDir = ref("asc");
     var apiKey = ref("");
@@ -174,9 +175,12 @@ var LoraGallery = {
       if (idx >= 0) {
         selectedIds.value.splice(idx, 1);
         delete weights.value[item.id];
+        delete selectedItems.value[item.id];
       } else {
         selectedIds.value.push(item.id);
         if (!(item.id in weights.value)) weights.value[item.id] = 1.0;
+        // 缓存完整 item，使右侧已选面板跨文件夹可见
+        selectedItems.value[item.id] = item;
       }
       syncSelection();
     }
@@ -190,12 +194,14 @@ var LoraGallery = {
       var idx = selectedIds.value.indexOf(id);
       if (idx >= 0) selectedIds.value.splice(idx, 1);
       delete weights.value[id];
+      delete selectedItems.value[id];
       syncSelection();
     }
 
     function clearSelection() {
       selectedIds.value = [];
       weights.value = {};
+      selectedItems.value = {};
       syncSelection();
     }
 
@@ -204,7 +210,7 @@ var LoraGallery = {
       if (!nodeId) return;
 
       var sels = selectedIds.value.map(function(id) {
-        var item = items.value.find(function(it) { return it.id === id; });
+        var item = selectedItems.value[id] || items.value.find(function(it) { return it.id === id; });
         return {
           id: id,
           weight: weights.value[id] || 1.0,
@@ -238,6 +244,10 @@ var LoraGallery = {
             d.selections.forEach(function(s) {
               ids.push(s.id);
               if (s.weight !== undefined) weights.value[s.id] = s.weight;
+              // 恢复时尽量保留 name，若后端未返回则从当前 items 查找
+              if (s.name) {
+                selectedItems.value[s.id] = s;
+              }
             });
             selectedIds.value = ids;
           }
@@ -387,12 +397,12 @@ var LoraGallery = {
               e.target._err = true;
               e.target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Crect width='128' height='128' fill='%231a1a24'/%3E%3Ctext x='64' y='67' text-anchor='middle' fill='%23555' font-size='10'%3E无预览%3C/text%3E%3C/svg%3E";
             }}),
+            h("div", { class: "lg-size-badge" }, formatSize(item.size)),
             h("button", { class: "lg-edit-btn", title: "编辑触发词", onClick: function(e) { e.stopPropagation(); openTriggerEditor(item); } }, "T"),
             item.civitaiUrl ? h("button", { class: "lg-civ-btn", title: "打开 Civitai", onClick: function(e) { e.stopPropagation(); openCivitai(item.civitaiUrl); } }, "C") : null,
             (!item.hasPreview && item.civitaiId) ? h("button", { class: "lg-dl-btn", title: "从 Civitai 下载预览图", onClick: function(e) { e.stopPropagation(); downloadPreview(item.id); } }, "⬇") : null
           ]),
           h("div", { class: "lg-name", title: item.name }, item.name),
-          h("div", { class: "lg-meta" }, formatSize(item.size)),
           sel ? h("div", { class: "lg-check" }) : null
         ]);
       });
@@ -403,7 +413,8 @@ var LoraGallery = {
 
       var selectedList = [];
       selectedIds.value.forEach(function(id) {
-        var item = items.value.find(function(it) { return it.id === id; });
+        // 优先从全局已选缓存取，其次从当前 items 查找
+        var item = selectedItems.value[id] || items.value.find(function(it) { return it.id === id; });
         if (!item) return;
         selectedList.push(h("div", { class: "lg-sel-item", key: id }, [
           h("img", { src: thumbUrl(id), class: "lg-sel-thumb" }),
@@ -560,14 +571,14 @@ var CSS = [
   ".lg-folder-srch{width:100%;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:11px;box-sizing:border-box}",
   ".lg-folder-srch:focus{outline:none;border-color:#4a7de0}",
   ".lg-main{flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;min-width:200px;background:#0f0f14;min-height:0}",
-  ".lg-grid{display:grid;grid-template-columns:repeat(auto-fill, 120px);grid-auto-rows:minmax(190px, auto);gap:6px;padding:16px;overflow-y:auto;flex:1;width:100%;box-sizing:border-box;min-height:0}",
+  ".lg-grid{display:grid;grid-template-columns:repeat(auto-fill, 120px);grid-auto-rows:190px;gap:6px;padding:16px;overflow-y:auto;flex:1;width:100%;box-sizing:border-box;align-content:start;min-height:0}",
   ".lg-grid::-webkit-scrollbar{width:8px}",
   ".lg-grid::-webkit-scrollbar-track{background:transparent}",
   ".lg-grid::-webkit-scrollbar-thumb{background:#3a3a45;border-radius:4px}",
   ".lg-grid::-webkit-scrollbar-thumb:hover{background:#4a4a55}",
   ".lg-empty{display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:14px}",
   ".lg-loading{grid-column:1/-1;padding:30px;color:#777;text-align:center}",
-  ".lg-card{position:relative;width:120px;border-radius:8px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#1a1a24;transition:all .2s;display:flex;flex-direction:column;box-shadow:0 4px 12px rgba(0,0,0,0.3)}",
+  ".lg-card{position:relative;width:120px;height:190px;border-radius:8px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#1a1a24;transition:all .2s;display:flex;flex-direction:column;box-shadow:0 4px 12px rgba(0,0,0,0.3)}",
   ".lg-card:hover{border-color:#4a7de0;transform:translateY(-3px);box-shadow:0 6px 16px rgba(0,0,0,0.45);z-index:10}",
   ".lg-card.sel{border-color:#4a7de0;background:#1e2a40;box-shadow:inset 0 0 0 2px #4a7de0}",
   ".lg-img-box{position:relative;width:120px;height:140px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;flex-shrink:0}",
@@ -579,7 +590,7 @@ var CSS = [
   ".lg-edit-btn{position:absolute;top:6px;left:6px;width:22px;height:22px;border-radius:4px;border:none;background:rgba(120,80,200,0.9);color:#fff;font-size:10px;font-weight:bold;cursor:pointer;z-index:5;opacity:0;transition:opacity .2s}",
   ".lg-card:hover .lg-edit-btn{opacity:1}",
   ".lg-name{padding:6px 8px;font-size:11px;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#16161e}",
-  ".lg-meta{padding:0 8px 6px;font-size:10px;color:#777;background:#16161e}",
+  ".lg-size-badge{position:absolute;top:6px;right:6px;z-index:4;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,0.65);color:#ddd;font-size:9px;font-weight:600;pointer-events:none}",
   ".lg-check{position:absolute;inset:0;background:rgba(74,125,224,0.25);display:flex;align-items:center;justify-content:center;z-index:6;pointer-events:none;animation:checkPop .2s cubic-bezier(0.175, 0.885, 0.32, 1.275)}",
   ".lg-check::after{content:'\u2714';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}",
   "@keyframes checkPop{from{transform:scale(0.8);opacity:0}to{transform:scale(1);opacity:1}}",
