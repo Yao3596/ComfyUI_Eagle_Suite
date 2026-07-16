@@ -166,7 +166,7 @@ class EagleSplitString:
 # ── 5. 多行文本随机选择 ───────────────────────────────────────────────────────
 
 class EagleRandomLine:
-    """从多行文本中随机选择一行或 N 行"""
+    """从多行文本或按分隔符切分的词组中随机选择 N 条"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -174,27 +174,36 @@ class EagleRandomLine:
             "required": {
                 "text": ("STRING", {"default": "", "multiline": True}),
                 "count": ("INT", {"default": 1, "min": 1, "max": 100}),
-                "separator": ("STRING", {"default": ", "}),
+                "join_separator": ("STRING", {"default": ", ", "tooltip": "输出多条之间的连接符"}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+            },
+            "optional": {
+                "split_mode": (["按行", "按分隔符"], {"default": "按行"}),
+                "split_separator": ("STRING", {"default": ",", "tooltip": "按分隔符模式下的切分符，如 , 或 ;"}),
             }
         }
 
     RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("result", "all_lines")
+    RETURN_NAMES = ("result", "all_items")
     FUNCTION = "random"
     CATEGORY = "🦅 Eagle/文本"
 
-    def random(self, text, count, separator, seed):
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        if not lines:
+    def random(self, text, count, join_separator, seed, split_mode="按行", split_separator=","):
+        if split_mode == "按分隔符":
+            sep = split_separator if split_separator else ","
+            items = [s.strip() for s in text.split(sep) if s.strip()]
+        else:
+            items = [l.strip() for l in text.split("\n") if l.strip()]
+
+        if not items:
             return ("", text)
 
         rng = random.Random(seed if seed >= 0 else None)
-        if count >= len(lines):
-            chosen = lines
+        if count >= len(items):
+            chosen = items
         else:
-            chosen = rng.sample(lines, count)
-        return (separator.join(chosen), text)
+            chosen = rng.sample(items, count)
+        return (join_separator.join(chosen), text)
 
 
 # ── 6. 文本条件分支 ───────────────────────────────────────────────────────────
