@@ -79,7 +79,7 @@ async def load_lora_list(request):
         sort_by = request.query.get("sort_option", "name")
         sort_dir = request.query.get("sort_direction", "asc")
         page = int(request.query.get("page", 1))
-        page_size = int(get_setting('EagleTools.lora_node.pagesize', 30))
+        page_size = int(request.query.get("page_size", get_setting('EagleTools.lora_node.pagesize', 30)))
         lora_dir = _get_lora_directory()
 
         cache_key = lora_dir
@@ -174,13 +174,33 @@ async def get_lora_metadata(request):
         metadata = {}
         if path.lower().endswith('.safetensors'):
             with open(path, 'rb') as f:
-                length = struct.unpack('Q', f.read(8))[0]
+                length = struct.unpack('<Q', f.read(8))[0]
                 if length > 0:
                     meta_str = f.read(length).decode('utf-8')
                     metadata = json.loads(meta_str)
         return web.json_response({"success": True, "metadata": metadata})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("GET", "/eagle/lora/{path:.*}")
+async def serve_lora_static(request):
+    """提供 LoRA 缩略图预览（同名 png/jpg/webp）"""
+    path = request.match_info['path']
+    if not path:
+        return web.Response(status=404)
+    try:
+        full = folder_paths.get_full_path_or_raise("loras", path)
+    except Exception:
+        full = ""
+    if full and os.path.isfile(full):
+        return web.FileResponse(full)
+    base = os.path.splitext(full)[0] if full else ""
+    for ext in IMAGE_EXTENSIONS:
+        thumb = base + ext
+        if os.path.isfile(thumb):
+            return web.FileResponse(thumb)
+    return web.Response(status=404, text="File not found")
 
 
 # ── 节点类 ─────────────────────────────────────────────────

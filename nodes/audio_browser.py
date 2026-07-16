@@ -23,10 +23,16 @@ def _get_audio_directory():
     return os.path.join(folder_paths.models_dir, "TTS", "MegaTTS3", "speakers")
 
 
+def convert_audio_path(file_path):
+    url_base = "/eagle/tts"
+    audio_dir = _get_audio_directory()
+    return file_path.replace(audio_dir, url_base).replace("\\", "/")
+
+
 # ── 路由 ───────────────────────────────────────────────────
 
 
-@route("GET", "/tts/{path:.*}")
+@route("GET", "/eagle/tts/{path:.*}")
 async def tts_static(request):
     """提供 TTS 音频文件访问"""
     path = request.match_info['path']
@@ -45,9 +51,11 @@ async def search_audio(request):
         audio_dir = _get_audio_directory()
         files = find_files(audio_dir, "audio")
         items = []
-        for f in files:
+        for i, f in enumerate(files):
             items.append({
+                'id': i + 1,
                 'name': os.path.basename(f), 'path': f,
+                'src': convert_audio_path(f),
                 'size': os.path.getsize(f),
             })
 

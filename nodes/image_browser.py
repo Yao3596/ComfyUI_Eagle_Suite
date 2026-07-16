@@ -16,7 +16,7 @@ import folder_paths
 import node_helpers
 from PIL import Image, ImageOps, ImageSequence
 
-from ..tools_utils import IMAGE_EXTENSIONS, find_files, get_setting, get_image_directory
+from ..tools_utils import IMAGE_EXTENSIONS, find_files, get_setting, get_image_directory, set_setting
 from ..eagle_suite.logger import logger
 
 # ── 延迟路由装饰器 ──────────────────────────
@@ -59,9 +59,9 @@ async def upload_images(request):
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=400)
 
-@route("GET", "/hugo/{file_type}/{path:.*}")
+@route("GET", "/eagle/{file_type}/{path:.*}")
 async def load_static(request):
-    """通用静态文件服务（CSS、图片、Lora缩略图）"""
+    """通用静态文件服务（CSS、图片）"""
     path = request.match_info['path']
     file_type = request.match_info['file_type']
     base_dir = os.path.dirname(os.path.dirname(__file__))
@@ -74,32 +74,17 @@ async def load_static(request):
 
     elif file_type == "image":
         img_dir = get_image_directory()
-        fp = os.path.join(img_dir, path)
-        input_fp = os.path.join(folder_paths.get_input_directory(), path)
-        clip_fp = os.path.join(folder_paths.get_input_directory(), "clipspace", path)
-        for p in [fp, input_fp, clip_fp]:
+        candidates = [
+            os.path.join(img_dir, path),
+            os.path.join(folder_paths.get_input_directory(), path),
+            os.path.join(folder_paths.get_input_directory(), "clipspace", path),
+        ]
+        for p in candidates:
             if os.path.isfile(p):
                 return web.FileResponse(p)
         return web.Response(status=404, text="File not found")
 
-    elif file_type == "lora":
-        fp = folder_paths.get_full_path_or_raise("loras", path) if path else ""
-        if fp and os.path.isfile(fp):
-            return web.FileResponse(fp)
-        # 尝试找同名缩略图
-        base_p = os.path.splitext(fp)[0] if fp else ""
-        for ext in IMAGE_EXTENSIONS:
-            thumb = base_p + ext
-            if os.path.isfile(thumb):
-                return web.FileResponse(thumb)
-        return web.Response(status=404)
-
     return web.Response(status=404)
-
-@route("GET", "/eagle/{file_type}/{path:.*}")
-async def load_static_eagle(request):
-    """/eagle/ 前缀版静态文件服务"""
-    return await load_static(request)
 
 @route("GET", "/EagleImageList/loadImageList")
 async def load_image_list(request):
@@ -110,7 +95,7 @@ async def load_image_list(request):
         image_directory = get_image_directory()
         comfyui_root = folder_paths.base_path
         page = int(request.query.get("page", 1))
-        page_size = int(get_setting('EagleTools.image_node.pagesize', 30))
+        page_size = int(request.query.get("page_size", get_setting('EagleTools.image_node.pagesize', 30)))
 
         cache_key = image_directory
         if cache_key in list_data_cache:
@@ -191,6 +176,19 @@ async def copy_image(request):
 async def clear_image_cache(request):
     list_data_cache.clear()
     return web.json_response({"success": True, "message": "缓存已清除"})
+
+@route("POST", "/EagleImageList/changeDir")
+async def change_image_directory(request):
+    try:
+        data = await request.json()
+        directory = data.get("directory", "")
+        if directory and os.path.isdir(directory):
+            set_setting("EagleFileTools.image_path", directory)
+            list_data_cache.clear()
+            return web.json_response({"success": True, "message": "目录已切换"})
+        return web.json_response({"success": False, "error": "目录无效"}, status=400)
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
 
 @route("POST", "/EagleImageList/renameImage")
 async def rename_image(request):
