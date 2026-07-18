@@ -133,10 +133,17 @@ def _load_profiles_from_bytes(content: bytes) -> tuple:
 
 
 def _load_fallback_profile_names() -> list:
-    """备用：尝试从 api_config.json 中读取最后一次使用的 model 作为 profile 选项。"""
+    """备用：尝试从 api_config.json 中读取最后一次使用的 model 作为 profile 选项。
+    如果 api_config.json 不存在，自动创建一个空模板，避免文件缺失导致前端下拉菜单异常。"""
     try:
         config_path = os.path.join(os.path.dirname(__file__), "..", "api_config.json")
         if not os.path.exists(config_path):
+            try:
+                default = {"api_key": "", "base_url": "", "model": ""}
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(default, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
             return []
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)

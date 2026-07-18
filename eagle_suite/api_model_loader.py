@@ -122,18 +122,40 @@ SYSTEM_TEMPLATES = {
 
 # ── 配置读写 ──────────────────────────────────────────────────
 
+_DEFAULT_CONFIG = {"api_key": "", "base_url": "", "model": ""}
+
+
+def _ensure_config_template() -> None:
+    """如果 api_config.json 不存在，自动创建一个空模板。"""
+    try:
+        if not os.path.exists(CONFIG_PATH):
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(_DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[EagleAPI] 创建默认配置模板失败: {e}")
+
+
 def _load_config() -> dict:
     try:
+        _ensure_config_template()
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    return dict(_DEFAULT_CONFIG)
+                for k, v in _DEFAULT_CONFIG.items():
+                    if k not in data:
+                        data[k] = v
+                return data
     except Exception:
         pass
-    return {}
+    return dict(_DEFAULT_CONFIG)
+
 
 def _save_config(config: dict) -> None:
     try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        _ensure_config_template()
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception as e:
