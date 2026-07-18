@@ -1,124 +1,180 @@
-# 🦅 Eagle Suite
+# 🦅 ComfyUI Eagle Suite
 
-ComfyUI 插件，集成 Eagle 素材管理、图库浏览、视频/音频处理、API 调用、文本工具等功能。
+一款功能丰富的 ComfyUI 插件，集成 **Eagle 素材管理**、**图库浏览**、**LoRA 管理**、**视频/音频处理**、**OpenAI 兼容 API 调用** 等一站式工作流增强工具。
 
-## 功能概览
+[![GitHub](https://img.shields.io/badge/GitHub-Yao3596/ComfyUI_Eagle_Suite-181717?logo=github)](https://github.com/Yao3596/ComfyUI_Eagle_Suite)
+
+---
+## ✨ 功能概览
+
+### 🖼️ 图库浏览（Gallery）
+
+在 ComfyUI 节点内直接浏览、搜索、选择图片，选中后输出为 `IMAGE` 张量。
+
+| 节点 | 说明 |
+|------|------|
+| 🦅 **Eagle Gallery** | 浏览本地 Eagle 素材库，支持文件夹树筛选、关键词搜索、星级/比例/标签过滤 |
+| 🌊 **Wallhaven Gallery** | 浏览 [Wallhaven](https://wallhaven.cc) 在线壁纸库，支持分类、纯度、排序筛选 |
+
+**Gallery 通用特性：**
+- 🔍 实时搜索 + 文件夹树筛选
+- ⭐ 星级过滤、比例过滤（横向/纵向/方形）
+- 🏷️ 标签过滤（Eagle Gallery）
+- 🖱️ 单击选中 / 双击查看 / 底部预览条
+- 📤 选中后自动输出 `IMAGE` 张量、`tags` 文本、`masks` 遮罩、`file_paths` 本地路径
+- ⚙️ 设置面板支持 API Key / Token 配置
+
+---
+
+### 🧬 LoRA 浏览器
+
+| 节点 | 说明 |
+|------|------|
+| 🦅 **Lora 浏览器** | 在 ComfyUI 节点内浏览本地 LoRA 模型，支持文件夹树、触发词管理、Civitai 预览图补全与模型下载 |
+
+**主要特性：**
+- 🌳 文件夹树导航，支持父文件夹包含子文件夹模型
+- 🔍 搜索过滤 + 无限滚动加载
+- 🏷️ 触发词显示与编辑，支持手动添加触发词
+- 🖼️ 自动从 Civitai 补全预览图
+- ⬇️ 支持从 Civitai 下载模型
+- 📤 输出选中的 `lora_name`、`trigger_words`、`model_url` 等信息
+
+---
 
 ### 🎬 视频处理
+
 | 节点 | 说明 |
 |------|------|
-| 🦅 图像序列 → 视频 | 将图像序列合成视频/GIF/APNG/WebP，支持透明通道 |
-| 🦅 视频格式转换 | 视频转码、裁剪、缩放、抽帧 |
-| 🦅 批量视频加载 | 批量加载视频为图像帧序列 |
-| 🦅 视频帧提取 | 从视频提取单帧 |
-| 🦅 视频信息 | 获取视频元数据（分辨率、时长、帧率等） |
+- `gif` — 动画 GIF（支持 1-bit 透明）
+- `apng` — 动画 PNG（支持完整 Alpha）
+- `webp` — 动画 WebP（支持完整 Alpha）
+
+---
 
 ### 🎵 音频处理
+
 | 节点 | 说明 |
 |------|------|
-| 🦅 音频提取 | 从视频提取音频 |
-| 🦅 音频混音 | 多轨道音频混合 |
+| 🦅 **音频提取** | 从视频提取音频轨道 |
+| 🦅 **音频混音** | 多轨道音频混合 |
 
-### 🖼️ Eagle 集成
+---
+
+### 🦅 Eagle 素材管理
+
 | 节点 | 说明 |
 |------|------|
-| 🦅 Eagle 图片加载 | 从 Eagle 库加载图片 |
-| 🦅 Eagle 图片保存 | 保存图片到 Eagle 库 |
-| 🦅 本地图片加载 | 加载本地文件夹图片 |
+| 🦅 **Eagle 图片加载** | 从 Eagle 库按 ID/路径加载图片 |
+| 🦅 **Eagle 图片保存** | 保存生成结果到 Eagle 库 |
+| 🦅 **本地图片加载** | 加载本地文件夹图片 |
 
-### 🤖 API 调用 / 本地大模型
+---
+
+### 🤖 API 多功能调用
+
 | 节点 | 说明 |
 |------|------|
-| 🦅 API 多功能调用 | 支持 OpenAI 兼容接口的文本/图像对话 |
-| 🦅 API Key Input | API Key 输入节点 |
-| 🦅 API 配置加载器 | 加载/管理 API 配置与多 profile |
-| 🦅 本地大模型反推 | 使用本地视觉大模型进行图像反推 |
-| 🦅 本地大模型服务(OpenAI兼容) | 本地启动 OpenAI 兼容服务 |
+| 🦅 **API 多功能调用** | 支持 OpenAI 兼容接口的文本对话 / 图像分析（Vision），最多支持 9 张图像输入 |
+| 🦅 **API Key Input** | 直接输入 API Key / Base URL / Model |
+| 🦅 **API 配置加载器** | 从 `api_profiles.json` 加载多组命名配置，支持下拉切换 |
 
-### 🖼️ 图库
+**兼容的 API 提供商：** OpenAI、Azure OpenAI、阿里云百炼、智谱 AI、DeepSeek 等任何 OpenAI 格式接口。
+
+详细用法请参考 [API 节点使用说明](API节点使用说明.md)。
+
+---
+
+### 🛠️ 实用工具
+
 | 节点 | 说明 |
 |------|------|
-| 🌊 Wallhaven Gallery | 从 Wallhaven 搜索并下载壁纸 |
-| 🦅 Eagle Gallery | 浏览并选择 Eagle 素材库图片 |
-| 🦅 Eagle Video Gallery | 浏览并选择 Eagle 素材库视频 |
-| 🦅 LoRA 画廊加载器 | 可视化 LoRA 浏览器，支持 Civitai 触发词与预览图 |
+| 🦅 **图片浏览器** | 浏览工作流输出目录中的图片 |
+| 🦅 **音频浏览器** | 浏览音频文件 |
+| 🦅 **提示词预设** | 快速插入常用提示词模板 |
+| 🦅 **提示词清洗** | 清洗/格式化提示词文本 |
+| 🦅 **提示词合并** | 合并多段提示词 |
+| 🦅 **提示词反推助手** | 辅助处理反推提示词 |
+| 🦅 **分组管理器** | 批量管理 ComfyUI 节点分组 |
+| 🦅 **复制文件** | 复制文件到目标目录 |
+| 🦅 **删除文件** | 删除指定路径文件 |
+| 🦅 **行数统计** | 统计文本行数 |
+| 🦅 **分割文本** | 按分隔符分割文本 |
+| 🦅 **HF 下载器** | 从 HuggingFace 下载模型/文件 |
+| 🦅 **GIF 压缩保存** | 优化 GIF 文件大小 |
 
-### 🛠️ 工具
-| 节点 | 说明 |
-|------|------|
-| 🦅 图片浏览器 | 浏览本地图片，支持上传/删除/重命名 |
-| 🦅 Lora 浏览器 | 浏览本地 LoRA，支持重命名/删除/元数据 |
-| 🦅 音频浏览器 | 浏览本地音频文件 |
-| 🦅 提示词预设 | 图片编辑/风格/镜头等提示词模板 |
-| 🦅 分组管理器 | 输出当前节点所在画布分组名称 |
-| 🦅 行数统计 | 统计文本或文件的行数 |
-| 🦅 分割文本 | 按分隔符分割字符串 |
-| 🦅 删除文件 | 删除指定文件 |
-| 🦅 复制文件 | 复制文件到目标目录 |
-| 🦅 HF 下载器 | 使用 huggingface-cli 下载模型 |
+---
 
-### 📝 文本
-| 节点 | 说明 |
-|------|------|
-| 🦅 保存字符串 | 将字符串保存到文本文件 |
-| 🦅 加载文本文件 | 从文件夹按索引加载文本 |
-| 🦅 拼接文本 | 拼接多个字符串 |
-| 🦅 分割文本 | 按分隔符分割字符串 |
-| 🦅 随机选择文本 | 从多行或按分隔符切分的词组中随机抽取 |
-| 🦅 文本条件分支 | 根据布尔条件选择文本 |
-| 🦅 模板替换 | 支持 `{var}` 占位符的模板替换 |
-| 🦅 提示词预设 | 内置常用画质/风格预设 |
+1. 在节点设置面板中填入 Wallhaven API Key（可选，用于 NSFW 内容和高级搜索）
+2. API Key 可在 [wallhaven.cc/settings/account](https://wallhaven.cc/settings/account) 获取
 
-### 🎞️ 动画
-| 节点 | 说明 |
-|------|------|
-| 🦅 GIF 压缩保存 | GIF 压缩与保存 |
+### LoRA 浏览器
 
-## 安装
+1. 在节点设置面板中配置 Civitai API Key（可选，用于提高请求限额）
+2. 支持通过 Civitai 自动补全缺失的模型预览图
+3. 支持手动编辑触发词，已编辑的触发词会保存在 `.json` 文件中
 
-### 自动安装（推荐）
-插件首次加载时自动安装依赖，无需手动操作。
+### API 多功能调用
 
-### 手动安装
-```bash
-cd ComfyUI/custom_nodes/ComfyUI_Eagle_Suite
-pip install -r requirements.txt
+详见 [API 节点使用说明](API节点使用说明.md)。
+
+配置文件说明：
+- `api_config.json` — 保存最后一次使用的 API key / url / model
+- `api_profiles.json` — 保存多组命名 profile，供 `🦅 API 配置加载器` 下拉切换
+
+---
+
+## 📁 项目结构
+
+```
+ComfyUI_Eagle_Suite/
+├── eagle_suite/              # 主节点包
+│   ├── nodes.py              # 节点注册入口
+│   ├── eagle_gallery.py      # Eagle Gallery 后端
+│   ├── wallhaven_gallery.py  # Wallhaven Gallery 后端
+│   ├── video_nodes.py        # 视频处理节点
+│   ├── batch_video_nodes.py  # 批量视频处理节点
+│   ├── audio_nodes.py        # 音频处理节点
+│   ├── api_model_loader.py   # API 统一调用节点
+│   ├── api_key_node.py       # API Key / 配置加载器节点
+│   ├── eagle_loader.py       # Eagle 图片加载
+│   ├── eagle_saver.py        # Eagle 图片保存
+│   ├── local_loader.py       # 本地图片加载
+│   ├── gif_compressor.py     # GIF 压缩
+│   └── ...
+├── nodes/                    # 工具节点
+│   ├── image_browser.py
+│   ├── lora_browser.py
+│   ├── audio_browser.py
+│   ├── prompt_presets.py
+│   ├── file_manager.py
+│   ├── group_tools.py
+│   ├── string_tools.py
+│   └── hf_download.py
+├── web/                      # 前端资源
+│   ├── js/                   # Gallery 前端脚本
+│   └── lib/                  # Vue 3 等第三方库
+├── api_config.json           # 最后一次 API 配置
+├── api_profiles.json         # 命名 API 配置 profile
+├── requirements.txt          # Python 依赖
+└── README.md                 # 本文件
 ```
 
-## 依赖
+---
 
-- FFmpeg（视频处理必需）
-- Eagle（可选，用于素材管理集成）
-- 详见 `requirements.txt`
+## 📝 更新日志
 
-## 详细文档
+### v1.2.0 (2026-07-18)
+- ✨ 新增 **LoRA 浏览器** — 本地 LoRA 模型浏览、触发词管理、Civitai 预览图补全与下载
+- ✨ 新增 **文本节点套件** — 提示词预设、清洗、合并、反推助手
+- 🔧 Eagle Gallery 重构为 Vue 3 实现，支持标签过滤、整文件夹输出、响应式布局
+- 🔧 API 多功能调用支持最多 9 张图像输入，新增 `对话历史` 输出
+- 🔧 API 配置加载器支持 `api_profiles.json` 多 profile 下拉切换
+- 🗑️ 移除已弃用的 **Pinterest Gallery** 节点
+- 📄 重写 README 和 API 使用说明
 
-- [API 节点使用说明](API节点使用说明.md)
-
-## 支持格式
-
-### 视频输出
-- `h264-mp4` / `h265-mp4` - 标准视频
-- `vp9-webm` / `av1-webm` - WebM 视频（VP9 支持透明通道）
-- `prores-mov` - ProRes 专业格式（支持透明）
-- `gif` - 动画 GIF（支持 1-bit 透明）
-- `apng` - 动画 PNG（支持完整 Alpha）
-- `webp` - 动画 WebP（支持完整 Alpha）
-
-### 图像输出
-- PNG / JPG / WebP / BMP / TIFF
-
-## 更新日志
-
-### v1.2.0
-- 新增 LoRA 画廊加载器，支持文件夹树、Civitai 触发词、预览图下载
-- 新增本地大模型反推与服务节点
-- 新增文本节点套件
-- 新增图片/Lora/音频浏览器、提示词预设、分组管理器等工具节点
-- API 节点支持工作流保存时加密 API Key
-- 移除 API 配置中的 `prompt_model_type` 持久化
-
-### 2025-05-13
-- 修复 GIF 透明处理（移除 alpha_threshold 强制二值化）
-- 优化 VP9-WebM 透明通道滤镜链
-- 添加视频预览支持（JS 前端）
+### v1.1.0 (2026-05-21)
+- ✨ 新增 **Wallhaven Gallery** — 在线壁纸库浏览
+- 🔧 Eagle Gallery 全面修复：缩略图加载、Token 认证、路径编码
+- 🔧 设置面板增加 GitHub 链接和作者署名
+- 📄 重写 README 和 API 使用说明
