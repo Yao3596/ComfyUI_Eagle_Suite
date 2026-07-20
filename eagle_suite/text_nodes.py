@@ -166,13 +166,17 @@ class EagleSplitString:
 # ── 5. 多行文本随机选择 ───────────────────────────────────────────────────────
 
 class EagleRandomLine:
-    """从多行文本或按分隔符切分的词组中随机选择 N 条"""
+    """从多行文本、多个字符串输入或按分隔符切分的词组中随机选择 N 条。"""
+
+    # 最多支持 16 个动态输入端口，满足绝大多数工作流需求
+    MAX_INPUTS = 16
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
+        inputs = {
             "required": {
-                "text": ("STRING", {"default": "", "multiline": True}),
+                "text": ("STRING", {"default": "", "multiline": True, "tooltip": "主输入文本；当下方动态输入端口未连接时使用"}),
+                "input_count": ("INT", {"default": 2, "min": 1, "max": cls.MAX_INPUTS, "step": 1, "tooltip": "动态字符串输入端口的数量"}),
                 "count": ("INT", {"default": 1, "min": 1, "max": 100}),
                 "join_separator": ("STRING", {"default": ", ", "tooltip": "输出多条之间的连接符"}),
                 "weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05, "tooltip": "对输出结果整体加权，例如 1.2 -> (result:1.2)"}),
@@ -183,33 +187,61 @@ class EagleRandomLine:
                 "split_separator": ("STRING", {"default": ",", "tooltip": "按分隔符模式下的切分符，如 , 或 ;"}),
             }
         }
+        # 动态注册可选输入端口 text_1 .. text_N（默认 N=2）
+        for i in range(1, cls.MAX_INPUTS + 1):
+            inputs["optional"][f"text_{i}"] = ("STRING", {"default": "", "multiline": True, "forceInput": True})
+        return inputs
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("result", "all_items")
     FUNCTION = "random"
     CATEGORY = "🦅 Eagle/文本"
 
-    def random(self, text, count, join_separator, weight, seed, split_mode="按行", split_separator=","):
-        if split_mode == "按分隔符":
-            sep = split_separator if split_separator else ","
-            items = [s.strip() for s in text.split(sep) if s.strip()]
-        else:
-            items = [l.strip() for l in text.split("\n") if l.strip()]
+    def random(self, text, input_count, count, join_separator, weight, seed,
+               split_mode="按行", split_separator=",", **kwargs):
+        # 收集主输入 + 所有已连接的动态输入
+        all_texts = [text]
+        for i in range(1, input_count + 1):
+            key = f"text_{i}"
+            if key in kwargs:
+                val = kwargs[key]
+                if val is not None and str(val).strip():
+                    all_texts.append(str(val))
 
-        if not items:
+        # 统一按选择的分割模式拆分
+        items = []
+        for raw in all_texts:
+            if not raw or not str(raw).strip():
+                continue
+            raw_str = str(raw)
+            if split_mode == "按分隔符":
+                sep = split_separator if split_separator else ","
+                items.extend([s.strip() for s in raw_str.split(sep) if s.strip()])
+            else:
+                items.extend([l.strip() for l in raw_str.split("\n") if l.strip()])
+
+        # 去重同时保持顺序
+        seen = set()
+        unique_items = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                unique_items.append(item)
+
+        if not unique_items:
             return ("", text)
 
         rng = random.Random(seed if seed >= 0 else None)
-        if count >= len(items):
-            chosen = items
+        if count >= len(unique_items):
+            chosen = unique_items
         else:
-            chosen = rng.sample(items, count)
+            chosen = rng.sample(unique_items, count)
         result = join_separator.join(chosen)
         if weight != 1.0:
             # 自动去掉小数末尾无意义的 0，例如 1.200 -> 1.2，1.05 保持 1.05
             weight_str = ("{:f}".format(weight)).rstrip("0").rstrip(".")
             result = f"({result}:{weight_str})"
-        return (result, text)
+        return (result, "\n".join(unique_items))
 
 
 # ── 6. 文本条件分支 ───────────────────────────────────────────────────────────

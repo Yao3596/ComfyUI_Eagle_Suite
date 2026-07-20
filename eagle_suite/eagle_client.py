@@ -128,8 +128,13 @@ class EagleClient:
             logger.warning(f"获取 Eagle 资源库路径失败: {e}")
         return None
 
-    def add_item_from_path(self, file_path, folder_id=None, name=None, tags=None, annotation=None, star=0):
-        """导入本地文件到 Eagle"""
+    def add_item_from_path(self, file_path, folder_id=None, name=None, tags=None, annotation=None, star=0, meta=None):
+        """导入本地文件到 Eagle。
+
+        Eagle 的 `item/addFromPath` API 支持以下字段：
+        path, folderId, name, tags, annotation, star, url 以及 meta (JSON 对象)。
+        其中 meta 会作为自定义 JSON 元数据保存在 Eagle 条目中。
+        """
         payload = {
             "path": file_path,
             "folderId": folder_id,
@@ -137,7 +142,8 @@ class EagleClient:
             "star": star
         }
         if annotation: payload["annotation"] = annotation
-        
+        if meta and isinstance(meta, dict): payload["meta"] = meta
+
         try:
             resp = requests.post(f"{self.base_url}/item/addFromPath", json=payload, timeout=60)
             if resp.status_code == 200:

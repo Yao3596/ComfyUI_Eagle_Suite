@@ -45,8 +45,8 @@ class EagleSaver:
                 }),
                 "tags": ("STRING", {
                     "default": cfg.get("tags", ""),
-                    "multiline": False,
-                    "placeholder": "用逗号分隔"
+                    "multiline": True,
+                    "placeholder": "用逗号分隔，每行也可"
                 }),
                 "star": ("INT", {
                     "default": cfg.get("star", 0),
@@ -56,6 +56,10 @@ class EagleSaver:
                     "default": cfg.get("annotation", ""),
                     "multiline": True,
                 }),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             }
         }
 
@@ -66,7 +70,8 @@ class EagleSaver:
     CATEGORY = "🦅 Eagle"
 
     def save_images(self, images, eagle_folder, local_save_path="",
-                    filename_prefix="ComfyUI", tags="", star=0, annotation=""):
+                    filename_prefix="ComfyUI", tags="", star=0, annotation="",
+                    prompt=None, extra_pnginfo=None):
 
         save_to_eagle = bool(eagle_folder.strip())
         save_to_local = bool(local_save_path.strip())
@@ -93,13 +98,16 @@ class EagleSaver:
         local_count = 0
         temp_files = []
 
-        # 2. 处理每一张图片
+        # 2. 从 ComfyUI 工作流中提取元数据
+        meta = self._build_metadata(prompt, extra_pnginfo)
+
+        # 3. 处理每一张图片
         for idx, image in enumerate(images):
             try:
                 # 张量转 PIL
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-                
+
                 base_name = generate_unique_filename(filename_prefix, extension="png")
                 filename = base_name
 
@@ -109,6 +117,14 @@ class EagleSaver:
                         os.makedirs(local_save_path, exist_ok=True)
                         full_path = os.path.join(local_save_path, filename)
                         img.save(full_path, format="PNG")
+                        # 可选：将 metadata 写入同名 json
+                        if meta:
+                            try:
+                                import json
+                                with open(full_path + ".json", "w", encoding="utf-8") as f:
+                                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                            except Exception as e:
+                                logger.warning(f"本地元数据写入失败: {e}")
                         local_count += 1
                     except Exception as e:
                         logger.error(f"本地保存失败: {e}")
@@ -120,12 +136,13 @@ class EagleSaver:
                     temp_files.append(temp_path)
 
                     res = eagle_client.add_item_from_path(
-                        temp_path, 
-                        folder_id=folder_id, 
-                        name=base_name, 
-                        tags=tags_list, 
-                        annotation=annotation, 
-                        star=star
+                        temp_path,
+                        folder_id=folder_id,
+                        name=base_name,
+                        tags=tags_list,
+                        annotation=annotation,
+                        star=star,
+                        meta=meta
                     )
                     if res.get("status") == "success":
                         success_count += 1
@@ -135,7 +152,7 @@ class EagleSaver:
             except Exception as e:
                 logger.error(f"处理第 {idx+1} 张图片时出错: {e}")
 
-        # 3. 延时清理临时文件
+        # 4. 延时清理临时文件
         if temp_files:
             time.sleep(1.0) # 给 Eagle 一点响应时间
             for tf in temp_files:
@@ -143,7 +160,7 @@ class EagleSaver:
                     if os.path.exists(tf): os.unlink(tf)
                 except: pass
 
-        # 4. 汇总与配置持久化
+        # 5. 汇总与配置持久化
         summary = f"保存完成 - Eagle: {success_count}/{len(images)}, 本地: {local_count}/{len(images)}"
         save_saver_config({
             "eagle_folder": eagle_folder,
@@ -153,7 +170,51 @@ class EagleSaver:
             "star": star,
             "annotation": annotation,
         })
-        
+
         return (summary,)
+
+    def _build_metadata(self, prompt, extra_pnginfo):
+        """从 ComfyUI 隐藏的 prompt / extra_pnginfo 中提取生成参数作为 JSON 元数据。"""
+        meta = {}
+        try:
+            if extra_pnginfo and isinstance(extra_pnginfo, dict):
+                workflow = extra_pnginfo.get("workflow") or {}
+                # 把整个工作流节点字典暴露出来，便于 Eagle 内按 customtitle / type 搜索
+                meta["comfy_workflow"] = workflow
+
+                # 尝试从 extra_pnginfo 的 prompt 中提取各 KSampler 参数
+                prompt_data = extra_pnginfo.get("prompt")
+                if prompt_data and isinstance(prompt_data, dict):
+                    meta["prompt"] = prompt_data
+                    samplers = []
+                    for node_id, node in prompt_data.items():
+                        if not isinstance(node, dict):
+                            continue
+                        class_type = node.get("class_type", "")
+                        if "KSampler" in class_type or "Sampler" in class_type:
+                            inputs = node.get("inputs", {})
+                            sampler_info = {
+                                "node_id": node_id,
+                                "class_type": class_type,
+                                "seed": inputs.get("seed"),
+                                "steps": inputs.get("steps"),
+                                "cfg": inputs.get("cfg"),
+                                "sampler_name": inputs.get("sampler_name"),
+                                "scheduler": inputs.get("scheduler"),
+                            }
+                            # 连接模型信息
+                            model_ref = inputs.get("model")
+                            if isinstance(model_ref, list) and len(model_ref) >= 1:
+                                sampler_info["model_node_id"] = model_ref[0]
+                            samplers.append(sampler_info)
+                    if samplers:
+                        meta["samplers"] = samplers
+
+            # prompt 参数是 ComfyUI 传给当前节点的前置节点输入信息（如果有连接）
+            if prompt and isinstance(prompt, dict):
+                meta["inputs"] = prompt
+        except Exception as e:
+            logger.warning(f"构建元数据时出错: {e}")
+        return meta if meta else None
 
 __all__ = ["EagleSaver"]
