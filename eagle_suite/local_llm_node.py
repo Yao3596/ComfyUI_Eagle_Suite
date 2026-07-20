@@ -27,50 +27,15 @@ from .logger import logger
 #  共享工具函数
 # ═══════════════════════════════════════════════════════════════
 
-PROMPT_FORMAT_TEMPLATES = {
-    "自然语言": "[输出格式] 使用流畅的自然语言描述画面，像写一段场景描写文字一样，无需特别的关键词标签格式。",
-    "SDXL": "[输出格式] 使用英文逗号分隔的关键词标签(tag)形式，如 'masterpiece, best quality, 1girl, blue hair, sunlight'。只输出标签列表，不要写完整句子或段落。每个标签尽量简洁，控制在3个英文单词以内。",
-    "SD3": "[输出格式] 使用英文逗号分隔的关键词标签(tag)形式，可混合少量自然语言短语增强描述。保持简洁，不要写长段落。",
-    "FLUX": "[输出格式] 使用详细的自然语言描述，包含场景、主体、光照、风格、构图、氛围、色彩等细节。可用英文关键词穿插增强。输出应为一段完整的描述文字，而非标签列表。",
-    "Klein": "[输出格式] 使用自然语言描述，可混合英文关键词增强表达。适合通用图像生成理解即可。",
-    "Qwen": "[输出格式] 自然语言描述，适合多模态大模型理解。可中英混合表达。",
-    "GPT": "[输出格式] 自然语言描述，适合通用大模型理解。",
-    "Gemini": "[输出格式] 自然语言描述，适合多模态大模型理解。",
-}
+from .prompt_format import (
+    PROMPT_PRESETS,
+    get_system_prompt,
+    get_user_suffix,
+    format_output as _format_prompt_output,
+)
 
-
-def _format_prompt_output(text: str, model_type: str) -> str:
-    """根据模型类型对返回文本做后置格式化。"""
-    if not text:
-        return text
-    text = text.strip()
-
-    tag_like_types = ("SDXL", "SD3")
-    if model_type in tag_like_types:
-        has_comma = "," in text
-        has_period = "." in text or "。" in text
-        lines = [l for l in text.split("\n") if l.strip()]
-        line_count = len(lines)
-
-        if has_comma and not has_period and line_count <= 2:
-            parts = [p.strip() for p in text.split(",") if p.strip()]
-            return ", ".join(parts)
-
-        cleaned = text.replace("\n", ", ").replace(".", ", ").replace("。", ", ")
-        for word in ("and", "with", "in the", "of the", "on the", "at the"):
-            cleaned = cleaned.replace(f" {word} ", ", ")
-        parts = [p.strip() for p in cleaned.split(",") if p.strip() and len(p.strip()) > 1]
-
-        seen = set()
-        unique_parts = []
-        for p in parts:
-            low = p.lower()
-            if low not in seen:
-                seen.add(low)
-                unique_parts.append(p)
-        return ", ".join(unique_parts)
-
-    return text
+# 保留旧别名，避免外部引用断裂
+PROMPT_FORMAT_TEMPLATES = {k: v.get("system_prompt", "") for k, v in PROMPT_PRESETS.items()}
 
 
 _INTRO_PATTERNS = [
@@ -338,7 +303,7 @@ class EagleLocalLLMNode:
                 }),
                 "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
                 "dtype": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
-                "prompt_model_type": (list(PROMPT_FORMAT_TEMPLATES.keys()), {"default": "自然语言"}),
+                "prompt_model_type": (list(PROMPT_PRESETS.keys()), {"default": "自然语言"}),
                 "system_template": (["custom"] + list(_SYSTEM_TEMPLATES.keys()), {"default": "image_expert"}),
                 "system_prompt": ("STRING", {
                     "default": "You are an image analysis expert. Describe images in detail.",
@@ -393,10 +358,9 @@ class EagleLocalLLMNode:
         except Exception as e:
             return ("", f"❌ 模型加载失败: {e}", history)
 
-        # 3. 系统提示词
+        # 3. 系统提示词：注入对应输出风格的身份与格式约束
         sys_prompt = _SYSTEM_TEMPLATES.get(system_template, system_prompt.strip())
-        if prompt_model_type in PROMPT_FORMAT_TEMPLATES:
-            sys_prompt += "\n" + PROMPT_FORMAT_TEMPLATES[prompt_model_type]
+        sys_prompt += "\n" + get_system_prompt(prompt_model_type)
 
         # 4. 处理历史
         history_msgs = _deserialize_history(history)
@@ -433,7 +397,7 @@ class EagleLocalLLMNode:
         else:
             if not prompt_txt:
                 return ("", "❌ 请输入提示词", _serialize_history(history_msgs))
-        content.append({"type": "text", "text": prompt_txt})
+        content.append({"type": "text", "text": prompt_txt + get_user_suffix(prompt_model_type)})
         messages.append({"role": "user", "content": content})
 
         # 7. 应用 chat template 并推理
@@ -597,7 +561,7 @@ class EagleLocalLLMServerNode(_BaseAPI):
                     "multiline": False,
                     "placeholder": "本地服务通常可留空"
                 }),
-                "prompt_model_type": (list(PROMPT_FORMAT_TEMPLATES.keys()), {"default": "自然语言"}),
+                "prompt_model_type": (list(PROMPT_PRESETS.keys()), {"default": "自然语言"}),
                 "system_template": (["custom"] + list(_SYSTEM_TEMPLATES.keys()), {"default": "image_expert"}),
                 "system_prompt": ("STRING", {
                     "default": "You are an image analysis expert. Describe images in detail.",
@@ -653,8 +617,7 @@ class EagleLocalLLMServerNode(_BaseAPI):
             return ("", "❌ 请输入本地模型名称", history, None)
 
         sys_prompt = _SYSTEM_TEMPLATES.get(system_template, system_prompt.strip())
-        if prompt_model_type in PROMPT_FORMAT_TEMPLATES:
-            sys_prompt += "\n" + PROMPT_FORMAT_TEMPLATES[prompt_model_type]
+        sys_prompt += "\n" + get_system_prompt(prompt_model_type)
 
         history_msgs = _deserialize_history(history)
         api_messages = [{"role": "system", "content": sys_prompt}] if sys_prompt else []
@@ -681,13 +644,13 @@ class EagleLocalLLMServerNode(_BaseAPI):
                 return ("", "❌ 所有图像编码失败", _serialize_history(history_msgs), None)
 
             prompt_txt = user_prompt.strip() or (f"描述这 {total_frames} 张图片" if total_frames > 1 else "描述这张图片")
-            content.append({"type": "text", "text": prompt_txt})
+            content.append({"type": "text", "text": prompt_txt + get_user_suffix(prompt_model_type)})
             current_user_msg = {"role": "user", "content": content}
         else:
             prompt_txt = user_prompt.strip()
             if not prompt_txt:
                 return ("", "❌ 请输入提示词", _serialize_history(history_msgs), None)
-            current_user_msg = {"role": "user", "content": prompt_txt}
+            current_user_msg = {"role": "user", "content": prompt_txt + get_user_suffix(prompt_model_type)}
 
         api_messages.append(current_user_msg)
 
