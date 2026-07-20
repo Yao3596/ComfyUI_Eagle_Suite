@@ -1,5 +1,4 @@
 # ── Sensitive config files ──
-api_profiles.json
 api_config.json
 *.json.bak
 machine_id.txt

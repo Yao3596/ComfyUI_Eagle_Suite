@@ -19,11 +19,8 @@ import numpy as np
 import urllib.request
 from PIL import Image
 
-# ── 配置文件路径 ──────────────────────────────────────────
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "api_config.json")
-
-# ── API Key 解码（使用公共函数）───────────────
-from .utils import decode_api_key as _decode_api_key
+# ── API Key 解码与配置管理（统一使用 api_config_manager）───────────────
+from . import api_config_manager as _cfg
 from .logger import logger
 from .prompt_format import (
     PROMPT_PRESETS,
@@ -34,6 +31,10 @@ from .prompt_format import (
 
 # 保留旧别名，避免外部引用断裂
 PROMPT_FORMAT_TEMPLATES = {k: v.get("system_prompt", "") for k, v in PROMPT_PRESETS.items()}
+_decode_api_key = _cfg.decode_api_key
+_save_api_config = _cfg.save_api_config
+_load_config = _cfg.load_config
+_normalize_url = _cfg.normalize_url
 
 # ── 输出过滤：去掉模型自我介绍 ──────────────────────────────
 _INTRO_PATTERNS = [
@@ -72,67 +73,6 @@ SYSTEM_TEMPLATES = {
     "translator": "You are a professional translator. Translate accurately while preserving tone and context.",
     "coder": "You are an expert programmer. Provide clean, efficient code with explanations.",
 }
-
-# ── 配置读写 ──────────────────────────────────────────────────
-
-_DEFAULT_CONFIG = {"api_key": "", "base_url": "", "model": ""}
-
-
-def _ensure_config_template() -> None:
-    """如果 api_config.json 不存在，自动创建一个空模板。"""
-    try:
-        if not os.path.exists(CONFIG_PATH):
-            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(_DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[EagleAPI] 创建默认配置模板失败: {e}")
-
-
-def _load_config() -> dict:
-    try:
-        _ensure_config_template()
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if not isinstance(data, dict):
-                    return dict(_DEFAULT_CONFIG)
-                for k, v in _DEFAULT_CONFIG.items():
-                    if k not in data:
-                        data[k] = v
-                return data
-    except Exception:
-        pass
-    return dict(_DEFAULT_CONFIG)
-
-
-def _save_config(config: dict) -> None:
-    try:
-        _ensure_config_template()
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[EagleAPI] 保存配置失败: {e}")
-
-def _load_saved_key() -> str:
-    return _decode_api_key(_load_config().get("api_key", ""))
-
-def _load_saved_base_url() -> str:
-    return _load_config().get("base_url", "")
-
-def _load_saved_model() -> str:
-    return _load_config().get("model", "")
-
-def _save_api_config(api_key: str = None, base_url: str = None, model: str = None) -> None:
-    """只保存 API 连接三要素，不保存 prompt_model_type 等运行时参数。"""
-    config = _load_config()
-    if api_key is not None:
-        config["api_key"] = _decode_api_key(api_key.strip())
-    if base_url is not None:
-        config["base_url"] = base_url.strip()
-    if model is not None:
-        config["model"] = model.strip()
-    _save_config(config)
 
 # ── 对话历史序列化（安全版）──────────────────────────────────
 
@@ -217,16 +157,9 @@ def _tensor_to_base64(img_tensor, max_size=2048, quality=90, batch_mode="first")
         print(f"[EagleAPI] 图像编码失败: {e}")
         return []
 
-def _normalize_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    if not url: return ""
-    if "/deployments/" in url or "/openai/deployments/" in url:
-        return url
-    if url.endswith("/chat/completions"):
-        url = url.replace("/chat/completions", "")
-    if not url.endswith("/v1"):
-        url = url + "/v1"
-    return url
+def _normalize_url_local(url: str) -> str:
+    """节点内部使用的 URL 规范化（兼容 api_config_manager.normalize_url）。"""
+    return _cfg.normalize_url(url)
 
 
 # ── 输出图像提取 ──────────────────────────────────────────────
@@ -354,9 +287,9 @@ class EagleAPIUnifiedNode(_BaseAPI):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_config_key": ("STRING", {"default": _load_saved_key(), "multiline": False}),
-                "api_config_url": ("STRING", {"default": _load_saved_base_url(), "multiline": False}),
-                "api_config_model": ("STRING", {"default": _load_saved_model(), "multiline": False}),
+                "api_config_key": ("STRING", {"default": "", "multiline": False, "placeholder": "API Key（留空使用 api_config.json）"}),
+                "api_config_url": ("STRING", {"default": "", "multiline": False, "placeholder": "Base URL（留空使用 api_config.json）"}),
+                "api_config_model": ("STRING", {"default": "", "multiline": False, "placeholder": "Model（留空使用 api_config.json）"}),
                 "prompt_model_type": (list(PROMPT_PRESETS.keys()), {"default": "自然语言"}),
                 "system_template": (["custom"] + list(SYSTEM_TEMPLATES.keys()), {"default": "default"}),
                 "system_prompt": ("STRING", {"default": "You are a helpful assistant.", "multiline": True}),
@@ -395,18 +328,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
 
         self.timeout = timeout
 
-        # ── 诊断日志：端口数据来源 ─────────────────────────────
-        api_config_connected = api_config is not None and (
-            (isinstance(api_config, (list, tuple)) and len(api_config) >= 3 and any(api_config))
-        )
-        logger.info(
-            f"[EagleAPI] 入口诊断: api_config_connected={api_config_connected}, "
-            f"独立字段 key={'<有值>' if api_config_key else '<空>'} "
-            f"url={'<有值>' if api_config_url else '<空>'} "
-            f"model={'<有值>' if api_config_model else '<空>'} "
-            f"history_len={len(history) if history else 0}"
-        )
-
+        # 优先使用 api_config 复合端口
         if api_config:
             try:
                 cfg_key, cfg_url, cfg_model = api_config
@@ -417,9 +339,11 @@ class EagleAPIUnifiedNode(_BaseAPI):
             except Exception as e:
                 logger.warning(f"[EagleAPI] api_config 解析失败，回退到独立字段: {e}")
 
-        key = _decode_api_key(api_config_key) or _load_saved_key()
-        url = _normalize_url(api_config_url.strip() or _load_saved_base_url())
-        mdl = api_config_model.strip() or _load_saved_model()
+        # 独立字段为空时，回退到 api_config.json
+        saved = _load_config()
+        key = _decode_api_key(api_config_key) or _decode_api_key(saved.get("api_key", ""))
+        url = _normalize_url_local(api_config_url.strip() or saved.get("base_url", ""))
+        mdl = api_config_model.strip() or saved.get("model", "")
 
         if not key or not url or not mdl:
             missing = []
@@ -430,6 +354,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
             logger.error(f"[EagleAPI] {err}")
             return ("", err, history, None)
 
+        # 保存本次实际使用的配置到 api_config.json（自动加入 models 列表）
         _save_api_config(api_key=key, base_url=url, model=mdl)
 
         # 根据 prompt_model_type 动态注入 system prompt 和 user suffix

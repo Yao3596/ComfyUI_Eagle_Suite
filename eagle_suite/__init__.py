@@ -31,7 +31,7 @@ from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 # 原方案在模块顶层使用 @PromptServer.instance.routes 装饰器，在 ComfyUI 热重载
 # 或 PromptServer 尚未就绪的导入阶段会触发 AttributeError。现统一改为：
 # 1) 各模块通过 route_registry.route 装饰器登记路由处理函数；
-# 2) api_key_node / api_unified 暴露 register_routes() 函数；
+# 2) api_key_node 暴露 register_routes() 函数；
 # 3) 在节点映射导入完成后统一注册到 PromptServer.instance。
 try:
     from server import PromptServer
@@ -50,12 +50,6 @@ try:
     api_key_node.register_routes()
 except Exception as e:
     logger.warning(f"[EagleSuite] api_key_node 路由注册延迟失败: {e}")
-
-try:
-    from . import api_unified
-    api_unified.register_routes()
-except Exception as e:
-    logger.warning(f"[EagleSuite] api_unified 路由注册延迟失败: {e}")
 
 __all__ = [
     "logger",
