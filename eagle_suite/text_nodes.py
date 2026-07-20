@@ -175,6 +175,7 @@ class EagleRandomLine:
                 "text": ("STRING", {"default": "", "multiline": True}),
                 "count": ("INT", {"default": 1, "min": 1, "max": 100}),
                 "join_separator": ("STRING", {"default": ", ", "tooltip": "输出多条之间的连接符"}),
+                "weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05, "tooltip": "对输出结果整体加权，例如 1.2 -> (result:1.2)"}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
             },
             "optional": {
@@ -188,7 +189,7 @@ class EagleRandomLine:
     FUNCTION = "random"
     CATEGORY = "🦅 Eagle/文本"
 
-    def random(self, text, count, join_separator, seed, split_mode="按行", split_separator=","):
+    def random(self, text, count, join_separator, weight, seed, split_mode="按行", split_separator=","):
         if split_mode == "按分隔符":
             sep = split_separator if split_separator else ","
             items = [s.strip() for s in text.split(sep) if s.strip()]
@@ -203,7 +204,10 @@ class EagleRandomLine:
             chosen = items
         else:
             chosen = rng.sample(items, count)
-        return (join_separator.join(chosen), text)
+        result = join_separator.join(chosen)
+        if weight != 1.0:
+            result = f"({result}:{weight:.3f})"
+        return (result, text)
 
 
 # ── 6. 文本条件分支 ───────────────────────────────────────────────────────────
