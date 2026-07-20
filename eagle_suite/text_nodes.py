@@ -206,7 +206,9 @@ class EagleRandomLine:
             chosen = rng.sample(items, count)
         result = join_separator.join(chosen)
         if weight != 1.0:
-            result = f"({result}:{weight:.3f})"
+            # 自动去掉小数末尾无意义的 0，例如 1.200 -> 1.2，1.05 保持 1.05
+            weight_str = ("{:f}".format(weight)).rstrip("0").rstrip(".")
+            result = f"({result}:{weight_str})"
         return (result, text)
 
 
