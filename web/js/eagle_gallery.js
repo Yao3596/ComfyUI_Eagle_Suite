@@ -346,6 +346,7 @@ var EagleGallery = {
     var items = ref([]);
     var folders = ref([]);
     var selectedIds = ref([]);
+    var selectedItems = ref({}); // id -> item 全局缓存，已选项跨文件夹保持可见
     var loading = ref(false);
     var total = ref(0);
     var err = ref("");
@@ -456,9 +457,22 @@ var EagleGallery = {
       srcSels.forEach(function(sel) {
         sels.push(sel);
       });
-      // 未传自定义时使用当前选中
+      // 未传自定义时使用当前选中：优先从全局已选缓存取，其次从当前 items 查找
       if (srcSels.length === 0) {
         selectedIds.value.forEach(function(sid) {
+          var cached = selectedItems.value[sid];
+          if (cached) {
+            sels.push({
+              id: sid,
+              filePath: cached.filePath || cached.thumbnail || "",
+              tags: cached.tags || [],
+              name: cached.name || "",
+              ext: cached.ext || "",
+              width: cached.width || 0,
+              height: cached.height || 0,
+            });
+            return;
+          }
           for (var i = 0; i < items.value.length; i++) {
             if (items.value[i].id === sid) {
               sels.push({
@@ -499,7 +513,7 @@ var EagleGallery = {
       } catch (e) {}
     }
 
-    // 整夹输出：将当前筛选结果下已加载的全部图片作为选中项
+      // 整夹输出：将当前筛选结果下已加载的全部图片作为选中项
     function selectAllForOutput() {
       var sels = [];
       items.value.forEach(function(item) {
@@ -512,6 +526,7 @@ var EagleGallery = {
           width: item.width || 0,
           height: item.height || 0,
         });
+        selectedItems.value[item.id] = item;
       });
       selectedIds.value = sels.map(function(s){ return s.id; });
       syncSelection(sels);
@@ -536,8 +551,14 @@ var EagleGallery = {
         }
       }
       var i = selectedIds.value.indexOf(item.id);
-      if (i >= 0) selectedIds.value.splice(i, 1);
-      else selectedIds.value.push(item.id);
+      if (i >= 0) {
+        selectedIds.value.splice(i, 1);
+        delete selectedItems.value[item.id];
+      } else {
+        selectedIds.value.push(item.id);
+        // 全局缓存完整 item，使切换目录后已选预览条仍能找到数据
+        selectedItems.value[item.id] = item;
+      }
       syncSelection();
     }
 
@@ -581,8 +602,12 @@ var EagleGallery = {
 
       list.forEach(function(idx) {
         if (idx >= 0 && idx < items.value.length) {
-          var id = items.value[idx].id;
-          if (selectedIds.value.indexOf(id) === -1) selectedIds.value.push(id);
+          var item = items.value[idx];
+          var id = item.id;
+          if (selectedIds.value.indexOf(id) === -1) {
+            selectedIds.value.push(id);
+            selectedItems.value[id] = item;
+          }
         }
       });
 
@@ -594,10 +619,11 @@ var EagleGallery = {
     function removeSelected(item) {
       var i = selectedIds.value.indexOf(item.id);
       if (i >= 0) selectedIds.value.splice(i, 1);
+      delete selectedItems.value[item.id];
       syncSelection();
     }
 
-    function clearSel() { selectedIds.value = []; syncSelection(); }
+    function clearSel() { selectedIds.value = []; selectedItems.value = {}; syncSelection(); }
 
     function onColor(c) { color.value = c; doSearch(); }
 
@@ -611,7 +637,13 @@ var EagleGallery = {
         .then(function(d) {
           if (d.success && d.selections && d.selections.length > 0) {
             var ids = [];
-            d.selections.forEach(function(s) { ids.push(s.id); });
+            d.selections.forEach(function(s) {
+              ids.push(s.id);
+              // 用后端缓存的完整数据回填全局已选缓存
+              if (s.id && (s.filePath || s.name || s.thumbnail)) {
+                selectedItems.value[s.id] = s;
+              }
+            });
             selectedIds.value = ids;
             outMode.value = d.output_mode || "rgb";
             seqIdx.value = d.sequence_index || 0;
@@ -712,10 +744,14 @@ var EagleGallery = {
         ]),
 
         // ═══ 状态栏：已选图像预览条 + 总数 + 整夹输出（移到工具栏下方，方便预览） ═══
+        // 预览条优先从全局已选缓存取 item，使切换文件夹后仍能看到已选图像
+        var selectedBarItems = selectedIds.value.map(function(sid) {
+          return selectedItems.value[sid] || items.value.find(function(it) { return it.id === sid; });
+        }).filter(function(it) { return it; });
         h("div", { class: "eg-foot" }, [
           h("button", { class: "eg-btn eg-folder-out", onClick: selectAllForOutput, title: "\u8F93\u51FA\u5F53\u524D\u6587\u4EF6\u5939/\u7B5B\u9009\u7ED3\u679C\u7684\u5168\u90E8\u56FE\u7247" }, "\u6574\u5939\u8F93\u51FA"),
           h(SelectionBar, {
-            items: items.value, selectedIds: selectedIds.value,
+            items: selectedBarItems, selectedIds: selectedIds.value,
             onRemove: removeSelected, onClear: clearSel
           }),
           h("div", { class: "eg-sta" }, "\u5171 " + total.value + " \u5F20 \u2502 \u9009\u4E2D " + selectedIds.value.length + " \u5F20")
