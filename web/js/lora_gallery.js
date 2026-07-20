@@ -218,6 +218,9 @@ var LoraGallery = {
         };
       });
 
+      var payload = { selections: sels, weights: weights.value };
+      var payloadStr = JSON.stringify(payload);
+
       fetch("/lora_gallery/cache_selection", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -227,7 +230,12 @@ var LoraGallery = {
       try {
         var widget = (props.node.widgets || []).find(function(w) { return w.name === "selection_data"; });
         if (widget) {
-          widget.value = JSON.stringify({ selections: sels, weights: weights.value });
+          widget.value = payloadStr;
+          // 触发 ComfyUI 的 widget change 回调，使节点标记为 dirty 并重算
+          if (typeof widget.callback === "function") {
+            widget.callback(payloadStr, widget);
+          }
+          props.node.setDirtyCanvas(true, true);
         }
       } catch (e) {}
     }

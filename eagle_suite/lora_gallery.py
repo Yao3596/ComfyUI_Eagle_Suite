@@ -116,7 +116,10 @@ def _scan_loras() -> list:
                 if os.path.isfile(txt_path):
                     try:
                         with open(txt_path, "r", encoding="utf-8") as tf:
-                            trigger_words = [t.strip() for t in tf.read().split(",") if t.strip()]
+                            raw = tf.read()
+                            # 兼容旧版逗号分隔和新版每行一个触发词
+                            sep = "\n" if "\n" in raw else ","
+                            trigger_words = [t.strip() for t in raw.split(sep) if t.strip()]
                     except Exception:
                         pass
 
@@ -556,8 +559,11 @@ async def lora_save_trigger_words_route(request):
 
         txt_path = os.path.splitext(item["path"])[0] + ".txt"
         try:
+            # 保留用户输入的每个触发词原样（允许词内带空格），过滤空字符串
+            cleaned = [str(w).strip() for w in words if str(w).strip()]
+            # 文件保存格式：每个词独占一行，避免逗号格式争议，也便于人工编辑
             with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(", ".join([str(w).strip() for w in words if str(w).strip()]))
+                f.write("\n".join(cleaned))
         except Exception as e:
             return web.json_response({"success": False, "error": f"write failed: {e}"})
 
@@ -662,6 +668,7 @@ class EagleLoraGalleryNode:
         return {
             "required": {
                 "model": ("MODEL",),
+                "selection_data": ("STRING", {"default": "[]", "multiline": False}),
                 "trigger_source": (["none", "file", "civitai", "merge"], {"default": "file"}),
                 "trigger_concat": ("BOOLEAN", {"default": True, "label_on": "拼接触发词", "label_off": "不拼接"}),
             },
@@ -669,7 +676,6 @@ class EagleLoraGalleryNode:
                 "clip": ("CLIP",),
                 "civitai_api_key": ("STRING", {"default": "", "multiline": False}),
                 "manual_triggers": ("STRING", {"default": "", "multiline": True}),
-                "selection_data": ("STRING", {"default": "[]", "multiline": False}),
             },
             "hidden": {
                 "node_id": "UNIQUE_ID",
@@ -682,15 +688,13 @@ class EagleLoraGalleryNode:
     CATEGORY = "🦅 Eagle/工具"
     OUTPUT_NODE = True
 
-    def load_loras(self, model, trigger_source="file", trigger_concat=True, clip=None, civitai_api_key="", manual_triggers="", selection_data="[]", **kwargs):
+    def load_loras(self, model, selection_data="[]", trigger_source="file", trigger_concat=True, clip=None, civitai_api_key="", manual_triggers="", **kwargs):
         node_id = str(kwargs.get("node_id", "default"))
-        cache = _lora_selection_cache.get(node_id, {"selections": [], "weights": {}})
 
-        selections = cache.get("selections", [])
-        weights = cache.get("weights", {})
-
-        # 兼容从 widget 恢复
-        if not selections and selection_data and selection_data != "[]":
+        # 优先从 selection_data widget 读取（ComfyUI 会把它作为输入参数，变化时触发重算）
+        selections = []
+        weights = {}
+        if selection_data and selection_data != "[]":
             try:
                 restored = json.loads(selection_data)
                 if isinstance(restored, dict):
@@ -698,9 +702,14 @@ class EagleLoraGalleryNode:
                     weights = restored.get("weights", {})
                 elif isinstance(restored, list):
                     selections = restored
-                _lora_selection_cache[node_id] = {"selections": selections, "weights": weights}
             except Exception:
                 pass
+
+        # 如果 widget 没有数据，再回退到服务端内存缓存（兼容旧工作流/异常场景）
+        if not selections:
+            cache = _lora_selection_cache.get(node_id, {"selections": [], "weights": {}})
+            selections = cache.get("selections", [])
+            weights = cache.get("weights", {})
 
         if not selections:
             return (model, clip, "[]", "")
@@ -759,12 +768,15 @@ class EagleLoraGalleryNode:
                 lora = comfy.utils.load_torch_file(path, safe_load=True)
                 model, clip = comfy.sd.load_lora_for_models(model, clip, lora, w, w)
                 triggers = _collect_triggers(item)
+                # loraTag: 可直接用于 prompt 的 <lora:name:weight> 格式
+                lora_tag = f"<lora:{item['name']}:{w}>"
                 applied.append({
                     "name": item["name"],
                     "path": path,
                     "weight": w,
                     "triggerWords": triggers,
                     "civitaiUrl": item.get("civitaiUrl", ""),
+                    "loraTag": lora_tag,
                 })
                 if trigger_concat:
                     for t in triggers:
@@ -780,14 +792,20 @@ class EagleLoraGalleryNode:
             if t and t not in all_triggers:
                 all_triggers.append(t)
 
-        trigger_str = ", ".join(all_triggers)
+        # 触发词输出：每个词后加逗号+空格，末尾也补逗号，方便直接拼接到 prompt
+        trigger_str = ", ".join(all_triggers) + (", " if all_triggers else "")
         info_str = json.dumps(applied, ensure_ascii=False)
 
         return (model, clip, info_str, trigger_str)
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
+    def IS_CHANGED(cls, selection_data="[]", **kwargs):
+        # 让 ComfyUI 能检测到 LoRA 选择变化：selection_data 变化时返回新 hash，否则返回固定值
+        try:
+            import hashlib
+            return hashlib.md5((selection_data or "[]").encode("utf-8")).hexdigest()
+        except Exception:
+            return float("nan")
 
 
 __all__ = ["EagleLoraGalleryNode"]
