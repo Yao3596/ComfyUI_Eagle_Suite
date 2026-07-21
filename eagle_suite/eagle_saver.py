@@ -67,6 +67,8 @@ class EagleSaver:
                 "optimize_image": ("BOOLEAN", {"default": True}),
                 "high_quality_webp": ("BOOLEAN", {"default": False}),
                 "overwrite": ("BOOLEAN", {"default": False}),
+                "save_metadata_in_png": ("BOOLEAN", {"default": True, "tooltip": "将 prompt/workflow 元数据嵌入 PNG 文件内部，与 ComfyUI 默认保存方式一致"}),
+                "save_metadata_json": ("BOOLEAN", {"default": False, "tooltip": "额外输出同名 .png.json 元数据文件"}),
                 "tags": ("STRING", {
                     "default": cfg.get("tags", ""),
                     "multiline": True,
@@ -98,6 +100,7 @@ class EagleSaver:
                     filename_number_padding=0, filename_number_start=0,
                     file_extension="png", dpi=72, quality=95,
                     optimize_image=True, high_quality_webp=False, overwrite=False,
+                    save_metadata_in_png=True, save_metadata_json=False,
                     tags="", star=0, annotation="",
                     prompt=None, extra_pnginfo=None):
 
@@ -153,9 +156,10 @@ class EagleSaver:
                         if not overwrite and os.path.exists(full_path):
                             logger.warning(f"文件已存在且未开启覆盖模式，跳过: {full_path}")
                         else:
-                            self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp)
+                            pnginfo = self._build_pnginfo(meta, save_metadata_in_png)
+                            self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp, pnginfo=pnginfo)
                             # 可选：将 metadata 写入同名 json
-                            if meta:
+                            if save_metadata_json and meta:
                                 try:
                                     import json
                                     with open(full_path + ".json", "w", encoding="utf-8") as f:
@@ -169,7 +173,8 @@ class EagleSaver:
                 # B. Eagle 保存
                 if save_to_eagle:
                     temp_path = os.path.join(tempfile.gettempdir(), filename)
-                    self._save_image(img, temp_path, file_extension, dpi, quality, optimize_image, high_quality_webp)
+                    pnginfo = self._build_pnginfo(meta, save_metadata_in_png)
+                    self._save_image(img, temp_path, file_extension, dpi, quality, optimize_image, high_quality_webp, pnginfo=pnginfo)
                     temp_files.append(temp_path)
 
                     res = eagle_client.add_item_from_path(
@@ -210,11 +215,31 @@ class EagleSaver:
 
         return (summary,)
 
-    def _save_image(self, img, path, ext, dpi, quality, optimize_image, high_quality_webp):
-        """统一图片保存逻辑，支持 PNG/JPG/WebP/BMP 及 DPI 设置。"""
+    def _build_pnginfo(self, meta, save_metadata_in_png):
+        """构建 PIL PngInfo 对象，将元数据以 tEXt/zTXt 块嵌入 PNG，与 ComfyUI 默认保存一致。"""
+        if not save_metadata_in_png or not meta:
+            return None
+        try:
+            from PIL.PngImagePlugin import PngInfo
+            import json
+            pnginfo = PngInfo()
+            # ComfyUI 默认使用这两个 key：prompt / workflow
+            if "prompt" in meta:
+                pnginfo.add_text("prompt", json.dumps(meta["prompt"], ensure_ascii=False))
+            if "comfy_workflow" in meta:
+                pnginfo.add_text("workflow", json.dumps(meta["comfy_workflow"], ensure_ascii=False))
+            # 额外写入完整的 Eagle Suite 元数据，便于自定义读取
+            pnginfo.add_text("eagle_suite_meta", json.dumps(meta, ensure_ascii=False))
+            return pnginfo
+        except Exception as e:
+            logger.warning(f"构建 PNG 元数据失败: {e}")
+            return None
+
+    def _save_image(self, img, path, ext, dpi, quality, optimize_image, high_quality_webp, pnginfo=None):
+        """统一图片保存逻辑，支持 PNG/JPG/WebP/BMP 及 DPI 设置；PNG 支持嵌入 PngInfo。"""
         ext = ext.lower()
         if ext == "png":
-            img.save(path, format="PNG", optimize=optimize_image, dpi=(dpi, dpi))
+            img.save(path, format="PNG", optimize=optimize_image, dpi=(dpi, dpi), pnginfo=pnginfo)
         elif ext == "jpg" or ext == "jpeg":
             rgb = img.convert("RGB") if img.mode != "RGB" else img
             rgb.save(path, format="JPEG", quality=quality, optimize=optimize_image, dpi=(dpi, dpi))
@@ -225,7 +250,7 @@ class EagleSaver:
         elif ext == "bmp":
             img.save(path, format="BMP")
         else:
-            img.save(path, format="PNG")
+            img.save(path, format="PNG", optimize=optimize_image, dpi=(dpi, dpi), pnginfo=pnginfo)
 
     def _build_metadata(self, prompt, extra_pnginfo):
         """从 ComfyUI 隐藏的 prompt / extra_pnginfo 中提取生成参数作为 JSON 元数据。"""
