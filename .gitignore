@@ -5,6 +5,7 @@ machine_id.txt
 eagle_gallery_settings.json
 wallhaven_settings.json
 pinterest_settings.json
+eagle_saver_config.json
 
 # ── Python cache ──
 __pycache__/

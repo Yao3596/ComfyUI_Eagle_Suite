@@ -13,7 +13,6 @@ from PIL import Image
 from .eagle_client import eagle_client
 from .utils import generate_unique_filename, parse_tags
 from .logger import logger
-from .api_config_manager import load_saver_config, save_saver_config
 
 class EagleSaver:
     """Eagle 图片保存器 - 将 ComfyUI 图像保存到 Eagle 软件或本地"""
@@ -23,12 +22,11 @@ class EagleSaver:
 
     @classmethod
     def INPUT_TYPES(cls):
-        cfg = load_saver_config()
         return {
             "required": {
                 "images": ("IMAGE",),
                 "eagle_folder": ("STRING", {
-                    "default": cfg.get("eagle_folder", ""),
+                    "default": "",
                     "multiline": False,
                     "placeholder": "Eagle 文件夹名称、路径或 ID"
                 }),
@@ -40,7 +38,7 @@ class EagleSaver:
                     "placeholder": "留空则不保存到本地"
                 }),
                 "filename_prefix": ("STRING", {
-                    "default": cfg.get("filename_prefix", "ComfyUI"),
+                    "default": "ComfyUI",
                     "multiline": False,
                 }),
                 "filename_separator": ("STRING", {
@@ -70,16 +68,16 @@ class EagleSaver:
                 "save_metadata_in_png": ("BOOLEAN", {"default": True, "tooltip": "将 prompt/workflow 元数据嵌入 PNG 文件内部，与 ComfyUI 默认保存方式一致"}),
                 "save_metadata_json": ("BOOLEAN", {"default": False, "tooltip": "额外输出同名 .png.json 元数据文件"}),
                 "tags": ("STRING", {
-                    "default": cfg.get("tags", ""),
+                    "default": "",
                     "multiline": True,
                     "placeholder": "用逗号分隔，每行也可"
                 }),
                 "star": ("INT", {
-                    "default": cfg.get("star", 0),
+                    "default": 0,
                     "min": 0, "max": 5, "step": 1,
                 }),
                 "annotation": ("STRING", {
-                    "default": cfg.get("annotation", ""),
+                    "default": "",
                     "multiline": True,
                 }),
             },
@@ -212,17 +210,8 @@ class EagleSaver:
                     if os.path.exists(tf): os.unlink(tf)
                 except: pass
 
-        # 5. 汇总与配置持久化
+        # 5. 汇总
         summary = f"保存完成 - Eagle: {success_count}/{len(images)}, 本地: {local_count}/{len(images)}"
-        # 不保存 local_save_path，避免敏感/临时路径长期保留在配置文件中
-        save_saver_config({
-            "eagle_folder": eagle_folder,
-            "local_save_path": "",
-            "filename_prefix": filename_prefix,
-            "tags": tags,
-            "star": star,
-            "annotation": annotation,
-        })
 
         return (summary,)
 
