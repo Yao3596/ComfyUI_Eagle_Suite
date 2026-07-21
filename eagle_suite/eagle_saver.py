@@ -192,10 +192,14 @@ class EagleSaver:
                         star=star,
                         meta=meta
                     )
-                    if res.get("status") == "success":
-                        success_count += 1
+                    # 兼容返回值异常（理论上应为 dict）
+                    if isinstance(res, dict):
+                        if res.get("status") == "success":
+                            success_count += 1
+                        else:
+                            logger.error(f"Eagle 导入失败: {res.get('message')}")
                     else:
-                        logger.error(f"Eagle 导入失败: {res.get('message')}")
+                        logger.error(f"Eagle 导入失败（返回类型异常 {type(res).__name__}）: {res}")
 
             except Exception as e:
                 logger.error(f"处理第 {idx+1} 张图片时出错: {e}")
