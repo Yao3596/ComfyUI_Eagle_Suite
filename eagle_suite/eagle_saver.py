@@ -206,9 +206,10 @@ class EagleSaver:
 
         # 5. 汇总与配置持久化
         summary = f"保存完成 - Eagle: {success_count}/{len(images)}, 本地: {local_count}/{len(images)}"
+        # 不保存 local_save_path，避免敏感/临时路径长期保留在配置文件中
         save_saver_config({
             "eagle_folder": eagle_folder,
-            "local_save_path": local_save_path,
+            "local_save_path": "",
             "filename_prefix": filename_prefix,
             "tags": tags,
             "star": star,
