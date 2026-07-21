@@ -49,7 +49,7 @@ class EagleSaver:
                     "placeholder": "文件名各部分之间的分隔符"
                 }),
                 "filename_number_padding": ("INT", {
-                    "default": 0, "min": 0, "max": 10, "step": 1,
+                    "default": 4, "min": 0, "max": 10, "step": 1,
                     "tooltip": "文件名数字填充位数，0 表示不填充"
                 }),
                 "filename_number_start": ("INT", {
@@ -61,7 +61,7 @@ class EagleSaver:
                     "default": 72, "min": 1, "max": 2400, "step": 1,
                 }),
                 "quality": ("INT", {
-                    "default": 95, "min": 1, "max": 100, "step": 1,
+                    "default": 100, "min": 1, "max": 100, "step": 1,
                     "tooltip": "JPG/WebP 质量，PNG 忽略"
                 }),
                 "optimize_image": ("BOOLEAN", {"default": True}),
@@ -95,10 +95,14 @@ class EagleSaver:
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle"
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, eagle_folder, local_save_path, filename_prefix, **kwargs):
+        return True
+
     def save_images(self, images, eagle_folder, local_save_path="",
                     filename_prefix="ComfyUI", filename_separator="_",
-                    filename_number_padding=0, filename_number_start=0,
-                    file_extension="png", dpi=72, quality=95,
+                    filename_number_padding=4, filename_number_start=0,
+                    file_extension="png", dpi=72, quality=100,
                     optimize_image=True, high_quality_webp=False, overwrite=False,
                     save_metadata_in_png=True, save_metadata_json=False,
                     tags="", star=0, annotation="",
