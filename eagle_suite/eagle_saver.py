@@ -35,7 +35,7 @@ class EagleSaver:
             },
             "optional": {
                 "local_save_path": ("STRING", {
-                    "default": cfg.get("local_save_path", ""),
+                    "default": "",
                     "multiline": False,
                     "placeholder": "留空则不保存到本地"
                 }),

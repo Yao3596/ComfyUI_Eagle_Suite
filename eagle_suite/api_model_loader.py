@@ -319,6 +319,11 @@ class EagleAPIUnifiedNode(_BaseAPI):
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
 
+    @classmethod
+    def IS_CHANGED(cls, api_config_key, api_config_url, api_config_model, **kwargs):
+        """导出/保存工作流时，不将 API Key 等敏感信息写入 JSON。"""
+        return float("NaN")
+
     def process(self, api_config_key, api_config_url, api_config_model,
                 prompt_model_type,
                 system_template, system_prompt, user_prompt, filter_intro,

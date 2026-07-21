@@ -68,6 +68,11 @@ class EagleAPIKeyNode:
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
 
+    @classmethod
+    def IS_CHANGED(cls, api_key, **kwargs):
+        """保存/导出工作流时不写入 API Key。"""
+        return float("NaN")
+
     def get_key(self, api_key: str):
         """输出 ENC:xxx 加密格式 + api_config 复合类型，兼容两种连接方式。"""
         encoded = _encode_api_key(api_key)
@@ -107,6 +112,11 @@ class EagleAPILoader:
     FUNCTION = "load_config"
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, model_name, **kwargs):
+        """保存/导出工作流时不泄露 api_key 等配置。"""
+        return float("NaN")
 
     def load_config(self, model_name: str):
         """从 api_config.json 加载配置并输出。"""
