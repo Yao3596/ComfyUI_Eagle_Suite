@@ -43,6 +43,30 @@ class EagleSaver:
                     "default": cfg.get("filename_prefix", "ComfyUI"),
                     "multiline": False,
                 }),
+                "filename_separator": ("STRING", {
+                    "default": "_",
+                    "multiline": False,
+                    "placeholder": "文件名各部分之间的分隔符"
+                }),
+                "filename_number_padding": ("INT", {
+                    "default": 0, "min": 0, "max": 10, "step": 1,
+                    "tooltip": "文件名数字填充位数，0 表示不填充"
+                }),
+                "filename_number_start": ("INT", {
+                    "default": 0, "min": 0, "max": 999999, "step": 1,
+                    "tooltip": "起始编号"
+                }),
+                "file_extension": (["png", "jpg", "webp", "bmp"], {"default": "png"}),
+                "dpi": ("INT", {
+                    "default": 72, "min": 1, "max": 2400, "step": 1,
+                }),
+                "quality": ("INT", {
+                    "default": 95, "min": 1, "max": 100, "step": 1,
+                    "tooltip": "JPG/WebP 质量，PNG 忽略"
+                }),
+                "optimize_image": ("BOOLEAN", {"default": True}),
+                "high_quality_webp": ("BOOLEAN", {"default": False}),
+                "overwrite": ("BOOLEAN", {"default": False}),
                 "tags": ("STRING", {
                     "default": cfg.get("tags", ""),
                     "multiline": True,
@@ -70,7 +94,11 @@ class EagleSaver:
     CATEGORY = "🦅 Eagle"
 
     def save_images(self, images, eagle_folder, local_save_path="",
-                    filename_prefix="ComfyUI", tags="", star=0, annotation="",
+                    filename_prefix="ComfyUI", filename_separator="_",
+                    filename_number_padding=0, filename_number_start=0,
+                    file_extension="png", dpi=72, quality=95,
+                    optimize_image=True, high_quality_webp=False, overwrite=False,
+                    tags="", star=0, annotation="",
                     prompt=None, extra_pnginfo=None):
 
         save_to_eagle = bool(eagle_folder.strip())
@@ -108,31 +136,40 @@ class EagleSaver:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
-                base_name = generate_unique_filename(filename_prefix, extension="png")
-                filename = base_name
+                # 生成文件名（带序号控制）
+                seq = filename_number_start + idx
+                if filename_number_padding > 0:
+                    seq_str = str(seq).zfill(filename_number_padding)
+                else:
+                    seq_str = str(seq)
+                base_name = f"{filename_prefix}{filename_separator}{seq_str}"
+                filename = f"{base_name}.{file_extension}"
 
                 # A. 本地保存
                 if save_to_local:
                     try:
                         os.makedirs(local_save_path, exist_ok=True)
                         full_path = os.path.join(local_save_path, filename)
-                        img.save(full_path, format="PNG")
-                        # 可选：将 metadata 写入同名 json
-                        if meta:
-                            try:
-                                import json
-                                with open(full_path + ".json", "w", encoding="utf-8") as f:
-                                    json.dump(meta, f, ensure_ascii=False, indent=2)
-                            except Exception as e:
-                                logger.warning(f"本地元数据写入失败: {e}")
-                        local_count += 1
+                        if not overwrite and os.path.exists(full_path):
+                            logger.warning(f"文件已存在且未开启覆盖模式，跳过: {full_path}")
+                        else:
+                            self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp)
+                            # 可选：将 metadata 写入同名 json
+                            if meta:
+                                try:
+                                    import json
+                                    with open(full_path + ".json", "w", encoding="utf-8") as f:
+                                        json.dump(meta, f, ensure_ascii=False, indent=2)
+                                except Exception as e:
+                                    logger.warning(f"本地元数据写入失败: {e}")
+                            local_count += 1
                     except Exception as e:
                         logger.error(f"本地保存失败: {e}")
 
                 # B. Eagle 保存
                 if save_to_eagle:
                     temp_path = os.path.join(tempfile.gettempdir(), filename)
-                    img.save(temp_path, format="PNG")
+                    self._save_image(img, temp_path, file_extension, dpi, quality, optimize_image, high_quality_webp)
                     temp_files.append(temp_path)
 
                     res = eagle_client.add_item_from_path(
@@ -172,6 +209,23 @@ class EagleSaver:
         })
 
         return (summary,)
+
+    def _save_image(self, img, path, ext, dpi, quality, optimize_image, high_quality_webp):
+        """统一图片保存逻辑，支持 PNG/JPG/WebP/BMP 及 DPI 设置。"""
+        ext = ext.lower()
+        if ext == "png":
+            img.save(path, format="PNG", optimize=optimize_image, dpi=(dpi, dpi))
+        elif ext == "jpg" or ext == "jpeg":
+            rgb = img.convert("RGB") if img.mode != "RGB" else img
+            rgb.save(path, format="JPEG", quality=quality, optimize=optimize_image, dpi=(dpi, dpi))
+        elif ext == "webp":
+            rgb = img.convert("RGB") if img.mode != "RGB" else img
+            method = 6 if high_quality_webp else 4
+            rgb.save(path, format="WEBP", quality=quality, method=method, optimize=optimize_image)
+        elif ext == "bmp":
+            img.save(path, format="BMP")
+        else:
+            img.save(path, format="PNG")
 
     def _build_metadata(self, prompt, extra_pnginfo):
         """从 ComfyUI 隐藏的 prompt / extra_pnginfo 中提取生成参数作为 JSON 元数据。"""
