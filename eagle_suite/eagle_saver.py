@@ -143,7 +143,7 @@ class EagleSaver:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
-                # 生成文件名（带序号控制）
+                # 生成文件名（带序号控制；若本地保存且不覆盖，自动找到下一个可用编号）
                 seq = filename_number_start + idx
                 if filename_number_padding > 0:
                     seq_str = str(seq).zfill(filename_number_padding)
@@ -157,20 +157,30 @@ class EagleSaver:
                     try:
                         os.makedirs(local_save_path, exist_ok=True)
                         full_path = os.path.join(local_save_path, filename)
+                        # 若不覆盖且文件已存在，自动递增序号寻找可用文件名
                         if not overwrite and os.path.exists(full_path):
-                            logger.warning(f"文件已存在且未开启覆盖模式，跳过: {full_path}")
-                        else:
-                            pnginfo = self._build_pnginfo(meta, save_metadata_in_png)
-                            self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp, pnginfo=pnginfo)
-                            # 可选：将 metadata 写入同名 json
-                            if save_metadata_json and meta:
-                                try:
-                                    import json
-                                    with open(full_path + ".json", "w", encoding="utf-8") as f:
-                                        json.dump(meta, f, ensure_ascii=False, indent=2)
-                                except Exception as e:
-                                    logger.warning(f"本地元数据写入失败: {e}")
-                            local_count += 1
+                            original_seq = seq
+                            while os.path.exists(full_path):
+                                seq += 1
+                                if filename_number_padding > 0:
+                                    seq_str = str(seq).zfill(filename_number_padding)
+                                else:
+                                    seq_str = str(seq)
+                                base_name = f"{filename_prefix}{filename_separator}{seq_str}"
+                                filename = f"{base_name}.{file_extension}"
+                                full_path = os.path.join(local_save_path, filename)
+                            logger.info(f"文件已存在，自动递增编号: {filename_prefix}{filename_separator}{original_seq} -> {seq}")
+                        pnginfo = self._build_pnginfo(meta, save_metadata_in_png)
+                        self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp, pnginfo=pnginfo)
+                        # 可选：将 metadata 写入同名 json
+                        if save_metadata_json and meta:
+                            try:
+                                import json
+                                with open(full_path + ".json", "w", encoding="utf-8") as f:
+                                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                            except Exception as e:
+                                logger.warning(f"本地元数据写入失败: {e}")
+                        local_count += 1
                     except Exception as e:
                         logger.error(f"本地保存失败: {e}")
 
