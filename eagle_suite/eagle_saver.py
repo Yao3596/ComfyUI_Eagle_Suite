@@ -114,6 +114,8 @@ class EagleSaver:
         folder_id = None
         if save_to_eagle:
             value, itype = eagle_client.parse_folder_input(eagle_folder)
+            if itype is None:
+                return (f"❌ 无法解析 Eagle 文件夹输入: {eagle_folder}",)
             if itype == "eagle_id":
                 folder_id = value
             elif itype == "eagle_name":

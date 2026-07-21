@@ -31,8 +31,9 @@ class EagleClient:
         if s.startswith("eagle://folder/"):
             return s.replace("eagle://folder/", "").strip(), "eagle_id"
 
-        # 2. HTTP API URL
-        if "localhost:41595" in s or "127.0.0.1:41595" in s:
+        # 2. HTTP API URL / Eagle 浏览器地址栏 URL
+        # 支持如 http://localhost:41595/folder?id=MMG4T0P2XRZ43 或 http://127.0.0.1:41595/folder?id=...
+        if re.search(r'(localhost|127\.0\.0\.1):41595', s):
             match = re.search(r'[?&]id=([A-Z0-9]+)', s)
             if match:
                 return match.group(1), "eagle_id"
