@@ -24,7 +24,27 @@ from PIL import Image
 from aiohttp import web
 from .route_registry import route
 from .logger import logger
-from .api_unified import _mask_url_token, _load_config
+from . import api_config_manager as _cfg
+
+
+# 兼容 api_unified 删除后的导入：从 api_config_manager 加载配置，并本地实现 URL token 掩码
+def _load_config() -> dict:
+    return _cfg.load_config()
+
+
+def _mask_url_token(url: str) -> str:
+    """将 URL 查询参数中的 token 替换为 ****，用于日志/前端展示。"""
+    if not url or "token=" not in url:
+        return url
+    try:
+        p = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(p.query)
+        if "token" in qs:
+            qs["token"] = ["****"]
+        new_query = urllib.parse.urlencode(qs, doseq=True)
+        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path, p.params, new_query, p.fragment))
+    except Exception:
+        return url
 
 # ── 常量 ──────────────────────────────────────────────────────────────────────
 DEFAULT_EAGLE_URL = "http://localhost:41595"
