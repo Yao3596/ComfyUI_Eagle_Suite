@@ -2,7 +2,7 @@
  * Eagle Gallery Vue — 无限滚动懒加载 + 已选图像预览条
  */
 import { app } from "../../../scripts/app.js";
-import { createApp, h, ref, computed, onMounted } from "../lib/vue.esm-browser.js";
+import { createApp, h, ref, computed, onMounted } from "../../lib/vue.esm-browser.js";
 
 // ============================================================
 // 文件夹树
