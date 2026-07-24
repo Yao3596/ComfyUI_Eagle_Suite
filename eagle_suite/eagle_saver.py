@@ -136,15 +136,29 @@ class EagleSaver:
         # 2. 从 ComfyUI 工作流中提取元数据
         meta = self._build_metadata(prompt, extra_pnginfo)
 
-        # 3. 处理每一张图片
+        # 3. 统一确定起始序号：在本地目录中从 filename_number_start 开始找到第一个可用序号。
+        #    这样本次调用内的所有图片会连续递增，不会互相覆盖，也不会覆盖已有文件。
+        seq = filename_number_start
+        if save_to_local and not overwrite:
+            os.makedirs(local_save_path, exist_ok=True)
+            while True:
+                if filename_number_padding > 0:
+                    seq_str = str(seq).zfill(filename_number_padding)
+                else:
+                    seq_str = str(seq)
+                test_name = f"{filename_prefix}{filename_separator}{seq_str}.{file_extension}"
+                if not os.path.exists(os.path.join(local_save_path, test_name)):
+                    break
+                seq += 1
+
+        # 4. 处理每一张图片
         for idx, image in enumerate(images):
             try:
                 # 张量转 PIL
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
-                # 生成文件名（带序号控制；若本地保存且不覆盖，自动找到下一个可用编号）
-                seq = filename_number_start + idx
+                # 生成文件名（带序号控制）
                 if filename_number_padding > 0:
                     seq_str = str(seq).zfill(filename_number_padding)
                 else:
@@ -157,7 +171,7 @@ class EagleSaver:
                     try:
                         os.makedirs(local_save_path, exist_ok=True)
                         full_path = os.path.join(local_save_path, filename)
-                        # 若不覆盖且文件已存在，自动递增序号寻找可用文件名
+                        # 二次兜底：如果因为并发等原因文件仍然存在，继续递增直到可用
                         if not overwrite and os.path.exists(full_path):
                             original_seq = seq
                             while os.path.exists(full_path):
@@ -170,6 +184,7 @@ class EagleSaver:
                                 filename = f"{base_name}.{file_extension}"
                                 full_path = os.path.join(local_save_path, filename)
                             logger.info(f"文件已存在，自动递增编号: {filename_prefix}{filename_separator}{original_seq} -> {seq}")
+                            # base_name/filename 已更新，重新生成 Eagle 用名
                         pnginfo = self._build_pnginfo(meta, save_metadata_in_png)
                         self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp, pnginfo=pnginfo)
                         # 可选：将 metadata 写入同名 json
@@ -208,6 +223,9 @@ class EagleSaver:
                             logger.error(f"Eagle 导入失败: {res.get('message')}")
                     else:
                         logger.error(f"Eagle 导入失败（返回类型异常 {type(res).__name__}）: {res}")
+
+                # 本张处理完成，序号递增到下一张
+                seq += 1
 
             except Exception as e:
                 logger.error(f"处理第 {idx+1} 张图片时出错: {e}")
