@@ -1,0 +1,429 @@
+.Eagle-prompt-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 5px;
+}
+
+.Eagle-prompt-container h5{
+    margin-top: 0;
+}
+
+.Eagle-prompt-container .search-container {
+    display: flex;
+    gap: 15px;
+    padding: 10px;
+    background: rgba(30, 30, 50, 0.6);
+    border-radius: 5px;
+    margin-bottom: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 30, 0.3);
+    border: 1px solid #33334d;
+    backdrop-filter: blur(10px);
+}
+
+.Eagle-prompt-container .search-box {
+    flex: 1;
+    display: flex;
+    gap: 15px;
+}
+
+.Eagle-prompt-container .filter-select, .search-input {
+    padding: 5px 15px;
+    border-radius: 8px;
+    border: none;
+    font-size: 1rem;
+    background: rgba(20, 20, 35, 0.8);
+    color: #e0e0ff;
+    border: 1px solid #3a3a5a;
+    transition: all 0.3s ease;
+}
+
+.Eagle-prompt-container .filter-select {
+    flex: 0 0 80px;
+}
+
+.Eagle-prompt-container .filter-select:focus, .search-input:focus {
+    outline: none;
+    border-color: #5d5dff;
+    box-shadow: 0 0 0 2px rgba(93, 93, 255, 0.3);
+}
+
+.Eagle-prompt-container .search-input {
+    flex: 1;
+}
+
+.Eagle-prompt-container .search-btn {
+    background: linear-gradient(135deg, #5d5dff 0%, #8a8aff 100%);
+    color: white;
+    font-size: 1rem;
+    transition: all 0.3s ease;
+    font-weight: 600;
+    margin-left: 10px; 
+    padding: 8px 16px; 
+    background-color: #007bff;
+    border: none; 
+    border-radius: 4px; 
+    cursor: pointer;
+}
+
+.Eagle-prompt-container .search-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(93, 93, 255, 0.4);
+}
+
+.Eagle-prompt-container .results-container {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 30px;
+    padding-top: 10px;
+    max-height: 650px;
+    overflow-y: auto;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE and Edge */
+}
+
+.Eagle-prompt-container .results-container::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none; /* Chrome, Safari, Opera */
+}
+
+.Eagle-prompt-container .result-card {
+    background: rgb(255 255 255);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: all 0.3s ease;
+    box-shadow: 0 8px 20px rgba(0, 0, 20, 0.4);
+    border: 1px solid #33334d;
+    position: relative;
+    cursor: pointer;
+}
+
+.Eagle-prompt-container .result-card:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 15px 30px rgba(0, 0, 30, 0.5);
+    border-color: #5d5dff;
+}
+
+/* 选中状态样式 */
+.Eagle-prompt-container .result-card.selected {
+    border-color: #28a745;
+    background: linear-gradient(135deg, rgb(255 255 255) 0%, rgb(255 255 255) 100%);
+    transform: translateY(-4px);
+    box-shadow: 0 12px 25px rgba(40, 167, 69, 0.3);
+}
+
+.Eagle-prompt-container .result-card.selected:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 15px 30px rgba(40, 167, 69, 0.4);
+}
+
+/* 选中状态下的标题样式 */
+.Eagle-prompt-container .result-card.selected .info-container h5 {
+    color: #28a745;
+    font-weight: 700;
+}
+
+/* 选中指示器 */
+.Eagle-prompt-container .result-card.selected .image-container::after {
+    content: '\f00c'; /* Font Awesome 对勾图标 */
+    font-family: 'FontAwesome', 'Font Awesome 5 Free', 'Font Awesome 6 Free', 'fa solid 900';
+    font-weight: 900;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(40, 167, 69, 0.9);
+    color: white;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(40, 167, 69, 0.5);
+}
+
+.Eagle-prompt-container .image-container {
+    position: relative;
+    height: 180px;
+    width: 100%;
+    overflow: hidden;
+}
+
+.Eagle-prompt-container .image-container img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: all 0.5s ease;
+}
+
+.Eagle-prompt-container .image-before {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 1;
+    z-index: 2;
+}
+
+.Eagle-prompt-container .image-after {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    z-index: 1;
+}
+
+.Eagle-prompt-container .image-container:hover .image-before {
+    opacity: 0;
+}
+
+.Eagle-prompt-container .image-container:hover .image-after {
+    opacity: 1;
+}
+
+.Eagle-prompt-container .info-container {
+    padding: 10px;
+}
+
+.Eagle-prompt-container .info-container h5 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #29292c;
+}
+
+.Eagle-prompt-container .info-container p {
+    color: #000;
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.Eagle-prompt-container .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.Eagle-prompt-container .tag {
+    background: rgba(93, 93, 255, 0.15);
+    color: #8a8aff;
+    padding: 4px 10px;
+    border-radius: 5px;
+    font-size: 0.8rem;
+}
+
+.Eagle-prompt-container .Eagle-prompt-footer {
+    text-align: center;
+    padding: 10px 0 20px;
+    color: #707090;
+    font-size: 0.9rem;
+    border-top: 1px solid #33334d;
+}
+
+/* 返回顶部按钮样式 */
+.Eagle-prompt-container .back-to-top-btn {
+    position: fixed;
+    right: 30px;
+    bottom: 30px;
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #5d5dff 0%, #8a8aff 100%);
+    color: white;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(93, 93, 255, 0.4);
+    z-index: 1000;
+    font-size: 18px;
+    transition: all 0.3s ease;
+    opacity: 0.8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.Eagle-prompt-container .back-to-top-btn:hover {
+    opacity: 1;
+    transform: scale(1.1) translateY(-2px);
+    box-shadow: 0 6px 25px rgba(93, 93, 255, 0.6);
+}
+
+.Eagle-prompt-container .back-to-top-btn:active {
+    transform: scale(0.95);
+}
+
+/* Textarea容器样式 */
+.Eagle-prompt-container .textarea-container {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 10px;
+}
+
+.Eagle-prompt-container .textarea-wrapper {
+    flex: 1;
+}
+
+.Eagle-prompt-container .textarea-label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+    color: #333;
+    font-size: 14px;
+}
+
+.Eagle-prompt-container .custom-textarea {
+    width: 100%;
+    height: 100px;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    resize: none;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.4;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    background-color: #fff;
+    color: #333;
+    caret-color: #333;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE and Edge */
+}
+
+.Eagle-prompt-container .custom-textarea::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none; /* Chrome, Safari, Opera */
+}
+
+.Eagle-prompt-container .custom-textarea:focus {
+    outline: none;
+    border-color: #007bff;
+    box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+}
+
+.Eagle-prompt-container .custom-textarea::placeholder {
+    color: #999;
+    opacity: 1;
+}
+
+@media (max-width: 768px) {
+    .Eagle-prompt-container .search-container {
+        flex-direction: column;
+        padding: 10px;
+    }
+    
+    .Eagle-prompt-container .search-box {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .Eagle-prompt-container .filter-select,
+    .Eagle-prompt-container .search-input {
+        width: 100%;
+        margin-bottom: 10px;
+    }
+    
+    .Eagle-prompt-container .filter-select {
+        flex: 0 0 auto;
+    }
+    
+    .Eagle-prompt-container .result-card {
+        flex-direction: column;
+    }
+    
+    .Eagle-prompt-container .image-container {
+        width: 100%;
+        margin-bottom: 15px;
+    }
+    
+    .Eagle-prompt-container .info-container {
+        width: 100%;
+    }
+    
+    /* 移动端textarea样式 */
+    .Eagle-prompt-container .textarea-container {
+        flex-direction: column;
+        padding: 0 10px;
+        gap: 15px;
+    }
+    
+    .Eagle-prompt-container .custom-textarea {
+        height: 100px;
+    }
+}
+
+.Eagle-prompt-container .hint {
+    text-align: center;
+    color: #8a8aff;
+    margin: 15px 0;
+    font-size: 0.95rem;
+}
+
+.Eagle-prompt-container .hint i {
+    margin-right: 8px;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
+}
+
+/* 可点击标签样式 */
+.Eagle-prompt-container .clickable-tag {
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.Eagle-prompt-container .clickable-tag:hover {
+    background: rgba(93, 93, 255, 0.25);
+    color: #6666ff;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(93, 93, 255, 0.3);
+}
+
+.Eagle-prompt-container .clickable-tag:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 4px rgba(93, 93, 255, 0.2);
+}
+
+/* 复制成功提示样式 */
+.Eagle-prompt-container .copy-message {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    color: white;
+    padding: 15px 25px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    box-shadow: 0 8px 25px rgba(40, 167, 69, 0.4);
+    z-index: 10000;
+    animation: copyMessageShow 0.3s ease-out;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(10px);
+}
+
+@keyframes copyMessageShow {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.8);
+    }
+    100% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+    }
+}

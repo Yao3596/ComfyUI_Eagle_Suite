@@ -1,0 +1,16 @@
+{
+  "_comment": "Eagle Suite API 配置文件。每个非下划线开头的根键都是一组模型配置，由 API 配置加载器统一维护。",
+  "_usage": "model_type 使用 llm 或 image；model_name 填写根键名称。",
+  "example-llm": {
+    "api_key": "",
+    "base_url": "https://api.example.com/v1",
+    "model": "example-llm",
+    "model_type": "llm"
+  },
+  "example-image": {
+    "api_key": "",
+    "base_url": "https://api.example.com/v1",
+    "model": "example-image",
+    "model_type": "image"
+  }
+}
