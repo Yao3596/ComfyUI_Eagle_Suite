@@ -1,0 +1,260 @@
+/* 基础容器 */
+.audio-container {
+    color-scheme: light;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1.5rem;
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    height: auto !important;
+    max-height: 548px;
+    overflow: auto;
+}
+
+/* 音频项容器 */
+.audio-item {
+    position: relative;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.08);
+    transition: all 0.2s ease;
+    overflow: hidden;
+}
+
+/* 选中状态 */
+.audio-item:has(input:checked) {
+    box-shadow: 0 5px 15px rgba(33,150,243,0.15);
+    transform: translateY(-3px);
+}
+
+/* 选中标记 */
+.audio-item::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    background: #2196F3;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.audio-item:has(input:checked)::after {
+    opacity: 1;
+}
+
+/* 内容区域 */
+.audio-content {
+    padding: 12px;
+}
+
+/* 文件名样式 */
+.file-name {
+    display: block;
+    font-size: 1rem;
+    color: #333;
+    font-weight: 500;
+    margin-bottom: 1rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 2rem;
+    width:90%;
+    outline-color: #2196F3 !important;
+}
+
+/* 隐藏单选按钮 */
+.main-container input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* 自定义选择标签 */
+.select-label {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    width: 20px;
+    height: 20px;
+    border: 2px solid #ddd;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.main-container input:checked + .select-label {
+    border-color: #2196F3;
+    background: #2196F3;
+    box-shadow: inset 0 0 0 3px white;
+}
+
+/* 播放控件容器 */
+.audio-control {
+    border-top: 1px solid #eee;
+    padding: 1rem 1.5rem;
+}
+
+.main-container audio {
+    width: 100%;
+    height: 40px;
+}
+
+.main-container audio::-webkit-media-controls-panel {
+    background: #f8f9fa;
+}
+
+/* 新增分页样式 */
+.pagination {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+.page-item {
+    display: inline-block;
+    align-content: center;
+}
+
+.page-link {
+    padding: 0.5rem 1rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    color: #2196F3;
+    text-decoration: none;
+    transition: all 0.2s;
+    cursor: pointer;
+    background: #fff;
+}
+
+.page-link:hover {
+    background: #2196F3;
+    color: white;
+    border-color: #2196F3;
+}
+
+.page-link.active {
+    background: #2196F3;
+    color: white;
+    border-color: #2196F3;
+}
+
+.page-link.disabled {
+    color: #ddd;
+    pointer-events: none;
+}
+/* 搜索容器样式 */
+.search-container {
+    position: sticky;
+    top: 0;
+    padding: 1rem 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    z-index: 10;
+    display: flex;
+    justify-content: center;
+}
+
+/* 搜索框组样式 */
+.search-group {
+    width: 90%;
+    max-width: 600px;
+    display: flex;
+    gap: 8px;
+}
+
+/* 搜索输入框 */
+.search-box {
+    flex: 1;
+    padding: 12px 20px;
+    border: 2px solid #e3e3e3;
+    border-radius: 25px;
+    font-size: 1rem;
+    transition: all 0.3s ease;
+}
+
+.search-box:focus {
+    outline: none;
+    border-color: #2196F3;
+    box-shadow: 0 3px 12px rgba(33,150,243,0.15);
+}
+
+/* 纯文字搜索按钮 */
+.search-btn {
+    padding: 0 25px;
+    background: #2196F3;
+    color: white;
+    border: none;
+    border-radius: 25px;
+    cursor: pointer;
+    transition: all 0.3s;
+    font-size: 1rem;
+    white-space: nowrap;
+}
+
+.search-btn:hover {
+    background: #1976D2;
+    transform: translateY(-1px);
+}
+
+.search-btn:active {
+    transform: translateY(0);
+}
+
+/* 无结果提示样式 */
+.no-results {
+    text-align: center;
+    color: #666;
+    padding: 2rem;
+    font-size: 1.1rem;
+    display: none;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+/* 新增分页相关样式 */
+.page-info {
+    padding: 0.5rem 1rem;
+    color: #2196F3;
+    white-space: nowrap;
+}
+
+.page-input {
+    width: 60px;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    text-align: center;
+    -moz-appearance: textfield;
+}
+
+.page-input::-webkit-outer-spin-button,
+.page-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.page-input:focus {
+    outline: none;
+    border-color: #2196F3;
+    box-shadow: 0 0 0 2px rgba(33,150,243,0.2);
+}
+.loading, .error {
+    text-align: center;
+    padding: 2rem;
+    color: #666;
+}
+
+.error button {
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    background: #2196F3;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.error button:hover {
+    background: #1976D2;
+}
