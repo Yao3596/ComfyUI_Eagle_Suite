@@ -8,6 +8,8 @@
 | 🦅 **API 多功能调用** | OpenAI 兼容的文本对话、Vision 图像分析和多轮对话 |
 | 🦅 **API 生图** | OpenAI Images API 文生图、参考图编辑和遮罩编辑 |
 | 🦅 **API Key Input** | 单独提供 API Key，兼容旧工作流 |
+| 🦅 **本地大模型反推** | 直接加载 ComfyUI `models/LLM` 或 `models/text_encoders` 中的 Transformers 模型 |
+| 🦅 **本地大模型服务(OpenAI兼容)** | 调用本机 OpenAI 兼容服务，支持文本、Vision 与多轮历史 |
 
 ## 单文件配置
 
@@ -65,6 +67,12 @@ API 配置加载器.api_config → API 生图.api_config
 3. `api_config.json` 的第一组配置。
 
 配置加载器输出顺序为 `api_key`、`base_url`、`model`、`api_config`、`model_type`。原有四个输出位置保持不变。
+
+## 随机种子与生成后控制
+
+`API 多功能调用`、`本地大模型反推` 和 `本地大模型服务(OpenAI兼容)` 都提供 `seed`。`-1` 表示不固定随机种子；非负值会发送给兼容 API 或在本地推理阶段固定采样随机数。
+
+这些 `seed` 控件使用 ComfyUI 的 `control_after_generate` 元数据，因此右键/控件菜单可选择每次执行后的固定、递增、递减或随机化行为。模型服务是否真正遵循 `seed` 仍取决于对应服务端实现。
 
 ## API 多功能调用
 
@@ -140,6 +148,19 @@ API 配置加载器.api_config → API 生图.api_config
 | `图像` | ComfyUI IMAGE，多个结果组成批次 |
 | `状态信息` | 模式、张数、耗时、模型和 token 信息 |
 | `修订提示词` | 服务商返回 `revised_prompt` 时输出 |
+
+## 本地模型节点
+
+### 本地大模型反推
+
+- 自动扫描 `ComfyUI/models/LLM` 与 `ComfyUI/models/text_encoders` 下包含 `config.json` 的 Transformers 模型目录；
+- 支持最多 9 路图片输入、纯文本输入和多轮历史；
+- `max_image_size` 会在送入模型前缩放图片，降低显存占用；
+- 首次运行会加载模型并占用显存，后续在同一进程中复用缓存。
+
+### 本地大模型服务(OpenAI兼容)
+
+用于 vLLM、LM Studio、Ollama 网关或其他本机 `/v1/chat/completions` 服务。节点不会自行启动模型服务；请先确认 Base URL 和模型名可用。本地服务通常允许 API Key 留空。
 
 ## URL 规范化
 

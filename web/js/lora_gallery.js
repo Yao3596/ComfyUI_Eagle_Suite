@@ -1122,7 +1122,7 @@ var LoraGallery = {
 // CSS
 // ============================================================
 var CSS = [
-  ".lg-root{position:relative;display:flex;flex-direction:column;height:100%;background:#121216;color:#bbb;font:13px/1.5 system-ui;overflow:hidden;border-radius:0 0 8px 8px}",
+  ".lg-root{position:relative;display:flex;flex-direction:column;width:100%;min-width:0;height:100%;box-sizing:border-box;background:#121216;color:#bbb;font:13px/1.5 system-ui;overflow:hidden;border-radius:0 0 8px 8px}",
   ".lg-bar{position:relative;display:flex;gap:6px;padding:6px 8px;background:#1a1a22;border-bottom:1px solid #2a2a32;align-items:center;flex-wrap:wrap;z-index:30}",
   ".lg-srch{flex:1;min-width:100px;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:12px}",
   ".lg-srch:focus{outline:none;border-color:#4a7de0}",
@@ -1267,14 +1267,14 @@ var CSS = [
   ".lg-detail-description{max-height:130px;overflow:auto;color:#a9a9b2;font-size:10px;line-height:1.6;white-space:pre-wrap}",
   ".lg-detail-empty{color:#666;font-size:10px;padding:4px 0}",
   "@media(max-width:760px){.lg-details-layout{grid-template-columns:1fr}.lg-details-images{grid-template-columns:repeat(4,1fr);max-height:150px}.lg-details-image{height:120px}}",
-  ".ft-wrap{user-select:none}",
-  ".ft-empty{padding:12px;color:#555;font-size:11px;text-align:center}",
-  ".ft-r{display:flex;align-items:center;padding:6px 12px;cursor:pointer;white-space:nowrap;overflow:hidden;border-radius:0 20px 20px 0;margin:1px 0;transition:all .15s;font-size:11px;color:#999;position:relative}",
-  ".ft-r:hover{background:rgba(255,255,255,0.05);color:#ccc}",
-  ".ft-r.sel{background:linear-gradient(90deg, #3a5a8a, #4a7de0);color:#fff;font-weight:600}",
-  ".ft-arr,.ft-arr-place{width:18px;font-size:10px;color:#555;text-align:center;flex-shrink:0;transition:transform .25s}",
-  ".ft-arr.open{transform:rotate(90deg);color:#999}",
-  ".ft-nm{overflow:hidden;text-overflow:ellipsis;flex:1}"
+  ".lg-root .ft-wrap{user-select:none}",
+  ".lg-root .ft-empty{padding:12px;color:#555;font-size:11px;text-align:center}",
+  ".lg-root .ft-r{display:flex;align-items:center;padding:6px 12px;cursor:pointer;white-space:nowrap;overflow:hidden;border-radius:0 20px 20px 0;margin:1px 0;transition:all .15s;font-size:11px;color:#999;position:relative}",
+  ".lg-root .ft-r:hover{background:rgba(255,255,255,0.05);color:#ccc}",
+  ".lg-root .ft-r.sel{background:linear-gradient(90deg, #3a5a8a, #4a7de0);color:#fff;font-weight:600}",
+  ".lg-root .ft-arr,.lg-root .ft-arr-place{width:18px;font-size:10px;color:#555;text-align:center;flex-shrink:0;transition:transform .25s}",
+  ".lg-root .ft-arr.open{transform:rotate(90deg);color:#999}",
+  ".lg-root .ft-nm{overflow:hidden;text-overflow:ellipsis;flex:1}"
 ].join("\n");
 
 // ============================================================
@@ -1317,22 +1317,32 @@ app.registerExtension({
       }
 
       var el = document.createElement("div");
-      el.style.cssText = "width:100%;max-width:100%;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
+      // DOM widget 的百分比宽度会受创建时布局缓存影响。节点变宽后改用实时像素宽度，
+      // 避免 Vue 画廊仍停留在旧宽度并被挤在节点左侧。
+      el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
 
-      var widget = this.addDOMWidget("lora_gallery", "div", el, { serialize: false });
+      this.addDOMWidget("lora_gallery", "div", el, { serialize: false });
 
-      var applyHeight = function(nodeHeight) {
+      var applyFrame = function(size) {
+        var nodeWidth = Number(size && size[0]) || 960;
+        var nodeHeight = Number(size && size[1]) || 720;
+        var w = Math.max(320, nodeWidth - 20);
         // 标题、插槽和两个原生 widget 会占用约 170px；保留余量避免 DOM 越出节点底框。
         var h = Math.max(300, nodeHeight - 180);
+        el.style.width = w + "px";
         el.style.height = h + "px";
-        return h;
+        return [w, h];
       };
-      applyHeight(this.size[1]);
+      var nodeRef = this;
+      // 不覆盖 DOM widget.computeSize。ComfyUI 会在创建/拖入任意节点时重新测量
+      // 所有 widget；若这里用当前 node.size 反推控件高度，就会在每次测量时把
+      // LiteGraph 的标题/插槽高度重复加回节点，造成画廊持续增高。
+      this._lgApplyFrame = applyFrame;
+      applyFrame(this.size);
 
       // 强制重新计算 ComfyUI 节点尺寸，消除隐藏 widget 留下的空隙
-      try { node.setDirtyCanvas(true, true); } catch (e) {}
+      try { nodeRef.setDirtyCanvas(true, true); } catch (e) {}
 
-      var nodeRef = this;
       try {
         var appInstance = createApp(LoraGallery, { node: nodeRef });
         appInstance.mount(el);
@@ -1345,14 +1355,29 @@ app.registerExtension({
       var onResize = this.onResize;
       this.onResize = function(size) {
         if (onResize) onResize.apply(this, arguments);
-        applyHeight(size[1]);
-        try { node.setDirtyCanvas(true, true); } catch (e) {}
+        applyFrame(size);
+        try { nodeRef.setDirtyCanvas(true, true); } catch (e) {}
       };
+
+      // 工作流恢复尺寸发生在 onNodeCreated 之后时，补一次异步同步。
+      setTimeout(function() { applyFrame(nodeRef.size); }, 0);
+      setTimeout(function() { applyFrame(nodeRef.size); }, 250);
+    };
+
+    var onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function() {
+      var result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+      var nodeRef = this;
+      setTimeout(function() {
+        if (nodeRef._lgApplyFrame) nodeRef._lgApplyFrame(nodeRef.size);
+      }, 0);
+      return result;
     };
 
     var onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function() {
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
+      this._lgApplyFrame = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

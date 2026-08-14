@@ -9,10 +9,11 @@ aiohttp>=3.8.0
 # Danbooru 标签语义搜索
 jieba>=0.42.1
 pandas>=1.5.0
+pyarrow>=10.0.0
 safetensors>=0.4.0
 sentence-transformers>=2.3.0
 
-# Hugging Face 下载节点
+# Hugging Face 缓存定位（Danbooru 本地语义模型）
 huggingface_hub>=0.20.0
 
 # 本地大模型节点（不使用本地模型时可不安装）

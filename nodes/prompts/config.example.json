@@ -1,0 +1,12 @@
+{
+  "obsidian": {
+    "enabled": false,
+    "api_url": "https://127.0.0.1:27124",
+    "api_key": "",
+    "vault_path": "",
+    "prompts_folder": "ComfyUI/Prompts"
+  },
+  "local_paths": [],
+  "auto_sync": true,
+  "default_category": "自定义"
+}

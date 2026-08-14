@@ -6,6 +6,7 @@
 """
 
 import os
+import base64
 import json
 import numpy as np
 import torch
@@ -17,6 +18,9 @@ import hashlib
 from datetime import datetime
 import tempfile
 import time
+import zlib
+import shutil
+import av
 
 from .eagle_client import eagle_client
 from .utils import parse_tags
@@ -42,13 +46,33 @@ class EagleAdvancedVideoSaver:
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
         self.prefix_append = ""
+
+    @staticmethod
+    def _media_tool(name):
+        """定位 ffmpeg/ffprobe；兼容仅将 ffmpeg 暴露到 PATH 的便携环境。"""
+        direct = shutil.which(name)
+        if direct:
+            return direct
+
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            try:
+                from .utils import get_cached_ffmpeg
+                ffmpeg_path = get_cached_ffmpeg()
+            except Exception:
+                ffmpeg_path = None
+
+        if ffmpeg_path:
+            suffix = Path(ffmpeg_path).suffix or (".exe" if os.name == "nt" else "")
+            sibling = Path(ffmpeg_path).with_name(name + suffix)
+            if sibling.is_file():
+                return str(sibling)
+        return name
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),  # ComfyUI标准图像批次 [B, H, W, C]
-                
                 # === 最上方：Eagle + 本地路径 ===
                 "eagle_folder": ("STRING", {
                     "default": "",
@@ -69,7 +93,7 @@ class EagleAdvancedVideoSaver:
                 "quality": (["lossless", "high", "medium", "low"],),
                 "preview": ("BOOLEAN", {"default": True}),
                 
-                # === Eagle 评分（在文本框上方） ===
+                # === Eagle 评分 ===
                 "eagle_rating": ("INT", {
                     "default": 0,
                     "min": 0, "max": 5, "step": 1,
@@ -77,8 +101,9 @@ class EagleAdvancedVideoSaver:
                 }),
             },
             "optional": {
-                # === VIDEO 输入口 ===
-                "video": ("VIDEO",),  # 直接传入视频文件路径
+                # === 视频/图像输入（二选一或同时提供） ===
+                "images": ("IMAGE",),  # 图像序列（可选）
+                "video": ("VIDEO",),   # 视频文件（可选）
                 
                 # === 音频输入 ===
                 "audio": ("AUDIO",),
@@ -94,7 +119,7 @@ class EagleAdvancedVideoSaver:
                 "audio_bitrate": (["128k", "192k", "256k", "320k"],),
                 "pixel_format": (["yuv420p", "yuv444p", "rgb24"],),
                 
-                # === 最下方：Eagle 标签 + 注释（文本框） ===
+                # === Eagle 标签 + 注释 ===
                 "eagle_tags": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -112,24 +137,35 @@ class EagleAdvancedVideoSaver:
                 "unique_id": "UNIQUE_ID",
             },
         }
+
     
     RETURN_TYPES = ("VIDEO", "IMAGE", "AUDIO", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("video", "video_passthrough", "audio_passthrough", "file_path", "metadata_json", "save_result")
     FUNCTION = "save_video"
     OUTPUT_NODE = True
-    CATEGORY = "🦅 Eagle/Video"
+    CATEGORY = "🦅 Eagle/工具"
     
-    def save_video(self, images, eagle_folder, local_save_path, filename_prefix, fps, format, codec, quality, 
-                   eagle_rating, preview=True,
-                   video=None, audio=None, enable_interpolation=False, interpolation_multiplier=2,
-                   resize_width=0, resize_height=0,
-                   audio_codec="aac", audio_bitrate="192k", pixel_format="yuv420p",
-                   eagle_tags="", eagle_annotation="",
-                   prompt=None, extra_pnginfo=None, unique_id=None):
-        
+    def save_video(self, eagle_folder, local_save_path, filename_prefix, fps, format, codec, quality,
+               eagle_rating, preview=True,
+               images=None, video=None, audio=None,
+               enable_interpolation=False, interpolation_multiplier=2,
+               resize_width=0, resize_height=0,
+               audio_codec="aac", audio_bitrate="192k", pixel_format="yuv420p",
+               eagle_tags="", eagle_annotation="",
+               prompt=None, extra_pnginfo=None, unique_id=None):
+
         print("\n" + "="*60)
         print("🎬 高级视频保存器（Eagle 集成版）")
         print("="*60)
+
+        # === 0. 验证输入 ===
+        if images is None and video is None:
+            return self._error_result("❌ 请至少提供 images（图像序列）或 video（视频文件）输入")
+
+        # 如果同时提供了 images 和 video，优先使用 video
+        if images is not None and video is not None:
+            print("⚠️ 同时检测到 images 和 video 输入，优先使用 video")
+            images = None  # 忽略 images
         
         # === 1. 解析保存目标 ===
         save_to_eagle = bool(eagle_folder.strip())
@@ -168,6 +204,10 @@ class EagleAdvancedVideoSaver:
         output_path.mkdir(parents=True, exist_ok=True)
         
         # === 2. 生成唯一文件名 ===
+        # ... 后续代码保持不变
+
+
+        # === 2. 生成唯一文件名 ===
         counter = 1
         while True:
             filename = f"{filename_prefix}_{counter:05d}.{format}"
@@ -179,44 +219,69 @@ class EagleAdvancedVideoSaver:
         base_name = f"{filename_prefix}_{counter:05d}"
         print(f"📁 输出文件: {filename}")
         
-        # === 3. 处理视频源（优先使用 video 输入） ===
+        # === 3. 处理视频源 ===
         actual_fps = fps
         source_video_path = None
-        if video is not None and isinstance(video, (str, Path)):
-            # 极少数情况：video 输入口直接传了一个路径字符串，走原来的直接转码逻辑
-            print(f"🎥 使用 VIDEO 输入口（路径）: {video}")
-            video_frames = None
-            source_video_path = video
-        else:
-            if video is not None:
-                # 修复：ComfyUI 原生 VIDEO 类型（VideoFromComponents / VideoFromFile，
-                # 来自 comfy_api）是对象，不是字符串路径。之前 isinstance(video, (str, Path))
-                # 永远是 False，会导致 source_video_path 恒为 None，但又不会退回去用
-                # images 生成帧 —— 最终拿着 None 去调用 ffmpeg 相关函数，直接崩溃。
-                # 现在统一用 get_components() 把它拆成图像帧 + 音轨 + 帧率，接入和
-                # images 输入完全相同的插帧/缩放/编码流程。
-                if not hasattr(video, "get_components"):
-                    return self._error_result(
-                        f"❌ video 输入类型不支持: {type(video).__name__}（既不是路径字符串，"
-                        f"也没有 get_components 方法，可能是过旧/过新版本的 ComfyUI VIDEO 类型）"
-                    )
-                print("🎥 使用 VIDEO 输入口（原生 VIDEO 对象）")
-                components = video.get_components()
-                source_tensor = components.images
-                if components.frame_rate:
-                    try:
-                        actual_fps = float(components.frame_rate)
-                        print(f"🎞️ 使用 VIDEO 自带帧率: {actual_fps} fps（忽略 fps 参数）")
-                    except Exception:
-                        pass
-                # 如果用户没有单独接 audio 输入，就用 VIDEO 自带的音轨，避免静默丢音频
-                if audio is None and getattr(components, "audio", None) is not None:
-                    audio = components.audio
-                    print("🔊 使用 VIDEO 输入口自带的音轨")
-            else:
-                source_tensor = images
+        video_frames = None
 
-            video_frames = self._process_video_input(source_tensor)
+        if video is not None:
+            # 优先获取原生 VIDEO 的流源。文件型视频直接转码，避免把整段视频解码进内存。
+            if hasattr(video, "get_stream_source"):
+                try:
+                    stream_source = video.get_stream_source()
+                    if isinstance(stream_source, (str, Path)) and os.path.isfile(stream_source):
+                        source_video_path = str(stream_source)
+                        print(f"🎥 使用 VIDEO 文件流: {source_video_path}")
+                except Exception as error:
+                    logger.debug(f"读取 VIDEO 流源失败，尝试组件模式: {error}")
+
+            # 非文件型原生 VIDEO（例如内存视频）通过组件帧处理。
+            if source_video_path is None and hasattr(video, "get_components"):
+                try:
+                    print("🎥 使用 VIDEO 组件输入")
+                    components = video.get_components()
+                    source_tensor = getattr(components, "images", None)
+                    if source_tensor is not None and getattr(source_tensor, "numel", lambda: 0)() > 0:
+                        video_frames = self._process_video_input(source_tensor)
+                    if getattr(components, "frame_rate", None):
+                        actual_fps = float(components.frame_rate)
+                        print(f"🎞️ 使用 VIDEO 自带帧率: {actual_fps} fps")
+                    if audio is None and getattr(components, "audio", None) is not None:
+                        audio = components.audio
+                        print("🔊 使用 VIDEO 输入口自带的音轨")
+                except Exception as error:
+                    logger.warning(f"VIDEO 组件读取失败: {error}")
+
+            # 兼容路径字符串以及部分第三方节点返回的 path/source 字典。
+            if source_video_path is None and video_frames is None:
+                candidate = None
+                if isinstance(video, (str, Path)):
+                    candidate = str(video)
+                elif isinstance(video, dict):
+                    candidate = video.get("path") or video.get("file") or video.get("source")
+                else:
+                    for attr in ("path", "file", "filename"):
+                        value = getattr(video, attr, None)
+                        if isinstance(value, (str, Path)):
+                            candidate = str(value)
+                            break
+                if candidate and os.path.isfile(candidate):
+                    source_video_path = os.path.abspath(candidate)
+                    print(f"🎥 使用兼容视频路径: {source_video_path}")
+
+            if source_video_path is None and video_frames is None:
+                return self._error_result(f"❌ 无法从 video 输入读取有效视频: {type(video).__name__}")
+
+        elif images is not None:
+            # 情况 3：使用 images 输入（图像序列）
+            print("🖼️ 使用 images 输入（图像序列）")
+            video_frames = self._process_video_input(images)
+
+        if source_video_path is None and video_frames is None:
+            return self._error_result("❌ images 或 video 输入为空，无法生成视频")
+
+        # 如果有视频帧（从 images 或 VIDEO.images 获取），进行后续处理
+        if video_frames is not None:
             original_frame_count = len(video_frames)
             print(f"📊 原始帧数: {original_frame_count}")
 
@@ -237,6 +302,7 @@ class EagleAdvancedVideoSaver:
             print(f"📐 视频尺寸: {w}x{h}")
             print(f"🎞️ 帧率: {actual_fps} fps")
             print(f"🎨 编码器: {codec} ({quality})")
+
         
         # === 4. 保存临时视频文件 ===
         temp_dir = tempfile.mkdtemp(prefix="eagle_video_saver_")
@@ -268,9 +334,6 @@ class EagleAdvancedVideoSaver:
         
         # === 6. 获取视频信息 ===
         file_size = final_path.stat().st_size
-        file_size_mb = file_size / (1024 * 1024)
-        print(f"💾 文件大小: {file_size_mb:.2f} MB")
-        
         # 获取视频尺寸和时长
         video_info = self._get_video_info(final_path)
         w, h = video_info.get("width", 0), video_info.get("height", 0)
@@ -285,10 +348,28 @@ class EagleAdvancedVideoSaver:
             enable_interpolation, prompt, extra_pnginfo
         )
         
-        # 保存元数据到 JSON 文件
+        # === 7.1 工作流双重保存：嵌入视频 + 同名 JSON ===
+        workflow_bundle = self._build_workflow_bundle(prompt, extra_pnginfo)
+        embed_result = self._embed_workflow_in_video(final_path, workflow_bundle)
+
+        # 嵌入完成后重新读取实际文件大小，并把保存状态写入 JSON 元数据。
+        file_size = final_path.stat().st_size
+        file_size_mb = file_size / (1024 * 1024)
+        metadata["file_size"] = file_size
         json_path = final_path.with_suffix('.json')
+        metadata["workflow_storage"] = {
+            "mode": "embedded+json",
+            "embedded": embed_result["success"],
+            "embedding_format": "zlib+base64",
+            "video_tag": "comment",
+            "json_path": str(json_path),
+            "workflow_present": bool(workflow_bundle.get("workflow")),
+            "message": embed_result["message"],
+        }
+        # 同名 JSON 保持标准 ComfyUI workflow 结构，便于直接加载；无 workflow 时保存完整包用于排查。
+        workflow_json = workflow_bundle.get("workflow") or workflow_bundle
         with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+            json.dump(workflow_json, f, indent=2, ensure_ascii=False)
         
         metadata_json = json.dumps(metadata, ensure_ascii=False)
         
@@ -322,27 +403,33 @@ class EagleAdvancedVideoSaver:
             save_result += f"🦅 Eagle: {eagle_result}{folder_correction}\n"
         if save_to_local:
             save_result += f"📁 本地: {local_save_path}\n"
+        save_result += f"🧩 工作流嵌入: {'成功' if embed_result['success'] else '失败（JSON 备份可用）'}\n"
+        save_result += f"📄 工作流 JSON: {json_path}\n"
         save_result += f"💾 大小: {file_size_mb:.2f} MB | ⏱️ 时长: {duration:.2f}s | 🎞️ 帧率: {actual_fps} fps"
         
         print(save_result)
         print("="*60 + "\n")
         
-        # === 12. 返回 VIDEO 输出（文件路径字符串） ===
+        # === 12. 返回 VIDEO 输出 ===
         video_output = str(final_path)
-        
+
+        # 确保穿透输出不为 None
+        passthrough_images = images if images is not None else torch.zeros((1, 64, 64, 3))
+        passthrough_audio = audio  # audio 可以是 None（ComfyUI 支持）
+
         return {
             "ui": ui_result,
-            "result": (video_output, images, audio, str(final_path), metadata_json, save_result)
+            "result": (
+                video_output,           # VIDEO：文件路径
+                passthrough_images,     # IMAGE：原始图像（或空张量）
+                passthrough_audio,      # AUDIO：原始音频（或 None）
+                str(final_path),        # STRING：文件路径
+                metadata_json,          # STRING：元数据 JSON
+                save_result             # STRING：保存结果摘要
+            )
         }
-    
-    def _error_result(self, message):
-        """返回错误结果"""
-        print(f"\n{message}\n")
-        empty_image = torch.zeros((1, 64, 64, 3))
-        return {
-            "ui": {},
-            "result": ("", empty_image, None, "", "{}", message)
-        }
+
+
     
     def _save_to_eagle(self, video_path, folder_id, name, tags_str, rating, annotation, metadata):
         """保存视频到 Eagle，包含缩略图和元数据"""
@@ -437,10 +524,10 @@ class EagleAdvancedVideoSaver:
             raise RuntimeError(f"视频转码失败: {str(e)}")
     
     def _get_video_info(self, video_path):
-        """使用 ffprobe 获取视频信息"""
+        """优先用 ffprobe，便携环境缺少 ffprobe 时回退 PyAV。"""
         try:
             cmd = [
-                'ffprobe',
+                self._media_tool('ffprobe'),
                 '-v', 'error',
                 '-select_streams', 'v:0',
                 '-show_entries', 'stream=width,height,r_frame_rate,nb_frames,duration',
@@ -476,9 +563,30 @@ class EagleAdvancedVideoSaver:
                 'duration': duration
             }
         
-        except Exception as e:
-            logger.warning(f"获取视频信息失败: {e}")
-            return {'width': 0, 'height': 0, 'fps': 30, 'frames': 0, 'duration': 0}
+        except Exception as error:
+            logger.debug(f"ffprobe 获取视频信息失败，回退 PyAV: {error}")
+            try:
+                with av.open(str(video_path), mode="r") as container:
+                    stream = container.streams.video[0]
+                    fps = float(stream.average_rate) if stream.average_rate else 30.0
+                    frames = int(stream.frames or 0)
+                    duration = 0.0
+                    if stream.duration is not None and stream.time_base is not None:
+                        duration = float(stream.duration * stream.time_base)
+                    elif container.duration:
+                        duration = float(container.duration / av.time_base)
+                    if frames <= 0 and duration > 0:
+                        frames = int(round(duration * fps))
+                    return {
+                        'width': int(stream.width or 0),
+                        'height': int(stream.height or 0),
+                        'fps': fps,
+                        'frames': frames,
+                        'duration': duration,
+                    }
+            except Exception as pyav_error:
+                logger.warning(f"获取视频信息失败: {pyav_error}")
+                return {'width': 0, 'height': 0, 'fps': 30, 'frames': 0, 'duration': 0}
     
     def _build_metadata(self, filename, path, format, codec, quality, fps,
                        width, height, frames, duration, file_size,
@@ -523,6 +631,84 @@ class EagleAdvancedVideoSaver:
             logger.warning(f"构建元数据时出错: {e}")
         
         return metadata
+
+    def _build_workflow_bundle(self, prompt, extra_pnginfo):
+        """构建可独立恢复的 ComfyUI 工作流包。"""
+        workflow = {}
+        extra = extra_pnginfo if isinstance(extra_pnginfo, dict) else {}
+        if isinstance(extra.get("workflow"), dict):
+            workflow = extra["workflow"]
+
+        api_prompt = prompt if isinstance(prompt, dict) else {}
+        return {
+            "schema": "comfyui.workflow.bundle.v1",
+            "created_at": datetime.now().isoformat(),
+            "workflow": workflow,
+            "prompt": api_prompt,
+            "extra_pnginfo": {
+                key: value for key, value in extra.items() if key != "workflow"
+            },
+        }
+
+    @staticmethod
+    def _escape_ffmetadata(value):
+        """转义 FFmetadata 文件中的保留字符。"""
+        return str(value).replace("\\", "\\\\").replace("=", "\\=").replace(";", "\\;").replace("#", "\\#").replace("\n", "\\\n")
+
+    def _embed_workflow_in_video(self, video_path, workflow_bundle):
+        """将压缩工作流写入容器 comment 标签；验证成功后原子替换视频。"""
+        if not workflow_bundle.get("workflow") and not workflow_bundle.get("prompt"):
+            return {"success": False, "message": "当前执行未提供可嵌入的工作流或 prompt；JSON 仍已保存"}
+
+        try:
+            raw = json.dumps(workflow_bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            encoded = base64.b64encode(zlib.compress(raw, level=9)).decode("ascii")
+            marker = "COMFYUI_WORKFLOW_ZLIB_BASE64:"
+            payload = marker + encoded
+
+            video_path = Path(video_path)
+            temp_dir = video_path.parent
+            metadata_fd, metadata_name = tempfile.mkstemp(prefix="comfy_workflow_", suffix=".ffmeta", dir=temp_dir)
+            embedded_fd, embedded_name = tempfile.mkstemp(prefix="comfy_embedded_", suffix=video_path.suffix, dir=temp_dir)
+            os.close(metadata_fd)
+            os.close(embedded_fd)
+            metadata_path = Path(metadata_name)
+            embedded_path = Path(embedded_name)
+            metadata_path.write_text(
+                ";FFMETADATA1\ncomment=" + self._escape_ffmetadata(payload) + "\n",
+                encoding="utf-8",
+            )
+
+            cmd = [
+                self._media_tool("ffmpeg"), "-y", "-i", str(video_path),
+                "-f", "ffmetadata", "-i", str(metadata_path),
+                "-map", "0", "-map_metadata", "1", "-c", "copy", str(embedded_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode != 0 or not embedded_path.is_file() or embedded_path.stat().st_size == 0:
+                detail = (result.stderr or "FFmpeg 未生成有效文件").strip().splitlines()[-1]
+                return {"success": False, "message": f"视频容器写入失败: {detail}"}
+
+            with av.open(str(embedded_path), mode="r") as container:
+                embedded_comment = str(container.metadata.get("comment", ""))
+            if embedded_comment != payload:
+                return {"success": False, "message": "视频写入后回读校验失败"}
+
+            os.replace(embedded_path, video_path)
+            return {
+                "success": True,
+                "message": f"已嵌入并校验工作流（原始 {len(raw)} 字节，压缩编码 {len(encoded)} 字符）",
+            }
+        except Exception as error:
+            logger.warning(f"工作流嵌入视频失败，保留 JSON 备份: {error}")
+            return {"success": False, "message": str(error)}
+        finally:
+            for temp_path in (locals().get("metadata_path"), locals().get("embedded_path")):
+                if temp_path:
+                    try:
+                        Path(temp_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
     
     def _generate_preview(self, video_path, unique_id, filename):
         """生成视频预览"""
@@ -748,6 +934,14 @@ class EagleAdvancedVideoSaver:
         if isinstance(waveform, torch.Tensor):
             waveform = waveform.cpu().numpy()
         
+        # 修复：ComfyUI 标准 AUDIO 张量是 (batch, channels, samples) 三维，
+        # 之前只处理了 1 维/2 维，三维原样传给 soundfile.write 会直接报
+        # "Invalid shape ... too many dimensions"（VAE解码_音频出来的就是这种形状）。
+        if waveform.ndim == 3:
+            if waveform.shape[0] != 1:
+                logger.warning(f"音频 batch 维度 > 1 ({waveform.shape[0]})，只取第一个")
+            waveform = waveform[0]  # (batch, channels, samples) -> (channels, samples)
+
         if waveform.ndim == 1:
             pass
         elif waveform.ndim == 2:
@@ -771,7 +965,16 @@ class EagleAdvancedVideoSaver:
         
         if isinstance(waveform, torch.Tensor):
             waveform = waveform.cpu().numpy()
-        
+
+        # 修复：和 _save_audio 一样，ComfyUI 标准 AUDIO 张量是三维
+        # (batch, channels, samples)，scipy.io.wavfile 只认 1/2 维。
+        if waveform.ndim == 3:
+            if waveform.shape[0] != 1:
+                logger.warning(f"音频 batch 维度 > 1 ({waveform.shape[0]})，只取第一个")
+            waveform = waveform[0]
+        if waveform.ndim == 2 and waveform.shape[0] < waveform.shape[1]:
+            waveform = waveform.T
+
         if waveform.dtype == np.float32 or waveform.dtype == np.float64:
             waveform = (waveform * 32767).astype(np.int16)
         

@@ -120,7 +120,7 @@ class EagleAudioList:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("audio_path",)
     FUNCTION = "process"
-    CATEGORY = "🦅 Eagle/工具"
+    CATEGORY = "🦅 Eagle/音频"
 
     def process(self, audio_path):
         return (audio_path or "",)

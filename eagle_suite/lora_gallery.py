@@ -1339,7 +1339,7 @@ class EagleLoraGalleryNode:
     RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING")
     RETURN_NAMES = ("model", "clip", "lora_info", "trigger_words")
     FUNCTION = "load_loras"
-    CATEGORY = "🦅 Eagle/工具"
+    CATEGORY = "🦅 Eagle"
     OUTPUT_NODE = True
 
     def load_loras(self, model, selection_data="[]", trigger_source="civitai", trigger_concat=True, clip=None, civitai_api_key="", manual_triggers="", **kwargs):

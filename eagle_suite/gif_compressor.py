@@ -45,7 +45,7 @@ class GifCompressorNode:
     RETURN_NAMES = ("preview", "file_path", "状态信息")
     FUNCTION = "compress_gif"
     OUTPUT_NODE = True
-    CATEGORY = "🦅 Eagle"
+    CATEGORY = "🦅 Eagle/工具"
 
     def compress_gif(self, images, eagle_folder, max_colors, scale,
                      frame_skip, duration_ms,

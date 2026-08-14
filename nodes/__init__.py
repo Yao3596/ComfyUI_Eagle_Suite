@@ -1,2 +1,5 @@
-# nodes/ - EagleFileTools 子项目
-# 工具节点自动注册，由 nodes_map.py 自动发现
+"""Eagle Suite 的辅助节点实现。
+
+可用节点均由 ``eagle_suite/nodes.py`` 显式导入与注册，
+本目录不执行自动扫描，以免旧文件被意外加载。
+"""

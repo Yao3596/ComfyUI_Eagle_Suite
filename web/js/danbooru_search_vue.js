@@ -49,6 +49,76 @@ const TAG_CATEGORIES = [
 
 const PAGE_LIMIT = 40;
 
+const TAG_KIND_LABELS = {
+  semantic: "语义", detail: "图片", manual: "手动", gacha: "抽卡",
+  outfit: "服装", action: "动作", scene: "场景", composition: "构图",
+  lighting: "光照", quality: "质量", general: "通用",
+};
+
+function splitPromptTags(text) {
+  const result = [];
+  let current = "", depth = 0, quote = "";
+  for (const char of String(text || "")) {
+    if (quote) {
+      current += char;
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'") { quote = char; current += char; continue; }
+    if ("([{<".includes(char)) { depth++; current += char; continue; }
+    if (")]}>".includes(char)) { depth = Math.max(0, depth - 1); current += char; continue; }
+    if (depth === 0 && (char === "," || char === ";" || char === "，" || char === "；" || char === "、" || char === "\n" || char === "\r")) {
+      if (current.trim()) result.push(current.trim());
+      current = "";
+    } else current += char;
+  }
+  if (current.trim()) result.push(current.trim());
+  return result;
+}
+
+function validTranslation(value) {
+  const text = String(value || "").trim();
+  return text && !text.includes("\uFFFD");
+}
+
+function resolveTranslation(tag, value = "") {
+  return validTranslation(value) ? value : (translationCache[tag] || "");
+}
+
+function normalizeTagItem(value, defaults = {}) {
+  const raw = typeof value === "string" ? { tag: value } : (value || {});
+  let sourceTag = String(raw.tag || "").trim();
+  const inlineWeight = sourceTag.match(/^\(([^(),]+):\s*(-?\d+(?:\.\d+)?)\)$/);
+  if (inlineWeight) sourceTag = inlineWeight[1].trim();
+  const tag = sourceTag.replace(/\s+/g, "_");
+  if (!tag) return null;
+  if (!validTranslation(raw.translation)) requestTranslations([tag]);
+  const weightValue = Number(raw.weight == null ? (inlineWeight ? inlineWeight[2] : 1) : raw.weight);
+  return {
+    tag,
+    translation: resolveTranslation(tag, raw.translation),
+    category: raw.category || defaults.category || "general",
+    kind: raw.kind || defaults.kind || "general",
+    source: raw.source || defaults.source || "manual",
+    weight: Number.isFinite(weightValue) ? Math.max(-2, Math.min(2, weightValue)) : 1,
+    enabled: raw.enabled !== false,
+  };
+}
+
+function mergeTagItems(current, incoming, defaults = {}) {
+  const result = (current || []).map(item => normalizeTagItem(item)).filter(Boolean);
+  const keys = new Set(result.map(item => item.tag.toLowerCase()));
+  (incoming || []).forEach(value => {
+    const item = normalizeTagItem(value, defaults);
+    if (item && !keys.has(item.tag.toLowerCase())) {
+      keys.add(item.tag.toLowerCase());
+      result.push(item);
+    }
+  });
+  requestTranslations(result.map(item => item.tag));
+  return result;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 工具函数
 // ════════════════════════════════════════════════════════════════════════════
@@ -189,7 +259,8 @@ function flattenEffectiveTags(post) {
 const TagSearchPanel = {
   name: "TagSearchPanel",
   props: {
-    onTagsSelected: Function,
+    onAddOutput: Function,
+    onSearchGallery: Function,
   },
   setup(props) {
     const query = ref("");
@@ -310,10 +381,27 @@ const TagSearchPanel = {
       loadRelated();
     }
 
-    function applyToGallery() {
-      if (props.onTagsSelected && selected.value.length > 0) {
-        const tags = selected.value.map(s => s.tag).join(" ");
-        props.onTagsSelected(tags);
+    function selectedItems() {
+      return selected.value.map(s => ({
+          tag: s.tag,
+          translation: s.cn_name || "",
+          category: String(s.category || "general").toLowerCase(),
+          kind: "semantic",
+          source: "semantic",
+          weight: 1,
+          enabled: true,
+      }));
+    }
+
+    function addToOutput() {
+      if (props.onAddOutput && selected.value.length > 0) {
+        props.onAddOutput(selectedItems());
+      }
+    }
+
+    function searchGalleryOnly() {
+      if (props.onSearchGallery && selected.value.length > 0) {
+        props.onSearchGallery(selectedItems());
       }
     }
 
@@ -394,25 +482,19 @@ const TagSearchPanel = {
               })),
         ]),
 
-        h("div", { class: "dbs-selected" }, [
+        h("div", { class: "dbs-selected compact" }, [
           h("div", { class: "dbs-selected-header" }, [
-            h("span", {}, "已选标签 (" + selected.value.length + ")"),
+            h("span", {}, "候选标签 " + selected.value.length + " 个"),
             selected.value.length > 0
-              ? h("button", { class: "dbs-btn small", onClick: applyToGallery }, "→ 搜索图库")
+              ? h("button", { class: "dbs-btn small primary", onClick: addToOutput }, "加入输出")
+              : null,
+            selected.value.length > 0
+              ? h("button", { class: "dbs-btn small", onClick: searchGalleryOnly }, "仅搜索图库")
               : null,
             selected.value.length > 0
               ? h("button", { class: "dbs-btn small", onClick: clearSelected }, "清除")
               : null,
           ]),
-          h("div", { class: "dbs-chips" }, selected.value.length === 0
-            ? [h("div", { class: "dbs-empty-small" }, "点击左侧结果勾选")]
-            : selected.value.map(s => {
-                return h("div", { class: "dbs-chip" }, [
-                  h("span", { title: s.tag }, s.cn_name ? (s.tag + " (" + s.cn_name + ")") : s.tag),
-                  h("span", { class: "dbs-chip-del", onClick: () => removeSelected(s) }, "×"),
-                ]);
-              }),
-          ),
         ]),
 
         h("div", { class: "dbs-related" }, [
@@ -476,6 +558,7 @@ const PostEditDialog = {
     onClose: Function,
     onSearchTag: Function,     // 把标签送到图库搜索框
     onEdited: Function,        // 编辑发生后回调（同步选中项标签）
+    onAddTags: Function,       // 把高亮标签加入节点顶部标签编辑器
   },
   setup(props) {
     // 保证编辑副本存在
@@ -485,6 +568,7 @@ const PostEditDialog = {
 
     const addCategory = ref("general");
     const addValue = ref("");
+    const highlighted = reactive(new Set());
 
     const ctxMenu = reactive({
       visible: false, x: 0, y: 0, tag: "", category: "",
@@ -541,13 +625,37 @@ const PostEditDialog = {
       addValue.value = "";
     }
 
-    function copyTags() {
+    function toggleHighlighted(tag) {
+      if (highlighted.has(tag)) highlighted.delete(tag);
+      else highlighted.add(tag);
+    }
+
+    function selectableTags() {
       const parts = [];
-      ["artist", "copyright", "character", "general"].forEach(k => {
-        (store.value[k] || []).forEach(t => parts.push(t.replace(/_/g, " ")));
-      });
-      const text = parts.join(", ");
+      TAG_CATEGORIES.forEach(cat => (store.value[cat.key] || []).forEach(tag => {
+        parts.push({ tag, category: cat.key, translation: translationCache[tag] || "" });
+      }));
+      return parts;
+    }
+
+    function copyTags() {
+      const text = selectableTags()
+        .filter(item => highlighted.has(item.tag))
+        .map(item => item.tag.replace(/_/g, " ")).join(", ");
+      if (!text) return;
       navigator.clipboard.writeText(text).catch(() => {});
+    }
+
+    function addHighlighted() {
+      const items = selectableTags().filter(item => highlighted.has(item.tag)).map(item => ({
+        ...item, kind: item.category === "general" ? "detail" : item.category,
+        source: "detail", weight: 1, enabled: true,
+      }));
+      if (items.length && props.onAddTags) props.onAddTags(items);
+    }
+
+    function selectAllTags() {
+      selectableTags().forEach(item => highlighted.add(item.tag));
     }
 
     function doReset() {
@@ -577,14 +685,15 @@ const PostEditDialog = {
             h("button", { class: "dbs-btn small", onClick: props.onClose }, "✕"),
           ]),
 
-          h("div", { class: "dbs-detail-preview" }, [
-            h("img", {
-              src: proxiedImageUrl(post.large_file_url || post.file_url || post.preview_file_url),
-              style: { maxWidth: "100%", maxHeight: "320px", objectFit: "contain" },
-            }),
-          ]),
+          h("div", { class: "dbs-detail-body" }, [
+            h("div", { class: "dbs-detail-preview" }, [
+              h("img", {
+                src: proxiedImageUrl(post.large_file_url || post.file_url || post.preview_file_url),
+                style: { maxWidth: "100%", maxHeight: "62vh", objectFit: "contain" },
+              }),
+            ]),
 
-          h("div", { class: "dbs-detail-tags" }, TAG_CATEGORIES.map(cat => {
+            h("div", { class: "dbs-detail-tags" }, TAG_CATEGORIES.map(cat => {
             const tags = store.value[cat.key] || [];
             if (tags.length === 0) return null;
             return h("div", { class: "dbs-tag-section", key: cat.key }, [
@@ -592,14 +701,16 @@ const PostEditDialog = {
               h("div", { class: "dbs-tag-group" }, tags.map(tag => {
                 const cn = translationCache[tag];
                 return h("div", {
-                  class: "dbs-tag-chip dbs-tag-category-" + cat.key,
+                  class: ["dbs-tag-chip", "dbs-tag-category-" + cat.key, highlighted.has(tag) ? "highlighted" : ""],
                   key: tag,
                   title: cn ? (tag + " · " + cn) : tag,
-                  onClick: e => showCtxMenu(e, tag, cat.key),
+                  onClick: () => toggleHighlighted(tag),
+                  onContextmenu: e => showCtxMenu(e, tag, cat.key),
                 }, cn ? (tag + " (" + cn + ")") : tag);
               })),
             ]);
-          })),
+            })),
+          ]),
 
           // 添加标签
           h("div", { class: "dbs-add-tag-row" }, [
@@ -622,7 +733,10 @@ const PostEditDialog = {
           ]),
 
           h("div", { class: "dbs-detail-actions" }, [
-            h("button", { class: "dbs-detail-btn primary", onClick: copyTags }, "📋 复制标签"),
+            h("button", { class: "dbs-detail-btn", onClick: selectAllTags }, "全选"),
+            h("button", { class: "dbs-detail-btn", onClick: () => highlighted.clear() }, "清除高亮"),
+            h("button", { class: "dbs-detail-btn primary", onClick: addHighlighted }, "➕ 加入节点标签"),
+            h("button", { class: "dbs-detail-btn primary", onClick: copyTags }, "📋 复制高亮标签"),
             h("button", {
               class: "dbs-detail-btn",
               disabled: !edited,
@@ -649,7 +763,9 @@ const GalleryPanel = {
   name: "GalleryPanel",
   props: {
     initialTags: String,
+    initialSelections: Array,
     onSelectionChange: Function,
+    onAddTags: Function,
   },
   setup(props) {
     const tags = ref(props.initialTags || "");
@@ -665,6 +781,13 @@ const GalleryPanel = {
 
     const gridRef = ref(null);
     const detailPost = ref(null);
+
+    watch(() => props.initialSelections, (items) => {
+      const incoming = Array.isArray(items) ? items : [];
+      selected.clear();
+      incoming.forEach(item => selected.add(String(item.id)));
+      selectedPosts.value = incoming.slice();
+    }, { immediate: true });
 
     // 监听外部传入的标签变化
     watch(() => props.initialTags, (newTags) => {
@@ -754,6 +877,7 @@ const GalleryPanel = {
           large_file_url: post.large_file_url,
           preview_file_url: post.preview_file_url,
           tags: flattenEffectiveTags(post),
+          tag_groups: getEffectiveTags(post),
           rating: post.rating,
           width: post.image_width,
           height: post.image_height,
@@ -786,6 +910,7 @@ const GalleryPanel = {
       const sel = selectedPosts.value.find(p => String(p.id) === id);
       if (sel) {
         sel.tags = flattenEffectiveTags(post);
+        sel.tag_groups = getEffectiveTags(post);
         syncSelection();
       }
     }
@@ -805,7 +930,16 @@ const GalleryPanel = {
       doSearch();
     }
 
-    onMounted(() => {
+    onMounted(async () => {
+      try {
+        const res = await fetch("/danbooru_search/settings");
+        const data = await res.json();
+        if (data.success && data.settings?.rating_filter) {
+          ratingFilter.value = data.settings.rating_filter;
+        }
+      } catch (_) {
+        // 设置接口不可用时沿用 general，不阻断图库。
+      }
       if (tags.value) doSearch();
     });
 
@@ -908,6 +1042,7 @@ const GalleryPanel = {
               onClose: closeDetail,
               onSearchTag: searchTagFromDetail,
               onEdited: onPostEdited,
+              onAddTags: props.onAddTags,
             })
           : null,
       ]);
@@ -918,6 +1053,149 @@ const GalleryPanel = {
 // ════════════════════════════════════════════════════════════════════════════
 // 子组件：已选预览条
 // ════════════════════════════════════════════════════════════════════════════
+
+const TagEditor = {
+  name: "TagEditor",
+  props: {
+    tags: Array, collapsed: Boolean, onChange: Function, onAdd: Function,
+    onToggleCollapse: Function, onGacha: Function, onClearGacha: Function,
+    onOpenSettings: Function, gachaName: String, gachaLoading: Boolean,
+    autoGacha: Boolean, onAutoGacha: Function, onClearAll: Function,
+  },
+  setup(props) {
+    const input = ref("");
+    const editingIndex = ref(-1);
+    const hoverIndex = ref(-1);
+    const dragIndex = ref(-1);
+    const dropIndex = ref(-1);
+    function emit(items) { props.onChange && props.onChange(items); }
+    function addManual() {
+      const values = splitPromptTags(input.value);
+      if (values.length && props.onAdd) props.onAdd(values.map(tag => ({ tag, source: "manual", kind: "manual" })));
+      input.value = "";
+    }
+    function updateAt(index, patch) {
+      emit((props.tags || []).map((item, i) => i === index ? { ...item, ...patch } : item));
+    }
+    function removeAt(index) { emit((props.tags || []).filter((_, i) => i !== index)); }
+    function reorder(from, target) {
+      if (from < 0 || target < 0 || from === target || from >= (props.tags || []).length || target >= (props.tags || []).length) return;
+      const items = (props.tags || []).slice();
+      const [moving] = items.splice(from, 1);
+      items.splice(target, 0, moving);
+      emit(items);
+      if (editingIndex.value === from) editingIndex.value = target;
+      else if (editingIndex.value >= 0) editingIndex.value = -1;
+      hoverIndex.value = target;
+    }
+    function finishDrag() {
+      dragIndex.value = -1;
+      dropIndex.value = -1;
+    }
+    return () => {
+      const inspectorIndex = editingIndex.value >= 0 ? editingIndex.value : hoverIndex.value;
+      const inspectorItem = (props.tags || [])[inspectorIndex];
+      const inspectorCn = inspectorItem ? resolveTranslation(inspectorItem.tag, inspectorItem.translation) : "";
+      const inspectorWeight = inspectorItem ? Number(inspectorItem.weight == null ? 1 : inspectorItem.weight) : 1;
+      const inspectorWeightText = Number.isInteger(inspectorWeight) ? inspectorWeight.toFixed(1) : String(Math.round(inspectorWeight * 100) / 100);
+      return h("div", { class: ["dbte", props.collapsed ? "expanded" : ""] }, [
+      h("div", { class: "dbte-head" }, [
+        h("strong", {}, "🏷️ 输出标签 " + (props.tags || []).filter(item => item.enabled !== false).length + " / " + (props.tags || []).length),
+        h("span", { class: "dbte-spacer" }),
+        h("button", { class: ["dbs-btn", props.collapsed ? "primary" : ""], onClick: props.onToggleCollapse }, props.collapsed ? "展开画廊" : "折叠画廊"),
+        h("button", {
+          class: "dbs-btn gacha", disabled: props.gachaLoading || props.autoGacha, onClick: props.onGacha,
+          title: props.autoGacha ? "自动换卡由工作流执行时生成；关闭自动换卡后可手动抽取并编辑" : "手动抽取一组可编辑标签",
+        }, props.gachaLoading ? "匹配中…" : props.autoGacha ? "自动换卡已开启" : "🎴 抽取角色外内容"),
+        h("label", { class: "dbte-auto", title: "开启后 ComfyUI 每次执行都会根据前置 character_tags 更换组合" }, [
+          h("input", { type: "checkbox", checked: !!props.autoGacha, onChange: e => props.onAutoGacha && props.onAutoGacha(e.target.checked) }),
+          "每次执行换卡",
+        ]),
+        props.gachaName ? h("span", { class: "dbs-gacha-name" }, props.gachaName) : null,
+        props.gachaName ? h("button", { class: "dbs-btn small", onClick: props.onClearGacha }, "清除抽卡") : null,
+        (props.tags || []).length ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => item.enabled !== false).map(item => {
+          const tag = item.tag.replace(/_/g, " ");
+          const weight = Number(item.weight == null ? 1 : item.weight);
+          return Math.abs(weight - 1) < 0.0001 ? tag : "(" + tag + ":" + (Math.round(weight * 100) / 100) + ")";
+        }).join(", ")).catch(() => {}) }, "复制全部") : null,
+        (props.tags || []).length ? h("button", { class: "dbs-btn small danger", onClick: props.onClearAll }, "清空") : null,
+        h("button", { class: "dbs-btn", title: "Danbooru / 抽卡模型设置", onClick: props.onOpenSettings }, "⚙"),
+      ]),
+      h("div", { class: ["dbte-body", inspectorItem ? "has-inspector" : ""] }, [
+      h("div", { class: "dbte-tags-pane" }, [
+      h("div", { class: "dbte-add" }, [
+        h("span", { class: "dbte-tip" }, "character_tags 固定角色特征优先合并，不被抽卡改写"),
+        h("input", { class: "dbs-input-line", placeholder: "手动添加标签，逗号分隔", value: input.value,
+          onInput: e => { input.value = e.target.value; }, onKeydown: e => { if (e.key === "Enter") addManual(); } }),
+        h("button", { class: "dbs-btn", onClick: addManual }, "+ 添加"),
+      ]),
+      h("div", { class: "dbte-list" }, (props.tags || []).length ? (props.tags || []).map((item, index) => {
+        const cn = resolveTranslation(item.tag, item.translation);
+        const weight = Number(item.weight == null ? 1 : item.weight);
+        const weightText = Number.isInteger(weight) ? weight.toFixed(1) : String(Math.round(weight * 100) / 100);
+        return h("div", {
+          class: ["dbte-chip", "kind-" + (item.kind || item.category || "general"), item.enabled === false ? "disabled" : "", dragIndex.value === index ? "dragging" : "", dropIndex.value === index ? "drop-target" : ""],
+          key: (item.tag || "tag") + "-" + index,
+          draggable: true,
+          title: "按住拖拽排序；悬浮查看编辑器；右键固定；双击屏蔽/恢复输出",
+          onMouseenter: () => { if (editingIndex.value < 0) hoverIndex.value = index; },
+          onContextmenu: e => { e.preventDefault(); editingIndex.value = editingIndex.value === index ? -1 : index; },
+          onDblclick: () => updateAt(index, { enabled: item.enabled === false }),
+          onDragstart: e => {
+            e.stopPropagation();
+            dragIndex.value = index;
+            dropIndex.value = index;
+            if (e.dataTransfer) {
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", String(index));
+            }
+          },
+          onDragover: e => { e.preventDefault(); e.stopPropagation(); dropIndex.value = index; if (e.dataTransfer) e.dataTransfer.dropEffect = "move"; },
+          onDrop: e => { e.preventDefault(); e.stopPropagation(); reorder(dragIndex.value, index); finishDrag(); },
+          onDragend: finishDrag,
+        }, [
+          h("span", { class: "dbte-drag-handle", title: "拖拽排序" }, "⠿"),
+          h("span", { class: "dbte-text" }, [
+            h("span", { class: "dbte-name" }, item.tag.replace(/_/g, " ")),
+            h("span", { class: "dbte-cn" }, cn || "未翻译"),
+          ]),
+          Math.abs(weight - 1) > 0.0001 ? h("span", { class: "dbte-weight-badge" }, weightText) : null,
+        ]);
+      }) : [h("div", { class: "dbte-empty" }, "从语义搜索、图片详情高亮或角色抽卡加入标签")]),
+      ]),
+      inspectorItem ? h("div", { class: ["dbte-inspector", editingIndex.value >= 0 ? "pinned" : ""] }, [
+        h("div", { class: "dbte-pop-head" }, [
+          h("strong", {}, inspectorItem.tag),
+          h("span", { class: "dbte-source" }, "来源: " + (inspectorItem.source || "manual")),
+          editingIndex.value >= 0 ? h("button", { class: "dbte-toggle", onClick: () => { editingIndex.value = -1; } }, "取消固定") : h("span", { class: "dbte-source" }, "右键标签可固定"),
+        ]),
+        h("div", { class: "dbte-pop-row" }, [
+          h("label", {}, ["用途 ", h("select", { class: "dbte-kind-select", value: inspectorItem.kind || "general", onChange: e => updateAt(inspectorIndex, { kind: e.target.value }) },
+            ["general", "outfit", "action", "scene", "composition", "lighting", "quality", "manual", "semantic", "detail"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))
+          )]),
+          h("label", {}, ["Danbooru 类型 ", h("select", { class: "dbte-kind-select", value: inspectorItem.category || "general", onChange: e => updateAt(inspectorIndex, { category: e.target.value }) },
+            ["general", "character", "copyright", "artist", "meta"].map(kind => h("option", { value: kind }, kind))
+          )]),
+          h("label", {}, ["权重 ", h("input", { class: "dbte-weight", type: "number", min: -2, max: 2, step: 0.1, value: inspectorWeightText,
+            style: { width: Math.max(3.5, inspectorWeightText.length + 1) + "ch" }, onChange: e => {
+              const value = Number(e.target.value);
+              updateAt(inspectorIndex, { weight: Number.isFinite(value) ? Math.max(-2, Math.min(2, value)) : 1 });
+            } })]),
+        ]),
+        h("label", { class: "dbte-translation" }, ["译名 ", h("input", { value: inspectorCn, placeholder: "可选中文说明", onChange: e => updateAt(inspectorIndex, { translation: e.target.value.trim() }) })]),
+        h("div", { class: "dbte-pop-row actions" }, [
+          h("button", { class: "dbte-toggle", onClick: () => updateAt(inspectorIndex, { enabled: inspectorItem.enabled === false }) }, inspectorItem.enabled === false ? "恢复输出" : "屏蔽输出"),
+          h("button", { class: "dbte-toggle", onClick: () => navigator.clipboard?.writeText(inspectorItem.tag.replace(/_/g, " ")).catch(() => {}) }, "复制"),
+          h("button", { class: "dbte-toggle", onClick: () => updateAt(inspectorIndex, { weight: 1 }) }, "重置权重"),
+          h("span", { class: "dbte-drag-note" }, "⠿ 直接拖动上方标签排序"),
+          h("button", { class: "dbte-remove", onClick: () => { removeAt(inspectorIndex); editingIndex.value = -1; hoverIndex.value = -1; } }, "删除"),
+        ]),
+      ]) : null,
+      ]),
+    ]);
+    };
+  },
+};
 
 const SelectionBar = {
   name: "SelectionBar",
@@ -931,16 +1209,18 @@ const SelectionBar = {
       const selections = props.selections || [];
 
       if (selections.length === 0) {
-        return h("div", { class: "dbsb-empty" }, "选中图片将显示在这里");
+        return h("div", { class: "dbsb-empty" }, "点击中间图片加入输出列表");
       }
 
-      return h("div", { class: "dbsb-wrap" }, [
+      return h("div", { class: "dbsb-wrap vertical" }, [
+        h("div", { class: "dbsb-title" }, "已选图像 (" + selections.length + ")"),
         h("div", { class: "dbsb-list" }, selections.map(sel => {
           return h("div", { class: "dbsb-item", key: sel.id }, [
             h("img", {
               class: "dbsb-thumb",
               src: proxiedImageUrl(sel.preview_file_url || sel.large_file_url),
             }),
+            h("span", { class: "dbsb-name" }, "#" + sel.id),
             h("button", {
               class: "dbsb-remove",
               onClick: () => props.onRemove && props.onRemove(sel.id),
@@ -950,7 +1230,6 @@ const SelectionBar = {
         })),
 
         h("div", { class: "dbsb-info" }, [
-          h("span", {}, "已选 " + selections.length + " 张"),
           h("button", {
             class: "dbsb-btn",
             onClick: () => props.onClear && props.onClear(),
@@ -978,9 +1257,24 @@ const SettingsDialog = {
     const ratingFilter = ref("general");
     const hideAi = ref(true);
     const proxyUrl = ref("");
+    const apiBaseUrl = ref("https://danbooru.donmai.us");
+    const enableModelCalls = ref(false);
+    const gachaProvider = ref("rules");
+    const gachaApiProfile = ref("");
+    const gachaLocalUrl = ref("http://127.0.0.1:11434/v1");
+    const gachaLocalModel = ref("");
+    const gachaComfyModel = ref("");
+    const gachaComfyDevice = ref("auto");
+    const gachaComfyDtype = ref("bf16");
+    const gachaProfiles = ref([]);
+    const localModels = ref([]);
+    const tagDataStatus = ref(null);
+    const reloadingTags = ref(false);
     const saving = ref(false);
+    const errorMsg = ref("");
 
     async function loadSettings() {
+      errorMsg.value = "";
       try {
         const res = await fetch("/danbooru_search/settings");
         const data = await res.json();
@@ -992,17 +1286,40 @@ const SettingsDialog = {
           ratingFilter.value = data.settings.rating_filter || "general";
           hideAi.value = data.settings.hide_ai !== false;
           proxyUrl.value = data.settings.proxy_url || "";
+          apiBaseUrl.value = data.settings.api_base_url || "https://danbooru.donmai.us";
+          enableModelCalls.value = data.settings.enable_model_calls === true;
+          gachaProvider.value = data.settings.gacha_provider || "rules";
+          gachaApiProfile.value = data.settings.gacha_api_profile || "";
+          gachaLocalUrl.value = data.settings.gacha_local_url || "http://127.0.0.1:11434/v1";
+          gachaLocalModel.value = data.settings.gacha_local_model || "";
+          gachaComfyModel.value = data.settings.gacha_comfy_model || "";
+          gachaComfyDevice.value = data.settings.gacha_comfy_device || "auto";
+          gachaComfyDtype.value = data.settings.gacha_comfy_dtype || "bf16";
+        } else {
+          errorMsg.value = data.error || "读取设置失败";
         }
+        const profilesRes = await fetch("/danbooru_search/gacha_profiles");
+        const profilesData = await profilesRes.json();
+        gachaProfiles.value = profilesData.success && Array.isArray(profilesData.profiles) ? profilesData.profiles : [];
+        const [modelsRes, statusRes] = await Promise.all([
+          fetch("/danbooru_search/local_models"),
+          fetch("/danbooru_search/tag_data_status"),
+        ]);
+        const modelsData = await modelsRes.json();
+        const statusData = await statusRes.json();
+        localModels.value = modelsData.success && Array.isArray(modelsData.models) ? modelsData.models : [];
+        tagDataStatus.value = statusData.success ? statusData.data : null;
       } catch (e) {
-        // 忽略
+        errorMsg.value = "读取设置失败: " + e.message;
       }
     }
 
     async function saveSettings() {
       saving.value = true;
+      errorMsg.value = "";
 
       try {
-        await fetch("/danbooru_search/settings", {
+        const res = await fetch("/danbooru_search/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1012,38 +1329,60 @@ const SettingsDialog = {
             rating_filter: ratingFilter.value,
             hide_ai: hideAi.value,
             proxy_url: proxyUrl.value,
+            api_base_url: apiBaseUrl.value,
+            enable_model_calls: enableModelCalls.value,
+            gacha_provider: gachaProvider.value,
+            gacha_api_profile: gachaApiProfile.value,
+            gacha_local_url: gachaLocalUrl.value,
+            gacha_local_model: gachaLocalModel.value,
+            gacha_comfy_model: gachaComfyModel.value,
+            gacha_comfy_device: gachaComfyDevice.value,
+            gacha_comfy_dtype: gachaComfyDtype.value,
           }),
         });
-
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || ("HTTP " + res.status));
+        }
         if (props.onClose) props.onClose();
       } catch (e) {
-        // 忽略
+        errorMsg.value = "保存失败: " + e.message;
       } finally {
         saving.value = false;
       }
     }
 
+    async function reloadTagData() {
+      if (reloadingTags.value) return;
+      reloadingTags.value = true;
+      errorMsg.value = "";
+      try {
+        const res = await fetch("/danbooru_search/reload_tag_data", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || ("HTTP " + res.status));
+        tagDataStatus.value = data.data || null;
+        Object.keys(translationCache).forEach(key => { delete translationCache[key]; });
+        errorMsg.value = "✅ " + data.message;
+      } catch (error) {
+        errorMsg.value = "标签重载失败: " + error.message;
+      } finally {
+        reloadingTags.value = false;
+      }
+    }
+
     watch(() => props.visible, (visible) => {
       if (visible) loadSettings();
-    });
+    }, { immediate: true });
 
     return () => {
       if (!props.visible) return h("div");
 
       return h("div", { class: "dbs-modal-backdrop", onClick: props.onClose }, [
         h("div", {
-          class: "dbs-modal",
+          class: "dbs-modal dbs-settings-modal",
           onClick: e => e.stopPropagation(),
         }, [
           h("h3", {}, "⚙ 设置"),
-
-          h("label", {}, "BGE-M3 模型本地路径（可选）"),
-          h("input", {
-            class: "dbs-input-line",
-            value: modelPath.value,
-            placeholder: "留空则自动从 HuggingFace 下载",
-            onInput: e => { modelPath.value = e.target.value; },
-          }),
 
           h("label", { style: { marginTop: "12px" } }, "Danbooru 用户名（可选）"),
           h("input", {
@@ -1086,6 +1425,102 @@ const SettingsDialog = {
             onInput: e => { proxyUrl.value = e.target.value; },
           }),
 
+          h("label", { style: { marginTop: "12px" } }, "Danbooru API 基址（高级）"),
+          h("input", {
+            class: "dbs-input-line",
+            value: apiBaseUrl.value,
+            placeholder: "https://danbooru.donmai.us",
+            onInput: e => { apiBaseUrl.value = e.target.value; },
+          }),
+          h("div", {
+            style: { marginTop: "5px", color: "#8b8b96", fontSize: "11px", lineHeight: "1.4" },
+          }, "官方站被 Cloudflare 拦截时，可填写你信任的 Danbooru API 反代地址。"),
+
+          h("div", { class: "dbs-settings-separator" }, "标签数据与语义模型"),
+          h("label", {}, "语义搜索模型（models/text_encoders 或 models/LLM）"),
+          h("select", {
+            class: "dbs-input-line", value: modelPath.value,
+            onChange: e => { modelPath.value = e.target.value; },
+          }, [h("option", { value: "" }, "默认 BAAI/bge-m3")].concat(
+            modelPath.value && !localModels.value.some(model => model.path === modelPath.value)
+              ? [h("option", { value: modelPath.value }, "当前自定义路径")]
+              : [],
+            localModels.value.filter(model => model.semantic).map(model => h("option", { value: model.path }, model.name))
+          )),
+          h("label", { style: { marginTop: "8px" } }, "或手动填写 SentenceTransformer 模型路径"),
+          h("input", { class: "dbs-input-line", value: modelPath.value, placeholder: "留空使用 BAAI/bge-m3", onInput: e => { modelPath.value = e.target.value; } }),
+          h("div", { class: "dbs-settings-note" }, "语义搜索要求模型兼容 SentenceTransformer；纯 CLIP/T5 即使能列出，也可能不兼容。顶部路径框仍可手动填写任意本地路径。"),
+          h("div", { class: "dbs-tag-data-row" }, [
+            h("button", { class: "dbs-btn", disabled: reloadingTags.value, onClick: reloadTagData }, reloadingTags.value ? "重载中…" : "🔄 重新载入标签数据"),
+            h("span", { class: "dbs-settings-note" }, tagDataStatus.value?.tags?.exists
+              ? ((tagDataStatus.value.translations_in_memory || 0) + " 条 · " + (tagDataStatus.value.tags.modified || "时间未知"))
+              : "未找到 tags_enhanced.csv"),
+          ]),
+          tagDataStatus.value?.tags?.path ? h("div", { class: "dbs-data-path", title: tagDataStatus.value.tags.path }, tagDataStatus.value.tags.path) : null,
+
+          h("div", { class: "dbs-settings-separator" }, "角色外内容抽卡"),
+          h("label", { class: "dbs-check dbs-model-master-switch" }, [
+            h("input", { type: "checkbox", checked: enableModelCalls.value, onChange: e => { enableModelCalls.value = e.target.checked; } }),
+            h("span", {}, [h("strong", {}, "允许语言模型 / API 调用"), h("small", {}, "关闭时绝不加载生成模型，也不请求 LLM API")]),
+          ]),
+          h("label", {}, "抽卡生成方式"),
+          h("select", {
+            class: "dbs-input-line",
+            value: gachaProvider.value,
+            onChange: e => { gachaProvider.value = e.target.value; },
+          }, [
+            h("option", { value: "rules" }, "本地规则引擎（推荐，零模型占用）"),
+            h("option", { value: "gallery" }, "从已选画廊图片抽取标签（零模型占用）"),
+            h("option", { value: "api_profile", disabled: !enableModelCalls.value }, "api_config.json 中的大语言模型"),
+            h("option", { value: "local_openai", disabled: !enableModelCalls.value }, "本地 OpenAI 兼容服务"),
+            h("option", { value: "comfyui_model", disabled: !enableModelCalls.value }, "ComfyUI models 中的本地生成模型"),
+          ]),
+
+          gachaProvider.value === "api_profile" ? h("div", {}, [
+            h("label", { style: { marginTop: "8px" } }, "API 模型配置"),
+            h("select", {
+              class: "dbs-input-line",
+              value: gachaApiProfile.value,
+              onChange: e => { gachaApiProfile.value = e.target.value; },
+            }, [h("option", { value: "" }, "使用 api_config 当前激活模型")].concat(
+              gachaProfiles.value.map(p => h("option", { value: p.name }, p.name + (p.model ? " · " + p.model : "")))
+            )),
+          ]) : null,
+
+          gachaProvider.value === "local_openai" ? h("div", {}, [
+            h("label", { style: { marginTop: "8px" } }, "本地服务 URL"),
+            h("input", {
+              class: "dbs-input-line", value: gachaLocalUrl.value,
+              placeholder: "Ollama / LM Studio / llama.cpp，例如 http://127.0.0.1:11434/v1",
+              onInput: e => { gachaLocalUrl.value = e.target.value; },
+            }),
+            h("label", { style: { marginTop: "8px" } }, "模型名称或路径（作为 model 参数）"),
+            h("input", {
+              class: "dbs-input-line", value: gachaLocalModel.value,
+              placeholder: "例如 qwen2.5:7b；由本地服务负责加载模型",
+              onInput: e => { gachaLocalModel.value = e.target.value; },
+            }),
+          ]) : null,
+          gachaProvider.value === "comfyui_model" ? h("div", {}, [
+            h("label", { style: { marginTop: "8px" } }, "本地生成模型"),
+            h("select", {
+              class: "dbs-input-line", value: gachaComfyModel.value,
+              onChange: e => { gachaComfyModel.value = e.target.value; },
+            }, [h("option", { value: "" }, "请选择模型")].concat(
+              localModels.value.filter(model => model.generative).map(model => h("option", { value: model.name }, model.name))
+            )),
+            h("div", { class: "dbs-inline-settings" }, [
+              h("label", {}, ["设备", h("select", { class: "dbs-input-line", value: gachaComfyDevice.value, onChange: e => { gachaComfyDevice.value = e.target.value; } },
+                ["auto", "cuda", "cpu"].map(value => h("option", { value }, value)))]),
+              h("label", {}, ["精度", h("select", { class: "dbs-input-line", value: gachaComfyDtype.value, onChange: e => { gachaComfyDtype.value = e.target.value; } },
+                ["bf16", "fp16", "fp32"].map(value => h("option", { value }, value)))]),
+            ]),
+            h("div", { class: "dbs-settings-note" }, "复用“本地大模型反推”的模型缓存。首次使用会加载模型；纯编码器不会出现在此下拉框。"),
+          ]) : null,
+          h("div", { class: "dbs-settings-note" }, "模型仅负责根据前置角色/风格约束编排服装、动作、场景、构图和光照。自动执行还必须把节点左侧 enable_language_model 端口设为 true；任一开关关闭都不会加载模型。"),
+
+          errorMsg.value ? h("div", { class: "dbs-error", style: { marginTop: "10px" } }, errorMsg.value) : null,
+
           h("div", { class: "dbs-modal-actions" }, [
             h("button", { class: "dbs-btn", onClick: props.onClose }, "取消"),
             h("button", {
@@ -1111,11 +1546,33 @@ const DanbooruSearchApp = {
   setup(props) {
     const selectedGalleryTags = ref("");
     const selectedPosts = ref([]);
+    const selectedOutputTags = ref([]);
     const settingsOpen = ref(false);
-    const outputMode = ref("rgb");
+    const galleryCollapsed = ref(false);
+    const lastGachaCard = ref("");
+    const gachaLoading = ref(false);
+    const gachaStatus = ref("");
+    const autoGacha = ref(false);
+    const gachaContext = ref("");
 
-    function onTagsSelected(tags) {
-      selectedGalleryTags.value = tags;
+    function addOutputTags(items, defaults = {}) {
+      selectedOutputTags.value = mergeTagItems(selectedOutputTags.value, items, defaults);
+      syncSelection();
+    }
+
+    function addSearchOutput(items) {
+      addOutputTags(items, { source: "semantic", kind: "semantic" });
+    }
+
+    function searchGallery(items) {
+      const value = (items || []).map(item => item.tag).filter(Boolean).join(" ");
+      if (!value) return;
+      if (selectedGalleryTags.value === value) {
+        selectedGalleryTags.value = "";
+        setTimeout(() => { selectedGalleryTags.value = value; }, 0);
+      } else {
+        selectedGalleryTags.value = value;
+      }
     }
 
     function onGallerySelectionChange(selections) {
@@ -1133,13 +1590,64 @@ const DanbooruSearchApp = {
       syncSelection();
     }
 
+    function updateOutputTags(items) {
+      selectedOutputTags.value = (items || []).map(item => normalizeTagItem(item)).filter(Boolean);
+      syncSelection();
+    }
+
+    async function drawGacha() {
+      if (gachaLoading.value) return;
+      gachaLoading.value = true;
+      gachaStatus.value = "";
+      try {
+        const currentContext = selectedOutputTags.value
+          .filter(item => item.enabled !== false && item.source !== "gacha")
+          .map(item => item.tag).join(", ");
+        const response = await fetch("/danbooru_search/gacha", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            character_tags: [gachaContext.value, currentContext].filter(Boolean).join(", "),
+            selections: selectedPosts.value,
+          }),
+        });
+        const raw = await response.text();
+        let data;
+        try {
+          data = JSON.parse(raw);
+        } catch (_) {
+          throw new Error("服务返回了非 JSON 内容：" + (raw || "空响应").slice(0, 180));
+        }
+        if (!response.ok || !data.success) throw new Error(data.error || ("HTTP " + response.status));
+        lastGachaCard.value = data.name || "新组合";
+        const kept = selectedOutputTags.value.filter(item => item.source !== "gacha");
+        selectedOutputTags.value = mergeTagItems(kept, data.tags || [], { source: "gacha" });
+        gachaStatus.value = data.warning ? ("已回退规则卡：" + data.warning) : (data.provider === "rules" ? "本地规则卡" : data.provider === "gallery" ? "已选画廊标签组合" : "模型智能编排");
+        syncSelection();
+      } catch (error) {
+        gachaStatus.value = "抽卡失败：" + error.message;
+      } finally {
+        gachaLoading.value = false;
+      }
+    }
+
+    function clearGacha() {
+      selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+      lastGachaCard.value = "";
+      gachaStatus.value = "";
+      syncSelection();
+    }
+
     function syncSelection() {
       const nodeId = String(props.node.id);
 
       const payload = {
         node_id: nodeId,
         selections: selectedPosts.value,
-        output_mode: outputMode.value,
+        selected_tags: selectedOutputTags.value,
+        gallery_collapsed: galleryCollapsed.value,
+        auto_gacha: autoGacha.value,
+        gacha_context: gachaContext.value,
       };
 
       fetch("/danbooru_search/cache_selection", {
@@ -1152,8 +1660,12 @@ const DanbooruSearchApp = {
       if (widget) {
         widget.value = JSON.stringify({
           selections: selectedPosts.value,
-          output_mode: outputMode.value,
+          selected_tags: selectedOutputTags.value,
+          gallery_collapsed: galleryCollapsed.value,
+          auto_gacha: autoGacha.value,
+          gacha_context: gachaContext.value,
         });
+        if (typeof widget.callback === "function") widget.callback(widget.value, widget, props.node);
         if (props.node.graph) {
           props.node.graph.setDirtyCanvas(true, true);
         }
@@ -1163,12 +1675,30 @@ const DanbooruSearchApp = {
     function restoreSelection() {
       const nodeId = String(props.node.id);
 
+      // 服务端缓存重启后会丢失，先从工作流隐藏 widget 恢复。
+      try {
+        const widget = (props.node.widgets || []).find(w => w.name === "selection_data");
+        const saved = JSON.parse(widget?.value || "{}");
+        if (Array.isArray(saved.selections)) selectedPosts.value = saved.selections;
+        if (Array.isArray(saved.selected_tags)) selectedOutputTags.value = saved.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
+        galleryCollapsed.value = !!saved.gallery_collapsed;
+        autoGacha.value = !!saved.auto_gacha;
+        if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+        gachaContext.value = saved.gacha_context || "";
+      } catch (_) {
+        // 旧工作流值损坏时忽略，仍继续尝试服务端缓存。
+      }
+
       fetch("/danbooru_search/cache_selection?node_id=" + encodeURIComponent(nodeId))
         .then(r => r.json())
         .then(data => {
-          if (data.success && data.selections && data.selections.length > 0) {
-            selectedPosts.value = data.selections;
-            outputMode.value = data.output_mode || "rgb";
+          if (data.success && data.found !== false) {
+            if (Array.isArray(data.selections)) selectedPosts.value = data.selections;
+            if (Array.isArray(data.selected_tags)) selectedOutputTags.value = data.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
+            galleryCollapsed.value = !!data.gallery_collapsed;
+            if (typeof data.auto_gacha === "boolean") autoGacha.value = data.auto_gacha;
+            if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+            if (typeof data.gacha_context === "string") gachaContext.value = data.gacha_context;
           }
         })
         .catch(() => {});
@@ -1180,48 +1710,68 @@ const DanbooruSearchApp = {
 
     return () => {
       return h("div", { class: "dbs-root" }, [
-        h("div", { class: "dbs-toolbar-main" }, [
-          h("span", { class: "dbs-title" }, "🦅 Danbooru 搜索 + 图库"),
-
-          h("label", { class: "dbs-check" }, [
-            h("input", {
-              type: "checkbox",
-              checked: outputMode.value === "rgba",
-              onChange: e => {
-                outputMode.value = e.target.checked ? "rgba" : "rgb";
-                syncSelection();
-              },
-            }),
-            " α 通道",
-          ]),
-
-          h("button", {
-            class: "dbs-btn",
-            onClick: () => { settingsOpen.value = true; },
-            title: "设置",
-          }, "⚙"),
-        ]),
-
-        h("div", { class: "dbs-preview-bar" }, [
-          h(SelectionBar, {
-            selections: selectedPosts.value,
-            onRemove: removeSelection,
-            onClear: clearSelection,
+        h("div", { class: ["dbs-preview-bar", galleryCollapsed.value ? "collapsed" : ""] }, [
+          h(TagEditor, {
+            tags: selectedOutputTags.value,
+            collapsed: galleryCollapsed.value,
+            onChange: updateOutputTags,
+            onAdd: items => addOutputTags(items, { source: "manual", kind: "manual" }),
+            onToggleCollapse: () => { galleryCollapsed.value = !galleryCollapsed.value; syncSelection(); },
+            onGacha: drawGacha,
+            onClearGacha: clearGacha,
+            onOpenSettings: () => { settingsOpen.value = true; },
+            gachaName: lastGachaCard.value,
+            gachaLoading: gachaLoading.value,
+            autoGacha: autoGacha.value,
+            onAutoGacha: value => {
+              autoGacha.value = value;
+              if (value) {
+                selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+                lastGachaCard.value = "";
+                gachaStatus.value = "已启用：每次执行根据 character_tags 动态生成，界面不显示过期抽卡标签";
+              }
+              syncSelection();
+            },
+            onClearAll: () => { selectedOutputTags.value = []; lastGachaCard.value = ""; gachaStatus.value = ""; syncSelection(); },
           }),
         ]),
 
-        h("div", { class: "dbs-layout" }, [
+        galleryCollapsed.value ? h("div", { class: "dbs-collapsed-tools" }, [
+          h("section", { class: "dbs-collapsed-panel" }, [
+            h("div", { class: "dbs-collapsed-title" }, "标签检索与同步"),
+            h(TagSearchPanel, { onAddOutput: addSearchOutput, onSearchGallery: searchGallery }),
+          ]),
+          h("section", { class: "dbs-collapsed-panel dbs-gacha-context" }, [
+            h("div", { class: "dbs-collapsed-title" }, "抽卡匹配约束"),
+            h("textarea", {
+              class: "dbs-query-input",
+              value: gachaContext.value,
+              placeholder: "可选：补充画风、题材、禁用内容等。执行工作流时会优先读取左侧 character_tags 端口。",
+              onInput: e => { gachaContext.value = e.target.value; },
+              onChange: syncSelection,
+            }),
+            h("div", { class: "dbs-settings-note" }, "抽卡只生成角色固定特征以外的服装、动作、场景、构图与光照；双击标签可暂时屏蔽输出。"),
+            gachaStatus.value ? h("div", { class: ["dbs-gacha-status", gachaStatus.value.startsWith("抽卡失败") ? "error" : ""] }, gachaStatus.value) : null,
+          ]),
+        ]) : h("div", { class: "dbs-layout" }, [
           h("div", { class: "dbs-left" }, [
             h(TagSearchPanel, {
-              onTagsSelected: onTagsSelected,
+              onAddOutput: addSearchOutput,
+              onSearchGallery: searchGallery,
             }),
           ]),
 
           h("div", { class: "dbs-right" }, [
             h(GalleryPanel, {
               initialTags: selectedGalleryTags.value,
+              initialSelections: selectedPosts.value,
               onSelectionChange: onGallerySelectionChange,
+              onAddTags: items => addOutputTags(items, { source: "detail", kind: "detail" }),
             }),
+          ]),
+
+          h("div", { class: "dbs-selected-side" }, [
+            h(SelectionBar, { selections: selectedPosts.value, onRemove: removeSelection, onClear: clearSelection }),
           ]),
         ]),
 
@@ -1253,30 +1803,13 @@ const CSS = `
   overflow: hidden;
 }
 
-.dbs-toolbar-main {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  background: #25252a;
-  border-bottom: 1px solid #333;
-  flex-shrink: 0;
-}
-
-.dbs-title {
-  flex: 1;
-  font-size: 14px;
-  font-weight: 600;
-  color: #eee;
-}
-
 .dbs-preview-bar {
   padding: 8px 12px;
   background: #1e1e22;
   border-bottom: 1px solid #333;
-  min-height: 60px;
-  max-height: 80px;
-  overflow: hidden;
+  min-height: 72px;
+  max-height: 250px;
+  overflow: visible;
   flex-shrink: 0;
 }
 
@@ -1293,6 +1826,93 @@ const CSS = `
   gap: 12px;
   height: 100%;
 }
+.dbs-preview-bar.collapsed { flex:0 0 auto; max-height:280px; min-height:0; }
+
+.dbsb-wrap.vertical { flex-direction: column; align-items: stretch; gap: 8px; height: auto; }
+.dbsb-title { font-weight: 700; color: #eee; padding: 4px 2px; }
+.dbsb-wrap.vertical .dbsb-list { flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+.dbsb-wrap.vertical .dbsb-item { width: auto; height: 58px; display: flex; align-items: center; gap: 8px; padding: 5px; overflow: visible; }
+.dbsb-wrap.vertical .dbsb-thumb { width: 48px; height: 48px; border-radius: 4px; }
+.dbsb-name { flex: 1; overflow: hidden; text-overflow: ellipsis; color: #bbb; }
+.dbsb-wrap.vertical .dbsb-remove { opacity: 1; position: static; margin-left: auto; }
+
+.dbs-selected-side {
+  width: 190px; min-width: 170px; max-width: 260px; padding: 8px;
+  background: #1e1e22; border-left: 1px solid #333; overflow: hidden;
+}
+
+.dbte { display: flex; flex-direction: column; gap: 7px; min-height: 55px; }
+.dbte.expanded { min-height: 0; }
+.dbte-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.dbte-body { min-width:0; display:block; }
+.dbte-body.has-inspector { display:grid; grid-template-columns:minmax(0,1fr) minmax(340px,.55fr); gap:8px; align-items:start; }
+.dbte-tags-pane { min-width:0; display:flex; flex-direction:column; gap:6px; }
+.dbte-spacer { flex: 1; min-width: 8px; }
+.dbte-auto { display:flex; align-items:center; gap:3px; color:#b9b9c2; white-space:nowrap; }
+.dbte-tip { color: #7f8794; font-size: 10px; white-space: nowrap; padding: 0 4px; }
+.dbte-add { display: flex; align-items:center; gap: 6px; }
+.dbte-add .dbs-input-line { margin: 0; min-width: 160px; flex:1; }
+.dbte-list { display: flex; flex-wrap: wrap; align-items:flex-start; gap: 5px; overflow-y: auto; }
+.dbte.expanded .dbte-list { align-content: flex-start; max-height:145px; }
+.dbte-empty { color: #666; padding: 6px; }
+.dbte-chip { position:relative; display: inline-flex; align-items: center; gap: 4px; min-height:31px; border: 1px solid #466985; background: #203746; border-radius: 5px; padding: 3px 6px; cursor:grab; user-select:none; }
+.dbte-chip:active { cursor:grabbing; }
+.dbte-chip.dragging { opacity:.28; transform:scale(.96); }
+.dbte-chip.drop-target { outline:2px solid #77aaff; outline-offset:2px; }
+.dbte-drag-handle { color:#9aa1ae; font-size:13px; line-height:1; }
+.dbte-drag-note { color:#7f8795; font-size:10px; margin-right:auto; }
+.dbte-chip.kind-outfit { background:#3b3152; border-color:#775da2; }
+.dbte-chip.kind-action { background:#264936; border-color:#4c8b69; }
+.dbte-chip.kind-scene { background:#423b24; border-color:#8e7d3f; }
+.dbte-chip.kind-composition { background:#263d51; border-color:#4e7898; }
+.dbte-chip.kind-lighting { background:#4b3523; border-color:#9b6a3d; }
+.dbte-chip.kind-quality { background:#4c294c; border-color:#965696; }
+.dbte-chip.kind-semantic { background:#233d55; border-color:#497da5; }
+.dbte-chip.kind-detail { background:#24463f; border-color:#4d8c7e; }
+.dbte-chip.kind-manual { background:#3c3c43; border-color:#696974; }
+.dbte-chip.disabled { opacity:.4; filter:grayscale(1); }
+.dbte-text { display:flex; flex-direction:column; min-width:0; line-height:1.15; }
+.dbte-name { color:#eee; white-space:nowrap; }
+.dbte-cn { color:#a7c7b0; font-size:9px; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbte-weight-badge { align-self:flex-start; background:#111a; color:#eee; border-radius:3px; padding:1px 3px; font-size:9px; }
+.dbte-inspector { display:flex; flex-direction:column; align-items:stretch; gap:6px; padding:7px; background:#111318; border:1px solid #3e4655; border-radius:6px; box-shadow:0 3px 10px #0007; }
+.dbte-inspector.pinned { border-color:#6a5790; }
+.dbte-pop-head,.dbte-pop-row { display:flex; align-items:center; gap:7px; }
+.dbte-pop-head strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; color:#eee; }
+.dbte-source { color:#7f8794; font-size:9px; }
+.dbte-pop-row label { display:flex; align-items:center; gap:4px; color:#aaa; }
+.dbte-pop-row.actions { flex-wrap:wrap; }
+.dbte-kind-select { background:#090a0c; color:#eee; border:1px solid #555; border-radius:3px; padding:2px 4px; }
+.dbte-translation { display:flex; align-items:center; gap:5px; color:#aaa; }
+.dbte-translation input { flex:1; min-width:0; background:#090a0c; color:#eee; border:1px solid #555; border-radius:3px; padding:3px 5px; }
+.dbte-toggle,.dbte-remove { border:1px solid #555; border-radius:3px; background:#282b31; color:#ddd; cursor:pointer; padding:2px 5px; }
+.dbte-remove { color:#ff8a8a; }
+.dbte-kind { color:#aaa; font-size:9px; }
+.dbte-weight { min-width:3.6ch; max-width:6ch; background:#090a0c; color:#eee; border:1px solid #555; border-radius:3px; padding:1px 2px; }
+.dbs-btn.gacha { background:#5a3f72; border-color:#8d61b3; }
+.dbs-btn.danger { color:#ff9a9a; border-color:#704343; }
+.dbs-gacha-name { color:#d9b6f2; font-size:10px; }
+.dbs-collapsed-tools { flex:1; min-height:0; overflow:auto; display:grid; grid-template-columns:minmax(300px,.9fr) minmax(320px,1.1fr); gap:8px; padding:8px 12px 12px; background:#18181c; }
+.dbs-collapsed-panel { min-width:0; min-height:0; overflow:auto; border:1px solid #333743; border-radius:6px; background:#1e1e23; padding:8px; }
+.dbs-collapsed-panel .dbs-panel { height:auto; min-height:360px; overflow:visible; }
+.dbs-collapsed-panel .dbs-results { min-height:150px; max-height:260px; }
+.dbs-collapsed-title { font-weight:700; color:#ddd; margin-bottom:7px; }
+.dbs-gacha-context { display:flex; flex-direction:column; gap:7px; }
+.dbs-gacha-context .dbs-query-input { flex:0 0 92px; min-height:92px; }
+.dbs-gacha-status { color:#76c99a; padding:6px; border-radius:4px; background:#173124; overflow-wrap:anywhere; }
+.dbs-gacha-status.error { color:#ff8c8c; background:#351b1b; }
+.dbs-settings-separator { margin:15px 0 8px; padding-top:10px; border-top:1px solid #3b3b43; font-weight:700; color:#d7b4ed; }
+.dbs-settings-note { margin-top:6px; color:#8b8b96; font-size:10px; line-height:1.45; }
+.dbs-tag-data-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
+.dbs-tag-data-row .dbs-settings-note { margin:0; }
+.dbs-data-path { margin-top:5px; color:#6f7683; font:9px/1.4 Consolas,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dbs-inline-settings { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }
+.dbs-model-master-switch { display:flex !important; align-items:center; gap:8px; margin:0 0 10px !important; padding:9px; border:1px solid #52416a; border-radius:6px; background:#292235; }
+.dbs-model-master-switch span { display:flex; flex-direction:column; gap:2px; }
+.dbs-model-master-switch strong { color:#eee; }
+.dbs-model-master-switch small { color:#9a91a5; }
+@media (max-width: 900px) { .dbte-body.has-inspector { grid-template-columns:1fr; } }
+@media (max-width: 760px) { .dbs-collapsed-tools { grid-template-columns:1fr; } .dbte-tip { display:none; } }
 
 .dbsb-list {
   display: flex;
@@ -1859,12 +2479,15 @@ const CSS = `
 
 /* 详情 / 编辑弹窗 */
 .dbs-detail-modal {
-  width: 600px !important;
+  width: min(1080px, 90vw) !important;
   max-height: 85vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
+.dbs-settings-modal { width:min(760px,92%); max-height:86%; overflow-y:auto; box-sizing:border-box; }
+
+.dbs-detail-body { display:grid; grid-template-columns:minmax(280px, 42%) 1fr; gap:14px; flex:1; min-height:0; overflow:hidden; }
 
 .dbs-detail-header {
   display: flex;
@@ -1883,7 +2506,7 @@ const CSS = `
   background: #000;
   border-radius: 6px;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 0;
   min-height: 180px;
   flex-shrink: 0;
 }
@@ -1920,6 +2543,7 @@ const CSS = `
 }
 
 .dbs-tag-chip:hover { transform: scale(1.05); filter: brightness(1.1); }
+.dbs-tag-chip.highlighted { box-shadow:0 0 0 2px #4a9eff,0 0 10px #4a9eff77; transform:translateY(-1px); }
 
 /* 标签分类配色 */
 .dbs-tag-category-artist    { background-color: #FFF3CD; color: #664D03; border: 1px solid #FFE69C; }

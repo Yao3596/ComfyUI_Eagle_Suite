@@ -60,7 +60,7 @@
         }
     }
 
-    // 视频预览功能已统一由 eagle_video_preview.js 处理
+    // 预览统一交给独立的 EagleVideoGifPreviewNode；保存/转换节点不再注入 DOM 播放器。
 
     if (typeof app !== "undefined" && app.registerExtension) {
         app.registerExtension({
@@ -68,7 +68,6 @@
             async nodeCreated(node) {
                 if (TARGET_NODES.includes(node.type) || TARGET_NODES.includes(node.constructor.name)) {
                     applyCollapsibleSections(node);
-                    // 视频预览由 eagle_video_preview.js 统一处理，此处不再重复注册
                 }
             },
             async beforeRegisterNodeDef(nodeType, nodeData, app) {

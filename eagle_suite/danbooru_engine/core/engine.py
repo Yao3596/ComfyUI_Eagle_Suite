@@ -550,6 +550,8 @@ class DanbooruTagger:
         try:
             self.model = SentenceTransformer(self.model_path, device=self.device)
         except Exception as e:
+            if self.model_path == HF_MODEL_ID:
+                raise RuntimeError(f'BGE-M3 model load failed: {e}') from e
             print(f'[Engine] model load failed, falling back to HF: {e}')
             self.model = SentenceTransformer(HF_MODEL_ID, device=self.device)
 

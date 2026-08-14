@@ -105,7 +105,7 @@ class EagleBatchVideoLoader:
                                   {"default": "限制数量"}),
                 "max_load":     ("INT", {"default": 1, "min": 1, "max": 1000, "step": 1}),
                 "start_index":  ("INT", {"default": 0, "min": 0, "max": 99999, "step": 1}),
-                "seed":         ("INT", {"default": -1, "min": -1, "max": 2147483647, "step": 1}),
+                "seed":         ("INT", {"default": -1, "min": -1, "max": 2147483647, "step": 1, "control_after_generate": True}),
                 "format_filter":(["全部格式", "常用格式", "网络格式", "高清格式", "仅MP4", "仅MOV"],
                                   {"default": "全部格式"}),
                 "frame_skip":   ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),

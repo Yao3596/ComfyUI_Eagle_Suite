@@ -298,7 +298,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 "filter_intro": ("BOOLEAN", {"default": True}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.1}),
                 "max_tokens": ("INT", {"default": 4096, "min": 1, "max": 128000}),
-                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647, "control_after_generate": True}),
                 "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
                 "response_format": (["text", "json_object"], {"default": "text"}),
                 "batch_mode": (["first", "all"], {"default": "first"}),

@@ -178,20 +178,20 @@ def _get_comfy_models_dir() -> str:
 
 
 def _scan_local_models() -> list:
-    """扫描 models/LLM 和 models/text_encoders 下包含 config.json 的模型目录。"""
+    """递归扫描 models/LLM 和 models/text_encoders 下的 Transformers 模型。"""
     models_dir = _get_comfy_models_dir()
     candidates = []
     for sub in ("LLM", "text_encoders"):
         d = os.path.join(models_dir, sub)
         if not os.path.isdir(d):
             continue
-        for name in sorted(os.listdir(d)):
-            path = os.path.join(d, name)
-            if not os.path.isdir(path):
-                continue
-            if os.path.exists(os.path.join(path, "config.json")):
-                candidates.append(path)
-    return candidates
+        for root, dirs, files in os.walk(d):
+            dirs.sort()
+            if "config.json" in files:
+                candidates.append(root)
+                # 一个模型目录内可能还有 tokenizer/processor 子目录，避免重复列出。
+                dirs[:] = []
+    return sorted(set(candidates), key=lambda value: _model_dir_name(value).lower())
 
 
 def _model_dir_name(path: str) -> str:
@@ -199,6 +199,46 @@ def _model_dir_name(path: str) -> str:
     models_dir = _get_comfy_models_dir()
     rel = os.path.relpath(path, models_dir).replace("\\", "/")
     return rel
+
+
+def _model_generation_capability(path: str, source: str) -> tuple[bool, str]:
+    """根据 config.json 做保守能力判断，避免把纯编码器当作生成模型。"""
+    if source.lower() == "llm":
+        return True, "LLM 目录"
+    try:
+        with open(os.path.join(path, "config.json"), "r", encoding="utf-8") as handle:
+            config = json.load(handle) or {}
+        architectures = config.get("architectures") or []
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        names = " ".join(str(value) for value in list(architectures) + [config.get("model_type", "")]).lower()
+        markers = (
+            "causallm", "conditionalgeneration", "vision2seq", "imagetexttotext",
+            "qwen", "llava", "mllama", "gemma", "phi3", "chatglm",
+        )
+        capable = any(marker in names for marker in markers)
+        return capable, "配置声明生成架构" if capable else "纯文本编码器/未知架构"
+    except Exception as error:
+        return False, f"配置读取失败: {error}"
+
+
+def list_local_models() -> list:
+    """供其他 Eagle 节点复用的本地模型清单。"""
+    models = []
+    models_dir = _get_comfy_models_dir()
+    for path in _scan_local_models():
+        rel = _model_dir_name(path)
+        source = rel.split("/", 1)[0] if "/" in rel else "models"
+        generative, reason = _model_generation_capability(path, source)
+        models.append({
+            "name": rel,
+            "path": path,
+            "source": source,
+            "generative": generative,
+            "capability_reason": reason,
+            "models_dir": models_dir,
+        })
+    return models
 
 
 def _normalize_model_path(path_or_name: str) -> str:
@@ -231,7 +271,14 @@ def _resolve_dtype(dtype_str: str):
 
 def _load_local_model(model_path: str, device: str, dtype_str: str):
     """加载本地 transformers 模型与 processor，带缓存。"""
-    from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForVision2Seq
+    from transformers import (
+        AutoProcessor,
+        AutoTokenizer,
+        AutoModelForImageTextToText,
+        AutoModelForVision2Seq,
+        AutoModelForCausalLM,
+        AutoModelForSeq2SeqLM,
+    )
 
     key = f"{model_path}||{device}||{dtype_str}"
     if key in _MODEL_CACHE:
@@ -243,8 +290,11 @@ def _load_local_model(model_path: str, device: str, dtype_str: str):
 
     try:
         processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
-    except Exception as e:
-        raise RuntimeError(f"加载 Processor 失败: {e}")
+    except Exception as processor_error:
+        try:
+            processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+        except Exception as tokenizer_error:
+            raise RuntimeError(f"加载 Processor/Tokenizer 失败: {processor_error}; {tokenizer_error}")
 
     load_kwargs = {
         "pretrained_model_name_or_path": model_path,
@@ -260,7 +310,12 @@ def _load_local_model(model_path: str, device: str, dtype_str: str):
         load_kwargs["device_map"] = "auto"
 
     last_err = None
-    for model_cls in (AutoModelForImageTextToText, AutoModelForVision2Seq):
+    for model_cls in (
+        AutoModelForImageTextToText,
+        AutoModelForVision2Seq,
+        AutoModelForCausalLM,
+        AutoModelForSeq2SeqLM,
+    ):
         try:
             model = model_cls.from_pretrained(**load_kwargs)
             break
@@ -275,6 +330,67 @@ def _load_local_model(model_path: str, device: str, dtype_str: str):
 
     _MODEL_CACHE[key] = (model, processor)
     return model, processor
+
+
+def generate_local_text(
+    model_path: str,
+    system_prompt: str,
+    user_prompt: str,
+    device: str = "auto",
+    dtype: str = "bf16",
+    max_new_tokens: int = 512,
+    temperature: float = 0.8,
+    top_p: float = 0.95,
+) -> str:
+    """使用与本地反推节点相同的缓存执行纯文本生成。"""
+    resolved = _normalize_model_path(model_path)
+    if not resolved or not os.path.isdir(resolved):
+        raise ValueError(f"本地模型路径不存在: {model_path}")
+    if not os.path.isfile(os.path.join(resolved, "config.json")):
+        raise ValueError(f"本地模型缺少 config.json: {resolved}")
+
+    actual_device = device if device in {"auto", "cuda", "cpu"} else "auto"
+    if actual_device == "cuda" and not torch.cuda.is_available():
+        actual_device = "cpu"
+    actual_dtype = dtype if dtype in {"bf16", "fp16", "fp32"} else "bf16"
+    if (actual_device == "cpu" or (actual_device == "auto" and not torch.cuda.is_available())) and actual_dtype == "fp16":
+        actual_dtype = "fp32"
+
+    model, processor = _load_local_model(resolved, actual_device, actual_dtype)
+    messages = []
+    if system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.append({"role": "user", "content": user_prompt.strip()})
+
+    try:
+        if hasattr(processor, "apply_chat_template"):
+            prompt_text = processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        else:
+            prompt_text = "\n\n".join(
+                f"{item['role'].upper()}: {item['content']}" for item in messages
+            ) + "\n\nASSISTANT:"
+        inputs = processor(text=[prompt_text], return_tensors="pt", padding=True)
+        target_device = next(model.parameters()).device
+        inputs = {
+            key: value.to(target_device) if isinstance(value, torch.Tensor) else value
+            for key, value in inputs.items()
+        }
+        generation = {
+            "max_new_tokens": max(32, min(2048, int(max_new_tokens))),
+            "do_sample": temperature > 0,
+        }
+        if generation["do_sample"]:
+            generation["temperature"] = max(0.05, min(2.0, float(temperature)))
+            generation["top_p"] = max(0.05, min(1.0, float(top_p)))
+        with torch.inference_mode():
+            output_ids = model.generate(**inputs, **generation)
+        prompt_len = inputs.get("input_ids").shape[1] if inputs.get("input_ids") is not None else 0
+        generated_ids = output_ids[:, prompt_len:] if prompt_len else output_ids
+        return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+    except Exception as error:
+        raise RuntimeError(f"本地模型文本生成失败: {error}") from error
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -322,6 +438,7 @@ class EagleLocalLLMNode:
                 "do_sample": ("BOOLEAN", {"default": True}),
                 "batch_mode": (["first", "all"], {"default": "first"}),
                 "max_image_size": ("INT", {"default": 1024, "min": 224, "max": 4096, "step": 64}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647, "step": 1, "control_after_generate": True}),
             },
             "optional": {
                 "history": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
@@ -340,7 +457,7 @@ class EagleLocalLLMNode:
     def process(self, model_path, device, dtype, prompt_model_type,
                 system_template, system_prompt, user_prompt, filter_intro,
                 max_new_tokens, temperature, top_p, do_sample, batch_mode,
-                max_image_size, history="",
+                max_image_size, seed, history="",
                 image_1=None, image_2=None, image_3=None,
                 image_4=None, image_5=None, image_6=None,
                 image_7=None, image_8=None, image_9=None):
@@ -425,7 +542,15 @@ class EagleLocalLLMNode:
 
             start = time.time()
             with torch.inference_mode():
-                output_ids = model.generate(**inputs, **gen_kwargs)
+                if do_sample and seed >= 0:
+                    devices = [target_device] if target_device.type == "cuda" else []
+                    with torch.random.fork_rng(devices=devices):
+                        torch.manual_seed(seed)
+                        if target_device.type == "cuda":
+                            torch.cuda.manual_seed_all(seed)
+                        output_ids = model.generate(**inputs, **gen_kwargs)
+                else:
+                    output_ids = model.generate(**inputs, **gen_kwargs)
             elapsed = time.time() - start
 
             # 只取生成部分
@@ -576,7 +701,7 @@ class EagleLocalLLMServerNode(_BaseAPI):
                 "filter_intro": ("BOOLEAN", {"default": True, "label_on": "过滤自我介绍", "label_off": "保留原文"}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.1}),
                 "max_tokens": ("INT", {"default": 4096, "min": 1, "max": 128000, "step": 1}),
-                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647, "step": 1}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647, "step": 1, "control_after_generate": True}),
                 "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.1}),
                 "batch_mode": (["first", "all"], {"default": "first"}),
                 "max_image_size": ("INT", {"default": 1024, "min": 224, "max": 4096, "step": 64}),
@@ -727,4 +852,9 @@ class EagleLocalLLMServerNode(_BaseAPI):
             return ("", f"❌ 解析失败: {e}", _serialize_history(history_msgs), None)
 
 
-__all__ = ["EagleLocalLLMNode", "EagleLocalLLMServerNode"]
+__all__ = [
+    "EagleLocalLLMNode",
+    "EagleLocalLLMServerNode",
+    "list_local_models",
+    "generate_local_text",
+]

@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
-"""
-Eagle Suite 节点注册入口
-全部节点统一手动注册
-"""
+"""Eagle Suite 节点注册与菜单层级的唯一入口。"""
 
-from .eagle_client import eagle_client
 from .video_nodes import EagleImagesToVideo, EagleVideoConverter
 from .audio_nodes import EagleAudioExtractor, EagleAudioMixer
 from .eagle_loader import EagleLoader
@@ -20,19 +16,17 @@ from .local_loader import LocalImageLoader
 from .wallhaven_gallery import WallhavenGalleryNode
 from .text_nodes import NODE_CLASS_MAPPINGS_TEXT, NODE_DISPLAY_NAME_MAPPINGS_TEXT
 from .eagle_gallery import EagleGalleryNode
-from .eagle_video_gallery import EagleVideoGalleryNode
 from .lora_gallery import EagleLoraGalleryNode
-from .local_video_loader import EagleLocalVideoLoaderNode
 from .advanced_video_saver import EagleAdvancedVideoSaver
 from .danbooru_search import DanbooruVueSearchNode
 from .text_switch_node import EagleTextSwitchMulti
+from .unified_media_browser import UnifiedMediaBrowser
+from .video_preview_node import EagleVideoGifPreviewNode
 
 # ── 工具节点 ─────────────────────────────────────────────
-from ..nodes.image_browser import EagleImageList
 from ..nodes.audio_browser import EagleAudioList
 from ..nodes.prompt_presets import EaglePromptPresets
-from ..nodes.string_tools import EagleStringRows, EagleSplitString
-from ..nodes.hf_download import EagleHFDownload
+from ..nodes.string_tools import EagleStringRows
 
 # ── 节点映射 ─────────────────────────────────────────────
 
@@ -41,6 +35,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleImagesToVideo":  EagleImagesToVideo,
     "EagleVideoConverter": EagleVideoConverter,
     "EagleAdvancedVideoSaver": EagleAdvancedVideoSaver,
+    "EagleVideoGifPreviewNode": EagleVideoGifPreviewNode,
 
     # 音频处理
     "EagleAudioExtractor": EagleAudioExtractor,
@@ -70,9 +65,8 @@ NODE_CLASS_MAPPINGS = {
     # 图库
     "WallhavenGalleryNode": WallhavenGalleryNode,
     "EagleGalleryNode": EagleGalleryNode,
-    "EagleVideoGalleryNode": EagleVideoGalleryNode,
     "EagleLoraGalleryNode": EagleLoraGalleryNode,
-    "EagleLocalVideoLoaderNode": EagleLocalVideoLoaderNode,
+    "UnifiedMediaBrowser": UnifiedMediaBrowser,
 
     # Danbooru
     "DanbooruVueSearchNode": DanbooruVueSearchNode,
@@ -81,12 +75,9 @@ NODE_CLASS_MAPPINGS = {
     "EagleTextSwitchMulti": EagleTextSwitchMulti,
 
     # 工具
-    "EagleImageList":       EagleImageList,
     "EagleAudioList":       EagleAudioList,
     "EaglePromptPresets":   EaglePromptPresets,
     "EagleStringRows":      EagleStringRows,
-    "EagleSplitString":     EagleSplitString,
-    "EagleHFDownload":      EagleHFDownload,
 }
 NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_TEXT)
 
@@ -96,7 +87,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleImagesToVideo":  "🦅 图像序列 → 视频",
     "EagleVideoConverter": "🦅 视频格式转换",
     "EagleAdvancedVideoSaver": "🦅 高级视频保存",
-
+    "EagleVideoGifPreviewNode": "🦅 视频GIF预览",
     # 音频处理
     "EagleAudioExtractor": "🦅 音频提取",
     "EagleAudioMixer":     "🦅 音频混音",
@@ -125,10 +116,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # 图库
     "WallhavenGalleryNode": "🌊 Wallhaven Gallery",
     "EagleGalleryNode": "🦅 Eagle Gallery",
-    "EagleVideoGalleryNode": "🦅 Eagle Video Gallery",
     "EagleLoraGalleryNode": "🦅 LoRA Gallery",
-    "EagleLocalVideoLoaderNode": "🦅 本地视频加载器",
-
+    "UnifiedMediaBrowser": "🦅 统一媒体浏览器",
     # Danbooru
     "DanbooruVueSearchNode": "🦅 Danbooru 标签搜索",
 
@@ -136,13 +125,70 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleTextSwitchMulti": "🦅 多重文本切换",
 
     # 工具
-    "EagleImageList":     "🦅 图片浏览器",
     "EagleAudioList":     "🦅 音频浏览器",
     "EaglePromptPresets": "🦅 提示词预设",
     "EagleStringRows":    "🦅 行数统计",
-    "EagleSplitString":   "🦅 分割文本",
-    "EagleHFDownload":    "🦅 HF 下载器",
 }
 NODE_DISPLAY_NAME_MAPPINGS.update(NODE_DISPLAY_NAME_MAPPINGS_TEXT)
+
+
+# ── 菜单层级 ──
+# 各实现文件仍可以保留自身 CATEGORY 作为独立调试默认值，
+# 但插件正常加载时以这里为唯一的最终分类，避免节点散落到多个根菜单。
+MENU_ROOT = "🦅 Eagle Suite"
+
+_CATEGORY_GROUPS = {
+    f"{MENU_ROOT}/Eagle": (
+        EagleLoader,
+        EagleSaver,
+    ),
+    f"{MENU_ROOT}/画廊": (
+        EagleGalleryNode,
+        EagleLoraGalleryNode,
+        WallhavenGalleryNode,
+        DanbooruVueSearchNode,
+    ),
+    f"{MENU_ROOT}/媒体": (
+        LocalImageLoader,
+        UnifiedMediaBrowser,
+    ),
+    f"{MENU_ROOT}/视频": (
+        EagleImagesToVideo,
+        EagleVideoConverter,
+        EagleAdvancedVideoSaver,
+        EagleBatchVideoLoader,
+        EagleVideoFrameExtractor,
+        EagleVideoInfo,
+        EagleVideoGifPreviewNode,
+        GifCompressorNode,
+    ),
+    f"{MENU_ROOT}/音频": (
+        EagleAudioExtractor,
+        EagleAudioMixer,
+        EagleAudioList,
+    ),
+    f"{MENU_ROOT}/API": (
+        EagleAPIUnifiedNode,
+        EagleAPIImageNode,
+        EagleAPIKeyNode,
+        EagleAPILoader,
+        EagleLocalLLMNode,
+        EagleLocalLLMServerNode,
+    ),
+    f"{MENU_ROOT}/文本": (
+        EagleTextSwitchMulti,
+        *tuple(NODE_CLASS_MAPPINGS_TEXT.values()),
+    ),
+    f"{MENU_ROOT}/工具": (
+        EaglePromptPresets,
+        EagleStringRows,
+    ),
+}
+
+for _category, _node_classes in _CATEGORY_GROUPS.items():
+    for _node_class in _node_classes:
+        _node_class.CATEGORY = _category
+
+del _category, _node_classes, _node_class
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

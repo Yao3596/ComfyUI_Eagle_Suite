@@ -2,12 +2,18 @@
 api_config.json
 api_config.json.bak*
 api_profiles.json
-machine_id.txt
 eagle_gallery_settings.json
 wallhaven_settings.json
 pinterest_settings.json
 eagle_saver_config.json
 danbooru_search_settings.json
+
+# ── Prompt Presets local settings / user data ──
+nodes/prompts/config.json
+nodes/prompts/user_templates.json
+nodes/prompts/covers/
+nodes/prompts/user_templates/
+eagle_suite/prompts/
 
 # ── Danbooru generated caches / models ──
 eagle_suite/danbooru_engine/tags_embedding/
@@ -49,3 +55,6 @@ web/js/pinterest_gallery.js
 
 # ── ComfyUI generated ──
 ../../input/example.png
+
+# 缩略图缓存已迁移到 ComfyUI temp；本项仅防止旧版目录误提交。
+.unified_media_thumb_cache/

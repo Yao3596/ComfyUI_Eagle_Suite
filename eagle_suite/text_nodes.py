@@ -176,7 +176,7 @@ class EagleRandomLine:
                 "count": ("INT", {"default": 1, "min": 1, "max": 100}),
                 "join_separator": ("STRING", {"default": ", ", "tooltip": "输出多条之间的连接符"}),
                 "weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05, "tooltip": "对输出结果整体加权，例如 1.2 -> (result:1.2)"}),
-                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647, "control_after_generate": True}),
             },
             "optional": {
                 "split_mode": (["按行", "按分隔符"], {"default": "按行"}),
