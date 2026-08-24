@@ -17,6 +17,9 @@ from .logger import logger
 class EagleSaver:
     """Eagle 图片保存器 - 将 ComfyUI 图像保存到 Eagle 软件或本地"""
 
+    # ✅ 类级别的全局计数器（用于纯 Eagle 保存场景）
+    _global_counter = {}  # {folder_id: last_seq}
+
     def __init__(self):
         pass
 
@@ -144,22 +147,46 @@ class EagleSaver:
         # 2. 从 ComfyUI 工作流中提取元数据
         meta = self._build_metadata(prompt, extra_pnginfo)
 
-        # 3. 统一确定起始序号：在本地目录中从 filename_number_start 开始找到第一个可用序号。
-        #    这样本次调用内的所有图片会连续递增，不会互相覆盖，也不会覆盖已有文件。
+        # ✅ 3. 统一确定起始序号：优先从本地目录扫描，其次使用 Eagle 全局计数器，最后使用用户设置
         seq = filename_number_start
-        if save_to_local and not overwrite:
-            os.makedirs(local_save_path, exist_ok=True)
-            while True:
-                if filename_number_padding > 0:
-                    seq_str = str(seq).zfill(filename_number_padding)
-                else:
-                    seq_str = str(seq)
-                test_name = f"{filename_prefix}{filename_separator}{seq_str}.{file_extension}"
-                if not os.path.exists(os.path.join(local_save_path, test_name)):
-                    break
-                seq += 1
 
-        # 4. 处理每一张图片
+        if save_to_local:
+            os.makedirs(local_save_path, exist_ok=True)
+            if not overwrite:
+                # 扫描本地目录，找到最大编号
+                try:
+                    existing_files = [f for f in os.listdir(local_save_path) 
+                                      if f.startswith(filename_prefix) and f.endswith(f".{file_extension}")]
+                    max_num = -1
+                    for fname in existing_files:
+                        try:
+                            # 提取编号：ComfyUI_0012.png → 12
+                            after_prefix = fname[len(filename_prefix):]
+                            if not after_prefix.startswith(filename_separator):
+                                continue
+                            num_part = after_prefix[len(filename_separator):]
+                            num_part = num_part.rsplit(".", 1)[0]  # 移除扩展名
+                            max_num = max(max_num, int(num_part))
+                        except:
+                            continue
+                    if max_num >= 0:
+                        seq = max_num + 1
+                        logger.info(f"检测到本地已有文件，从编号 {seq} 开始")
+                except Exception as e:
+                    logger.warning(f"扫描本地文件失败: {e}")
+        elif save_to_eagle and folder_id:
+            # 纯 Eagle 保存场景：使用全局计数器
+            counter_key = f"{folder_id}_{filename_prefix}_{filename_separator}_{file_extension}"
+            if counter_key in EagleSaver._global_counter:
+                cached_seq = EagleSaver._global_counter[counter_key]
+                seq = max(seq, cached_seq + 1)
+                logger.info(f"使用 Eagle 全局计数器，从编号 {seq} 开始")
+
+        # 确保不小于用户设置的起始编号
+        if seq < filename_number_start:
+            seq = filename_number_start
+
+        # ✅ 4. 处理每一张图片
         for idx, image in enumerate(images):
             try:
                 # 张量转 PIL
@@ -177,7 +204,6 @@ class EagleSaver:
                 # A. 本地保存
                 if save_to_local:
                     try:
-                        os.makedirs(local_save_path, exist_ok=True)
                         full_path = os.path.join(local_save_path, filename)
                         # 二次兜底：如果因为并发等原因文件仍然存在，继续递增直到可用
                         if not overwrite and os.path.exists(full_path):
@@ -191,10 +217,11 @@ class EagleSaver:
                                 base_name = f"{filename_prefix}{filename_separator}{seq_str}"
                                 filename = f"{base_name}.{file_extension}"
                                 full_path = os.path.join(local_save_path, filename)
-                            logger.info(f"文件已存在，自动递增编号: {filename_prefix}{filename_separator}{original_seq} -> {seq}")
-                            # base_name/filename 已更新，重新生成 Eagle 用名
+                            logger.info(f"文件已存在，自动递增编号: {original_seq} → {seq}")
+                        
                         pnginfo = self._build_pnginfo(meta, save_metadata_in_png)
                         self._save_image(img, full_path, file_extension, dpi, quality, optimize_image, high_quality_webp, pnginfo=pnginfo)
+                        
                         # 可选：将 metadata 写入同名 json
                         if save_metadata_json and meta:
                             try:
@@ -240,26 +267,33 @@ class EagleSaver:
                         eagle_errors.append(f"{filename}: {message}")
                         logger.error(f"Eagle 导入失败（{message}）")
 
-                # 本张处理完成，序号递增到下一张
+                # ✅ 本张处理完成，序号递增到下一张
                 seq += 1
 
             except Exception as e:
                 logger.error(f"处理第 {idx+1} 张图片时出错: {e}")
 
-        # 4. 延时清理临时文件
+        # ✅ 5. 更新全局计数器（用于纯 Eagle 保存场景）
+        if save_to_eagle and folder_id:
+            counter_key = f"{folder_id}_{filename_prefix}_{filename_separator}_{file_extension}"
+            EagleSaver._global_counter[counter_key] = seq - 1  # seq 已经递增到下一个，所以减 1
+
+        # 6. 延时清理临时文件
         if temp_files:
-            time.sleep(1.0) # 给 Eagle 一点响应时间
+            time.sleep(1.0)  # 给 Eagle 一点响应时间
             for tf in temp_files:
                 try:
-                    if os.path.exists(tf): os.unlink(tf)
-                except: pass
+                    if os.path.exists(tf): 
+                        os.unlink(tf)
+                except: 
+                    pass
         if temp_dir:
             try:
                 os.rmdir(temp_dir)
             except Exception:
                 pass
 
-        # 5. 汇总
+        # 7. 汇总
         summary = f"保存完成 - Eagle: {success_count}/{len(images)}, 本地: {local_count}/{len(images)}{folder_correction}"
         if eagle_errors:
             summary += "\n" + "\n".join(eagle_errors[:8])

@@ -20,4 +20,8 @@ huggingface_hub>=0.20.0
 transformers>=4.35.0
 accelerate>=0.24.0
 
+# 可选：本地大模型节点加载 GGUF 量化模型（llama.cpp 模式）。
+# 未安装时加载器会明确报错，不阻塞 ComfyUI 启动；可参考 ComfyUI TE 整合包安装对应 wheel。
+# llama-cpp-python>=0.2.0
+
 # torch、safetensors、folder_paths 和 comfy 由 ComfyUI 环境提供，请勿在此重复固定版本。

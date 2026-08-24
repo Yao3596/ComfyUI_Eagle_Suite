@@ -320,7 +320,6 @@ NODE_CLASS_MAPPINGS_TEXT = {
     "EagleRandomLine": EagleRandomLine,
     "EagleTextSwitch": EagleTextSwitch,
     "EagleTemplateReplace": EagleTemplateReplace,
-    "EaglePromptPreset": EaglePromptPreset,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS_TEXT = {
@@ -331,7 +330,6 @@ NODE_DISPLAY_NAME_MAPPINGS_TEXT = {
     "EagleRandomLine": "🦅 随机选择文本",
     "EagleTextSwitch": "🦅 文本条件分支",
     "EagleTemplateReplace": "🦅 模板替换",
-    "EaglePromptPreset": "🦅 提示词预设",
 }
 
 __all__ = [

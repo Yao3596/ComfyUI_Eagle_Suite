@@ -48,6 +48,7 @@ desktop.ini
 
 # ── Backup files ──
 *.bak
+*.bak*
 
 # ── Work-in-progress (未发布) ──
 eagle_suite/pinterest_gallery.py
@@ -58,3 +59,6 @@ web/js/pinterest_gallery.js
 
 # 缩略图缓存已迁移到 ComfyUI temp；本项仅防止旧版目录误提交。
 .unified_media_thumb_cache/
+
+# ── H3 导演台本地测试素材（不入库） ──
+input/

@@ -515,10 +515,16 @@ class UnifiedMediaBrowser:
         media_type = str(kwargs.get("media_type", "all") or "all")
         recursive = bool(kwargs.get("recursive", True))
         fallback_mode = str(kwargs.get("fallback_mode", "sequential") or "sequential")
-        batch_count = max(1, min(64, int(kwargs.get("batch_count", 1))))
+        raw_batch_count = int(kwargs.get("batch_count", 1))
+        batch_count = max(0, min(64, raw_batch_count))
         start_index = max(0, int(kwargs.get("start_index", 0)))
         random_seed = int(kwargs.get("random_seed", -1))
         aspect_ratio = str(kwargs.get("aspect_ratio", "all") or "all")
+
+        logger.info(
+            f"[UnifiedMediaBrowser] 执行参数: directory={directory!r}, "
+            f"media_type={media_type}, batch_count={batch_count}, fallback_mode={fallback_mode}"
+        )
 
         try:
             selections = json.loads(selection_data)
@@ -531,7 +537,9 @@ class UnifiedMediaBrowser:
             files = [f for f in files if _matches_aspect_ratio(f["path"], aspect_ratio)]
             files.sort(key=lambda item: os.path.relpath(item["path"], directory).replace("\\", "/").lower())
             if files:
-                take = min(batch_count, len(files))
+                # batch_count=0 表示输出全部（按顺序模式时），便于用户把整批图像交给下游预览/处理。
+                # 为防止目录文件过多导致 OOM，按与控件上限一致的 64 封顶。
+                take = min(len(files), 64) if batch_count == 0 else min(batch_count, len(files))
                 if fallback_mode == "random":
                     rng = random.SystemRandom() if random_seed < 0 else random.Random(random_seed)
                     files = rng.sample(files, take)
@@ -542,6 +550,10 @@ class UnifiedMediaBrowser:
                     {"path": item["path"], "name": item["name"], "type": item["type"]}
                     for item in files
                 ]
+                logger.info(
+                    f"[UnifiedMediaBrowser] 未选手动选择，fallback 取 {len(selections)} 项: "
+                    f"{[s['name'] for s in selections[:5]]}{'...' if len(selections) > 5 else ''}"
+                )
 
         if selections and aspect_ratio != "all":
             selections = [

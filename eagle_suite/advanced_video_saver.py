@@ -90,7 +90,7 @@ class EagleAdvancedVideoSaver:
                 "fps": ("INT", {"default": 30, "min": 1, "max": 120, "step": 1}),
                 "format": (["mp4", "webm", "avi", "mov", "mkv"],),
                 "codec": (["h264", "h265", "vp9", "prores"],),
-                "quality": (["lossless", "high", "medium", "low"],),
+                "quality": (["lossless", "high", "medium", "low"], {"default": "high"}),
                 "preview": ("BOOLEAN", {"default": True}),
                 
                 # === Eagle 评分 ===
@@ -710,6 +710,20 @@ class EagleAdvancedVideoSaver:
                     except Exception:
                         pass
     
+    @staticmethod
+    def _video_mime_type(ext: str) -> str:
+        """把视频扩展名映射为 ComfyUI 前端识别用的 MIME type。"""
+        mapping = {
+            "mp4": "video/mp4",
+            "webm": "video/webm",
+            "mov": "video/quicktime",
+            "avi": "video/x-msvideo",
+            "mkv": "video/x-matroska",
+            "gif": "image/gif",
+            "webp": "image/webp",
+        }
+        return mapping.get((ext or "").lower().lstrip("."), f"video/{ext}")
+
     def _generate_preview(self, video_path, unique_id, filename):
         """生成视频预览"""
         try:
@@ -721,7 +735,7 @@ class EagleAdvancedVideoSaver:
                         "filename": video_path.name,
                         "subfolder": "",
                         "type": "output",
-                        "format": video_path.suffix.lstrip('.')
+                        "format": self._video_mime_type(video_path.suffix.lstrip('.'))
                     }]
                 }
             else:
@@ -745,7 +759,7 @@ class EagleAdvancedVideoSaver:
                         "filename": preview_filename,
                         "subfolder": "",
                         "type": "temp",
-                        "format": video_path.suffix.lstrip('.')
+                        "format": self._video_mime_type(video_path.suffix.lstrip('.'))
                     }]
                 }
         except Exception as e:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 EaglePromptPresets - 提示词预设模板（增强版）
-支持 Obsidian 集成、Markdown 格式、自定义路径
+支持 Obsidian 集成、Markdown 格式、自定义路径、动态变量
 """
 
 import json
@@ -86,6 +86,23 @@ PROMPT_TEMPLATES = {
 }
 
 # ─────────────────────────────────────────────────────────
+# 新增：动态变量提取
+# ─────────────────────────────────────────────────────────
+
+def extract_template_variables(template: str) -> List[str]:
+    """从模板字符串中提取所有 {{变量名}} 格式的变量（去重保持顺序）"""
+    if not template:
+        return []
+    matches = re.findall(r'\{\{\s*(\w+)\s*\}\}', template)
+    seen = set()
+    result = []
+    for m in matches:
+        if m not in seen:
+            seen.add(m)
+            result.append(m)
+    return result
+
+# ─────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────
 
@@ -114,77 +131,117 @@ def save_config(config: dict):
         logger.error(f"保存配置失败: {e}")
 
 
-def parse_markdown_template(content: str, filename: str) -> Optional[Dict]:
-    """
-    解析 Markdown 格式的模板文件
+def _markdown_front_matter(content: str):
+    """读取文件级 YAML 风格元数据；仅支持本节点需要的简单键值和数组。"""
+    metadata = {}
+    body = str(content or "")
+    match = re.match(r'^\ufeff?\s*---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|$)', body, re.DOTALL)
+    if not match:
+        return metadata, body
 
-    支持格式：
-    ---
-    label: 模板名称
-    category: 分类
-    tags: [tag1, tag2]
-    ---
+    for line in match.group(1).splitlines():
+        if ':' not in line or line.lstrip().startswith('#'):
+            continue
+        key, value = line.split(':', 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if value.startswith('[') and value.endswith(']'):
+            value = [item.strip().strip('"\'') for item in value[1:-1].split(',') if item.strip()]
+        metadata[key] = value
+    return metadata, body[match.end():]
 
-    ## 指令
-    {{instruction}}
 
-    ## 示例
-    {{example}}
+def _markdown_template_id(filename: str, label: str, instruction: str, section: str = "") -> str:
+    stable_key = f"{filename}:{section}:{label}:{instruction}"
+    return 'markdown-' + uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex
+
+
+def _markdown_field(section_body: str, heading: str) -> str:
+    pattern = rf'(?ms)^###\s*{re.escape(heading)}\s*$\r?\n(.*?)(?=^###\s+|\Z)'
+    match = re.search(pattern, section_body)
+    return match.group(1).strip() if match else ""
+
+
+def parse_markdown_templates(content: str, filename: str, source: str = "local") -> List[Dict]:
+    """解析单模板或多模板 Markdown。
+
+    多模板格式使用二级标题作为模板名，并在其下使用三级“指令/示例”标题。
+    普通知识库 Markdown 没有“指令”段时不会被误判为模板。
     """
     try:
-        # 解析 YAML Front Matter
-        parts = content.split('---')
-        metadata = {}
-        body = content
+        metadata, body = _markdown_front_matter(content)
+        default_category = str(metadata.get('category') or '自定义')
+        default_tags = metadata.get('tags', [])
+        if isinstance(default_tags, str):
+            default_tags = [item.strip() for item in default_tags.split(',') if item.strip()]
+        default_cover = str(metadata.get('cover') or '')
+        results = []
 
-        if len(parts) >= 3:
-            # 有 Front Matter
-            front_matter = parts[1].strip()
-            body = '---'.join(parts[2:]).strip()
+        sections = list(re.finditer(r'(?ms)^##\s+([^\r\n]+?)\s*$\r?\n(.*?)(?=^##\s+|\Z)', body))
+        document_id = str(metadata.get('id') or '').strip()
+        for index, section_match in enumerate(sections):
+            label = section_match.group(1).strip()
+            section_body = section_match.group(2)
+            instruction = _markdown_field(section_body, '指令')
+            if not instruction:
+                continue
+            example = _markdown_field(section_body, '示例')
+            section_id = (
+                f"{document_id}:{index}"
+                if document_id
+                else _markdown_template_id(filename, label, instruction, str(index))
+            )
+            results.append({
+                "id": section_id,
+                "Label": label,
+                "Instruction": instruction,
+                "example": example,
+                "category": default_category,
+                "tags": list(default_tags),
+                "cover": default_cover,
+                "source": source,
+                "file_path": filename,
+                "section_index": index,
+            })
 
-            # 简单解析 YAML（支持基本键值对）
-            for line in front_matter.split('\n'):
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    key = key.strip()
-                    value = value.strip()
+        if results:
+            return results
 
-                    # 处理数组格式
-                    if value.startswith('[') and value.endswith(']'):
-                        value = [v.strip().strip('"\'') for v in value[1:-1].split(',')]
+        instruction_match = re.search(r'(?ms)^##\s*指令\s*$\r?\n(.*?)(?=^##\s+|\Z)', body)
+        if not instruction_match:
+            # 有明确 label/type 的文档可把正文作为单模板；普通 Obsidian 文档则忽略。
+            doc_type = str(metadata.get('type') or '').lower()
+            if not metadata.get('label') and doc_type not in {'prompt', 'template', 'prompt-template'}:
+                return []
+            instruction = body.strip()
+        else:
+            instruction = instruction_match.group(1).strip()
 
-                    metadata[key] = value
-
-        # 提取指令和示例
-        instruction_match = re.search(r'##\s*指令\s*\n(.*?)(?=\n##|\Z)', body, re.DOTALL)
-        example_match = re.search(r'##\s*示例\s*\n(.*?)(?=\n##|\Z)', body, re.DOTALL)
-
-        instruction = instruction_match.group(1).strip() if instruction_match else body.strip()
+        if not instruction:
+            return []
+        example_match = re.search(r'(?ms)^##\s*示例\s*$\r?\n(.*?)(?=^##\s+|\Z)', body)
         example = example_match.group(1).strip() if example_match else ""
-
-        # 如果没有明确的指令标记，尝试使用第一个非空行
-        if not instruction and body:
-            lines = [l for l in body.split('\n') if l.strip()]
-            if lines:
-                instruction = lines[0].strip()
-                if len(lines) > 1:
-                    example = lines[1].strip()
-
-        return {
-            "id": str(uuid.uuid4()),
-            "Label": metadata.get('label', filename.replace('.md', '')),
+        label = str(metadata.get('label') or Path(filename).stem)
+        return [{
+            "id": str(metadata.get('id') or _markdown_template_id(filename, label, instruction)),
+            "Label": label,
             "Instruction": instruction,
             "example": example,
-            "category": metadata.get('category', '自定义'),
-            "tags": metadata.get('tags', []),
-            "cover": metadata.get('cover', ''),
-            "source": "local",
+            "category": default_category,
+            "tags": list(default_tags),
+            "cover": default_cover,
+            "source": source,
             "file_path": filename,
-            "created_at": datetime.now().isoformat()
-        }
+        }]
     except Exception as e:
         logger.error(f"解析 Markdown 失败 ({filename}): {e}")
-        return None
+        return []
+
+
+def parse_markdown_template(content: str, filename: str) -> Optional[Dict]:
+    """兼容旧调用：返回文档中的第一个模板。"""
+    templates = parse_markdown_templates(content, filename)
+    return templates[0] if templates else None
 
 
 def template_to_markdown(template: Dict) -> str:
@@ -192,6 +249,7 @@ def template_to_markdown(template: Dict) -> str:
     tags_str = json.dumps(template.get('tags', []))
 
     return f"""---
+id: {template.get('id', '')}
 label: {template.get('Label', '')}
 category: {template.get('category', '自定义')}
 tags: {tags_str}
@@ -210,39 +268,60 @@ def load_local_templates(paths: List[str]) -> List[Dict]:
     """从本地路径加载模板"""
     templates = []
 
-    # 编辑器和导入器默认写入该文件；旧实现没有把它读回列表。
     if USER_TEMPLATES_FILE.exists():
         try:
             with open(USER_TEMPLATES_FILE, 'r', encoding='utf-8') as f:
                 stored = json.load(f)
             if isinstance(stored, list):
-                templates.extend(stored)
+                for item in stored:
+                    if isinstance(item, dict):
+                        normalized = dict(item)
+                        normalized['source'] = 'user'
+                        templates.append(normalized)
         except Exception as e:
             logger.error(f"加载用户模板文件失败 ({USER_TEMPLATES_FILE}): {e}")
 
-    for path_str in paths:
+    scanned_paths = set()
+    for path_str in list(paths or []) + [str(USER_TEMPLATES_DIR)]:
         path = Path(path_str)
         if not path.exists():
             logger.warning(f"路径不存在: {path}")
             continue
+        try:
+            path_key = str(path.resolve()).lower()
+        except Exception:
+            path_key = str(path).lower()
+        if path_key in scanned_paths:
+            continue
+        scanned_paths.add(path_key)
 
-        # 遍历 JSON 和 Markdown 文件
+        # Scanned files are source documents and therefore read-only. Templates
+        # saved/imported through the UI live in USER_TEMPLATES_FILE and are the
+        # only individually deletable entries. This prevents deleting one H2
+        # template from accidentally deleting a multi-template Markdown file.
+        source = 'local'
+
         for file_path in path.glob('**/*'):
             if file_path.is_file():
                 try:
-                    if file_path.suffix == '.json':
+                    if file_path.resolve() == USER_TEMPLATES_FILE.resolve():
+                        continue
+                    if file_path.suffix.lower() == '.json':
                         with open(file_path, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                            if isinstance(data, list):
-                                templates.extend(data)
-                            elif isinstance(data, dict):
-                                templates.append(data)
+                            entries = data if isinstance(data, list) else [data]
+                            for entry in entries:
+                                if isinstance(entry, dict):
+                                    item = dict(entry)
+                                    item['source'] = source
+                                    item['file_path'] = str(file_path)
+                                    templates.append(item)
 
-                    elif file_path.suffix in ['.md', '.markdown']:
+                    elif file_path.suffix.lower() in ['.md', '.markdown']:
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read()
-                            template = parse_markdown_template(content, file_path.name)
-                            if template:
+                            parsed = parse_markdown_templates(content, str(file_path), source=source)
+                            for template in parsed:
                                 template['file_path'] = str(file_path)
                                 templates.append(template)
 
@@ -253,7 +332,7 @@ def load_local_templates(paths: List[str]) -> List[Dict]:
 
 
 def _resolve_obsidian_local_dir(obsidian: dict) -> Optional[Path]:
-    """兼容“Vault 根目录 + 相对目录”以及直接填写 Windows 提示词目录。"""
+    """兼容"Vault 根目录 + 相对目录"以及直接填写 Windows 提示词目录。"""
     folder_raw = str(obsidian.get("prompts_folder") or "").strip()
     vault_raw = str(obsidian.get("vault_path") or "").strip()
     if folder_raw:
@@ -290,8 +369,10 @@ def _load_obsidian_local_templates(obsidian: dict) -> List[Dict]:
                         item["file_path"] = str(file_path)
                         templates.append(item)
             else:
-                item = parse_markdown_template(file_path.read_text(encoding="utf-8"), file_path.name)
-                if item:
+                items = parse_markdown_templates(
+                    file_path.read_text(encoding="utf-8"), str(file_path), source="obsidian"
+                )
+                for item in items:
                     item["source"] = "obsidian"
                     item["file_path"] = str(file_path)
                     templates.append(item)
@@ -357,8 +438,10 @@ async def load_obsidian_templates(config: dict) -> List[Dict]:
                             headers=headers, timeout=timeout
                         ) as file_resp:
                             if file_resp.status == 200:
-                                template = parse_markdown_template(await file_resp.text(), str(file_name))
-                                if template:
+                                parsed = parse_markdown_templates(
+                                    await file_resp.text(), file_path, source='obsidian'
+                                )
+                                for template in parsed:
                                     template['source'] = 'obsidian'
                                     template['file_path'] = file_path
                                     templates.append(template)
@@ -378,7 +461,6 @@ def merge_templates(built_in: dict, local: List[Dict], obsidian: List[Dict]) -> 
     """合并所有来源的模板"""
     result = {}
 
-    # 内置模板使用稳定 ID，避免每次刷新都让前端误判为一批新项目。
     for category, items in built_in.items():
         result[category] = []
         for index, item in enumerate(items):
@@ -390,7 +472,6 @@ def merge_templates(built_in: dict, local: List[Dict], obsidian: List[Dict]) -> 
                 'id': 'builtin-' + uuid.uuid5(uuid.NAMESPACE_URL, stable_key).hex,
             })
 
-    # 本地和 Obsidian 模板
     seen_ids = set()
     for template in local + obsidian:
         category = template.get('category', '自定义')
@@ -421,29 +502,19 @@ async def search_template(request):
         keyword = request.query.get("keyword", "").strip()
         category = request.query.get("category", "")
 
-        # 加载配置
         config = load_config()
-
-        # 加载所有来源的模板
         local_templates = load_local_templates(config['local_paths'])
         obsidian_templates = await load_obsidian_templates(config)
-
-        # 合并模板
         all_templates = merge_templates(PROMPT_TEMPLATES, local_templates, obsidian_templates)
-
-        # 获取分类列表
         categories = list(all_templates.keys())
 
-        # 筛选分类
         if category and category in all_templates:
             items = all_templates[category]
         else:
-            # 合并所有分类
             items = []
             for cat_items in all_templates.values():
                 items.extend(cat_items)
 
-        # 关键词过滤
         if keyword:
             kw = keyword.lower()
             items = [
@@ -475,16 +546,14 @@ async def save_template(request):
     try:
         body = await request.json()
         template = body.get("template")
-        save_format = body.get("format", "json")  # json 或 markdown
+        save_format = body.get("format", "json")
 
         if not template:
             return web.json_response({"success": False, "error": "缺少模板数据"}, status=400)
 
-        # 确保有 ID
         if not template.get("id"):
             template["id"] = str(uuid.uuid4())
 
-        # 内置模板通过“另存为自定义”进入编辑器，不能覆盖或伪装成内置项。
         if template.get("source") in {"built-in", "obsidian"}:
             template["id"] = str(uuid.uuid4())
         template["source"] = "user"
@@ -492,9 +561,7 @@ async def save_template(request):
         template["created_at"] = template.get("created_at", datetime.now().isoformat())
         template["updated_at"] = datetime.now().isoformat()
 
-        # 根据格式保存
         if save_format == "markdown":
-            # 保存为 Markdown
             filename = f"{template['Label'].replace(' ', '_')}_{template['id'][:8]}.md"
             file_path = USER_TEMPLATES_DIR / filename
 
@@ -504,13 +571,11 @@ async def save_template(request):
             template['file_path'] = str(file_path)
 
         else:
-            # 保存到 JSON 文件（向后兼容）
             templates = []
             if USER_TEMPLATES_FILE.exists():
                 with open(USER_TEMPLATES_FILE, 'r', encoding='utf-8') as f:
                     templates = json.load(f)
 
-            # 更新或添加
             found = False
             for i, t in enumerate(templates):
                 if t.get("id") == template["id"]:
@@ -537,7 +602,6 @@ async def delete_template(request):
     try:
         template_id = request.query.get("id")
 
-        # 尝试从 JSON 删除
         deleted = False
         if USER_TEMPLATES_FILE.exists():
             with open(USER_TEMPLATES_FILE, 'r', encoding='utf-8') as f:
@@ -550,19 +614,6 @@ async def delete_template(request):
                 with open(USER_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
                     json.dump(templates, f, ensure_ascii=False, indent=2)
                 deleted = True
-
-        # 尝试从 Markdown 文件删除
-        for md_file in USER_TEMPLATES_DIR.glob("*.md"):
-            try:
-                with open(md_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                template = parse_markdown_template(content, md_file.name)
-                if template and template.get('id') == template_id:
-                    md_file.unlink()
-                    deleted = True
-                    break
-            except Exception as e:
-                logger.error(f"删除 MD 文件失败: {e}")
 
         if deleted:
             return web.json_response({"success": True})
@@ -598,9 +649,7 @@ async def import_file(request):
 
         elif file_ext in ['md', 'markdown']:
             content_str = content.decode('utf-8')
-            template = parse_markdown_template(content_str, field.filename)
-            if template:
-                templates = [template]
+            templates = parse_markdown_templates(content_str, field.filename, source='user')
 
         elif file_ext == 'txt':
             lines = content.decode('utf-8').strip().split('\n')
@@ -613,7 +662,6 @@ async def import_file(request):
                         "source": "imported"
                     })
 
-        # 保存导入的模板
         existing = []
         if USER_TEMPLATES_FILE.exists():
             with open(USER_TEMPLATES_FILE, 'r', encoding='utf-8') as f:
@@ -623,7 +671,10 @@ async def import_file(request):
             if not t.get("id"):
                 t["id"] = str(uuid.uuid4())
             t["created_at"] = datetime.now().isoformat()
-            t["source"] = t.get("source", "imported")
+            # 导入内容保存为用户模板副本，因此可独立编辑和删除，不反向改写源文档。
+            t["source"] = "user"
+            t.pop("file_path", None)
+            t.pop("section_index", None)
 
         existing.extend(templates)
 
@@ -642,7 +693,6 @@ async def get_config(request):
     """获取配置"""
     try:
         config = load_config()
-        # 隐藏敏感信息
         safe_config = copy.deepcopy(config)
         if safe_config['obsidian']['api_key']:
             safe_config['obsidian']['api_key'] = '***'
@@ -660,7 +710,6 @@ async def update_config(request):
         body = await request.json()
         new_config = body.get("config")
 
-        # 如果 API key 是占位符，保留原值
         current_config = load_config()
         if not isinstance(new_config, dict) or not isinstance(new_config.get('obsidian'), dict):
             return web.json_response({"success": False, "error": "配置结构无效"}, status=400)
@@ -677,7 +726,7 @@ async def update_config(request):
 
 @route("POST", "/eaglePromptPresets/test_obsidian")
 async def test_obsidian(request):
-    """优先测试本地 Vault 直读；否则诊断 Local REST API 的 HTTP/HTTPS。"""
+    """测试 Obsidian 连接"""
     try:
         body = await request.json()
         obsidian = {
@@ -743,15 +792,21 @@ def _allowed_cover_path(raw_path: str) -> Optional[Path]:
     try:
         raw_candidate = Path(str(raw_path or "")).expanduser()
         candidate = (raw_candidate if raw_candidate.is_absolute() else BASE_DIR / raw_candidate).resolve()
+        
+        if candidate.is_symlink():
+            candidate = candidate.readlink().resolve()
+        
         config = load_config()
         roots = [BASE_DIR.resolve()]
         for raw_root in config.get("local_paths", []):
             root = Path(str(raw_root)).expanduser()
             if root.is_dir():
                 roots.append(root.resolve())
+        
         obsidian_root = _resolve_obsidian_local_dir(config.get("obsidian", {}))
         if obsidian_root:
             roots.append(obsidian_root)
+        
         if candidate.is_file() and any(candidate == root or root in candidate.parents for root in roots):
             return candidate
     except Exception:
@@ -761,7 +816,7 @@ def _allowed_cover_path(raw_path: str) -> Optional[Path]:
 
 @route("POST", "/eaglePromptPresets/upload_cover")
 async def upload_template_cover(request):
-    """保存模板小封面。文件只写入节点自己的 prompts/covers 目录。"""
+    """上传模板封面"""
     try:
         reader = await request.multipart()
         field = await reader.next()
@@ -793,6 +848,7 @@ async def upload_template_cover(request):
 
 @route("GET", "/eaglePromptPresets/cover")
 async def get_template_cover(request):
+    """获取模板封面"""
     path = _allowed_cover_path(request.query.get("path", ""))
     if not path:
         return web.Response(status=404, text="cover not found or outside configured template paths")
@@ -808,21 +864,17 @@ async def export_templates(request):
     try:
         body = await request.json()
         template_ids = body.get("template_ids", [])
-        export_format = body.get("format", "json")  # json, markdown, txt
+        export_format = body.get("format", "json")
 
-        # 加载所有模板
         config = load_config()
         local_templates = load_local_templates(config['local_paths'])
 
-        # 筛选要导出的模板
         if template_ids:
             templates = [t for t in local_templates if t.get('id') in template_ids]
         else:
             templates = local_templates
 
-        # 根据格式导出
         if export_format == "markdown":
-            # 生成 Markdown 文件内容
             content = "\n\n---\n\n".join([template_to_markdown(t) for t in templates])
             return web.Response(
                 text=content,
@@ -831,7 +883,6 @@ async def export_templates(request):
             )
 
         elif export_format == "txt":
-            # 纯文本格式（每行一个指令）
             lines = [t.get('Instruction', '') for t in templates]
             content = "\n".join(lines)
             return web.Response(
@@ -840,7 +891,7 @@ async def export_templates(request):
                 headers={"Content-Disposition": f'attachment; filename="prompts_export.txt"'}
             )
 
-        else:  # json
+        else:
             content = json.dumps(templates, ensure_ascii=False, indent=2)
             return web.Response(
                 text=content,
@@ -854,14 +905,146 @@ async def export_templates(request):
 
 
 # ─────────────────────────────────────────────────────────
+# 导演技能管理
+# ─────────────────────────────────────────────────────────
+
+DIRECTOR_SKILLS_FILE = BASE_DIR / "director_skills.json"
+FILMSTRIP_DIR = BASE_DIR / "filmstrip"
+FILMSTRIP_DIR.mkdir(exist_ok=True)
+
+
+def load_director_skills() -> Dict:
+    """加载所有导演技能"""
+    if not DIRECTOR_SKILLS_FILE.exists():
+        return {}
+    try:
+        with open(DIRECTOR_SKILLS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"加载导演技能失败: {e}")
+        return {}
+
+
+def save_director_skills(skills: Dict):
+    """保存导演技能"""
+    try:
+        with open(DIRECTOR_SKILLS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(skills, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"保存导演技能失败: {e}")
+
+
+@route("GET", "/eaglePromptPresets/director_skills")
+async def get_director_skills(request):
+    """获取所有导演技能"""
+    try:
+        skills = load_director_skills()
+        return web.json_response({"success": True, "data": list(skills.values())})
+    except Exception as e:
+        logger.error(f"get_director_skills 错误: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("POST", "/eaglePromptPresets/director_skills")
+async def save_director_skill(request):
+    """保存单个导演技能"""
+    try:
+        body = await request.json()
+        skill = body.get("skill")
+        
+        if not skill or not skill.get("name"):
+            return web.json_response({"success": False, "error": "缺少技能名称"}, status=400)
+        
+        if not skill.get("id"):
+            skill["id"] = str(uuid.uuid4())
+        
+        skill["updated_at"] = datetime.now().isoformat()
+        
+        skills = load_director_skills()
+        skills[skill["id"]] = skill
+        save_director_skills(skills)
+        
+        return web.json_response({"success": True, "data": skill})
+    except Exception as e:
+        logger.error(f"save_director_skill 错误: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("DELETE", "/eaglePromptPresets/director_skills")
+async def delete_director_skill(request):
+    """删除导演技能"""
+    try:
+        skill_id = request.query.get("id")
+        skills = load_director_skills()
+        
+        if skill_id in skills:
+            del skills[skill_id]
+            save_director_skills(skills)
+            return web.json_response({"success": True})
+        else:
+            return web.json_response({"success": False, "error": "技能未找到"}, status=404)
+    except Exception as e:
+        logger.error(f"delete_director_skill 错误: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("POST", "/eaglePromptPresets/upload_filmstrip")
+async def upload_filmstrip_image(request):
+    """上传素材胶片图片"""
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        
+        if field is None or field.name != "file":
+            return web.json_response({"success": False, "error": "缺少图片文件"}, status=400)
+        
+        content = await field.read(decode=False)
+        if not content:
+            return web.json_response({"success": False, "error": "图片文件为空"}, status=400)
+        
+        if len(content) > 10 * 1024 * 1024:
+            return web.json_response({"success": False, "error": "图片不能超过 10 MB"}, status=413)
+        
+        image = Image.open(io.BytesIO(content))
+        image.verify()
+        image_format = str(image.format or "").upper()
+        extensions = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".gif"}
+        extension = extensions.get(image_format)
+        
+        if not extension:
+            return web.json_response({"success": False, "error": f"不支持的图片格式: {image_format}"}, status=415)
+        
+        filename = f"film_{uuid.uuid4().hex}{extension}"
+        destination = FILMSTRIP_DIR / filename
+        destination.write_bytes(content)
+        
+        relative_path = destination.relative_to(BASE_DIR).as_posix()
+        return web.json_response({"success": True, "path": relative_path})
+    except Exception as error:
+        logger.error(f"upload_filmstrip_image 错误: {error}")
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+
+
+@route("GET", "/eaglePromptPresets/filmstrip")
+async def get_filmstrip_image(request):
+    """获取素材胶片图片"""
+    path = _allowed_cover_path(request.query.get("path", ""))
+    if not path:
+        return web.Response(status=404, text="filmstrip image not found")
+    
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if not content_type.startswith("image/"):
+        return web.Response(status=415, text="filmstrip must be an image")
+    
+    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=3600"})
+
+
+# ─────────────────────────────────────────────────────────
 # 节点类
 # ─────────────────────────────────────────────────────────
 
 class EaglePromptPresets:
-    """提示词预设模板（增强版）"""
-
-    def __init__(self):
-        pass
+    """提示词预设模板（增强版）- 支持动态变量"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -870,50 +1053,121 @@ class EaglePromptPresets:
                 "prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "placeholder": "输入提示词，或通过前端选择模板"
+                    "placeholder": "输入提示词或通过前端选择模板\n支持 {{变量名}} 占位符"
                 }),
             },
             "optional": {
                 "variables": ("STRING", {
                     "forceInput": True,
-                    "tooltip": "外部多变量：支持 JSON 对象，或每行 key=value / key: value"
+                    "tooltip": "外部变量输入：JSON 对象或 key=value 格式"
+                }),
+                "director_skills_input": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "可选：Markdown 导演 Skills（连线输入）"
+                }),
+                "api_config": ("API_CONFIG", {
+                    "forceInput": True,
+                    "tooltip": "可选：来自 API 配置加载器的 api_config（用于 LLM 扩写）"
+                }),
+                "llm_config_secondary": ("API_CONFIG", {
+                    "forceInput": True,
+                    "tooltip": "可选：第二个 LLM 配置（备用 / 审核模型）"
+                }),
+                "template": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "模板字符串（前端自动填充）"
+                }),
+                "local_variables": ("STRING", {
+                    "default": "{}",
+                    "multiline": True,
+                    "tooltip": "前端变量快照（JSON 格式）"
+                }),
+                "selected_director_skill": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "前端选中的导演技能内容"
+                }),
+                "ui_state": ("STRING", {
+                    "default": "{\"version\": 1}",
+                    "multiline": True,
+                    "tooltip": "前端界面状态（自动保存，请勿手动修改）"
                 }),
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("Prompt",)
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "missing_vars", "director_skills", "api_config_out", "llm_config_secondary_out")
     FUNCTION = "process"
     CATEGORY = "🦅 Eagle/工具"
 
     @staticmethod
-    def _parse_variables(value):
+    def _normalize_variable_name(value) -> str:
+        name = str(value or "").strip()
+        wrapped = re.fullmatch(r"\{\{\s*(.*?)\s*\}\}", name)
+        return (wrapped.group(1) if wrapped else name).strip()
+
+    @staticmethod
+    def _parse_variables(value) -> Dict[str, str]:
         text = str(value or "").strip()
         if not text:
             return {}
+
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
-                return {str(key).strip(): str(val) for key, val in parsed.items() if str(key).strip()}
-        except (TypeError, ValueError, json.JSONDecodeError):
+                result = {}
+                for key, item_value in parsed.items():
+                    name = EaglePromptPresets._normalize_variable_name(key)
+                    if name:
+                        result[name] = str(item_value)
+                return result
+        except:
             pass
 
         result = {}
         for raw_line in text.splitlines():
-            line = raw_line.strip().strip(",")
+            line = raw_line.strip().rstrip(",")
             if not line or line.startswith("#"):
                 continue
             match = re.match(r"^\s*([^:=：]+?)\s*(?:=|:|：)\s*(.*?)\s*$", line)
             if match:
-                result[match.group(1).strip()] = match.group(2).strip()
+                name = EaglePromptPresets._normalize_variable_name(match.group(1))
+                if name:
+                    result[name] = match.group(2).strip()
         return result
 
-    def process(self, prompt, variables=""):
-        rendered = str(prompt or "")
-        for key, value in self._parse_variables(variables).items():
-            rendered = re.sub(
-                r"\{\{\s*" + re.escape(key) + r"\s*\}\}",
-                lambda _match, replacement=value: replacement,
-                rendered,
-            )
-        return (rendered,)
+    def process(self, prompt="", variables="", director_skills_input="",
+                api_config="", llm_config_secondary="",
+                template="", local_variables="", selected_director_skill="", ui_state="", **kwargs):
+        final_template = (template or prompt or "").strip()
+
+        template_vars = extract_template_variables(final_template)
+        local_vars = self._parse_variables(local_variables)
+        external_vars = self._parse_variables(variables)
+
+        dynamic_vars = {}
+        for var_name in template_vars:
+            widget_name = f"var_{var_name}"
+            if widget_name in kwargs:
+                dynamic_vars[var_name] = str(kwargs[widget_name] or "")
+
+        merged_vars = {**local_vars, **external_vars, **dynamic_vars}
+
+        rendered = final_template
+        for var_name in template_vars:
+            pattern = r'\{\{\s*' + re.escape(var_name) + r'\s*\}\}'
+            value = merged_vars.get(var_name, f"{{{{{var_name}}}}}")
+            rendered = re.sub(pattern, value, rendered)
+
+        missing = sorted(set(extract_template_variables(rendered)))
+        final_director_skills = director_skills_input or selected_director_skill
+
+        return (rendered, ", ".join(missing), final_director_skills, api_config or "", llm_config_secondary or "")
+
+
+# 注意：本文件仅作为 EaglePromptPresets 的实现模块，节点注册统一由
+# eagle_suite/nodes.py 负责。此处不再导出 NODE_CLASS_MAPPINGS，
+# 避免 ComfyUI 自动扫描 nodes/ 目录时造成重复注册。
+# NODE_CLASS_MAPPINGS = {"EaglePromptPresets": EaglePromptPresets}
+# NODE_DISPLAY_NAME_MAPPINGS = {"EaglePromptPresets": "🦅 提示词预设"}

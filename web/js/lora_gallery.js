@@ -365,10 +365,33 @@ var LoraGallery = {
 
     function restoreSelection() {
       var nodeId = String(props.node.id);
+
+      // 兜底：直接读 selection_data widget 自身的值——工作流保存/恢复时这个
+      // 原生 widget 会跟着正常序列化，不依赖服务端内存缓存，刷新浏览器后
+      // 理论上应该还在。服务端缓存 GET 拿不到数据时（node_id 没对上、请求
+      // 失败、服务端还没这条记录）就用这个兜底，双保险。
+      function restoreFromWidget() {
+        try {
+          var widget = (props.node.widgets || []).find(function(w) { return w.name === "selection_data"; });
+          if (!widget || !widget.value || widget.value === "[]") return false;
+          var data = JSON.parse(widget.value);
+          var sels = data.selections || data;
+          if (!Array.isArray(sels) || sels.length === 0) return false;
+          var ids = [];
+          sels.forEach(function(s) {
+            ids.push(s.id);
+            if (s.weight !== undefined) weights.value[s.id] = s.weight;
+            if (s.name) selectedItems.value[s.id] = s;
+          });
+          selectedIds.value = ids;
+          return true;
+        } catch (e) { return false; }
+      }
+
       fetch("/lora_gallery/cache_selection?node_id=" + encodeURIComponent(nodeId))
         .then(function(r) { return r.json(); })
         .then(function(d) {
-          if (d.success && d.selections) {
+          if (d.success && d.selections && d.selections.length > 0) {
             var ids = [];
             d.selections.forEach(function(s) {
               ids.push(s.id);
@@ -379,8 +402,10 @@ var LoraGallery = {
               }
             });
             selectedIds.value = ids;
+          } else {
+            restoreFromWidget();
           }
-        }).catch(function() {});
+        }).catch(function() { restoreFromWidget(); });
     }
 
     function openCivitai(url) {

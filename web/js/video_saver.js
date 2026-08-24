@@ -6,6 +6,7 @@
     "use strict";
 
     const TARGET_NODES = ["EagleImagesToVideo", "EagleVideoConverter"];
+    const PREVIEW_NODE = "EagleVideoGifPreviewNode";
     
     const SECTION_DEFS = [
         { key: "核心保存",    widgets: ["images", "video", "input_video", "eagle_folder", "local_save_path", "filename_prefix"] },
@@ -77,6 +78,17 @@
                         if (onNodeCreated) onNodeCreated.apply(this, arguments);
                         applyCollapsibleSections(this);
                     };
+                }
+
+                // 视频/GIF 预览节点：让 video 和 images 端口同时接受 IMAGE 与 VIDEO 连线
+                if (nodeData.name === PREVIEW_NODE) {
+                    const inputDefs = nodeData.input || nodeData.inputs;
+                    const optional = (inputDefs && inputDefs.optional) || {};
+                    ["video", "images"].forEach(name => {
+                        if (optional[name]) {
+                            optional[name] = ["IMAGE", "VIDEO"];
+                        }
+                    });
                 }
             },
         });

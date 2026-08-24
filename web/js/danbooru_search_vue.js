@@ -51,9 +51,98 @@ const PAGE_LIMIT = 40;
 
 const TAG_KIND_LABELS = {
   semantic: "语义", detail: "图片", manual: "手动", gacha: "抽卡",
-  outfit: "服装", action: "动作", scene: "场景", composition: "构图",
-  lighting: "光照", quality: "质量", general: "通用",
+  outfit: "服装", action: "动作", expression: "表情", scene: "场景", environment: "环境", composition: "构图",
+  lighting: "光照", quality: "质量", appearance: "外观", general: "通用",
 };
+const PROMPT_KIND_LABELS = {
+  outfit: "服装", action: "动作", expression: "表情", scene: "场景",
+  environment: "环境", composition: "构图", lighting: "光照",
+};
+
+const TAG_MAJOR_GROUPS = [
+  { key: "character", label: "人物" },
+  { key: "styling", label: "服装装饰" },
+  { key: "action", label: "动作表情" },
+  { key: "world", label: "场景环境" },
+  { key: "visual", label: "构图画面" },
+  { key: "other", label: "其他" },
+];
+
+const TAG_SUBGROUP_LABELS = {
+  artist: "艺术家", copyright: "版权", character: "角色", appearance: "外观特征",
+  clothing: "服装", footwear: "鞋袜", accessory: "配饰",
+  expression: "表情", gaze: "视线", pose: "姿势", interaction: "动作/交互",
+  place: "地点", weather: "天气/时间", object: "物件/背景",
+  composition: "镜头构图", lighting: "光照色彩", quality: "质量/元数据",
+  manual: "手动", general: "未分类",
+};
+
+// 运行期显示设置由设置弹窗即时更新。界面本身固定中文，避免保留无效语言选项。
+const danbooruUiSettings = reactive({
+  tagDisplayLanguage: "bilingual",
+  groupOutputTags: true,
+});
+
+function applyDanbooruUiSettings(settings = {}) {
+  danbooruUiSettings.tagDisplayLanguage = settings.tag_display_language || "bilingual";
+  danbooruUiSettings.groupOutputTags = settings.group_output_tags !== false;
+}
+
+function inferTagTaxonomy(value) {
+  const item = typeof value === "string" ? { tag: value } : (value || {});
+  const tag = String(item.tag || "").toLowerCase().replace(/\s+/g, "_");
+  const cn = String(item.translation || item.cn_name || translationCache[tag] || "").toLowerCase();
+  const text = tag + "_" + cn;
+  const category = String(item.category || "general").toLowerCase();
+  let kind = String(item.kind || "general").toLowerCase();
+
+  if (["artist", "copyright", "character"].includes(category)) {
+    return { major: "character", sub: category };
+  }
+  if (category === "meta") kind = "quality";
+  if (["semantic", "detail", "manual", "gacha", "general"].includes(kind)) {
+    const rules = [
+      ["quality", /masterpiece|best_quality|highres|absurdres|lowres|watermark|signature|commentary|request|censored|monochrome|greyscale/],
+      ["lighting", /light|lighting|shadow|sunlight|backlight|glow|ray|reflection|bloom|neon|lens_flare/],
+      ["composition", /view|shot|angle|focus|depth_of_field|perspective|portrait|close[-_]?up|full_body|upper_body|cowboy_shot|from_/],
+      ["expression", /smile|grin|blush|frown|angry|cry|tear|expression|closed_eyes|one_eye_closed|open_mouth|closed_mouth|tongue|pout|surprised/],
+      ["action", /holding|sitting|standing|walking|running|kneeling|lying|looking|facing|leaning|reaching|raised_|spread_|crossed_|hug|kiss|fighting|dancing|reading|eating|drinking|sleeping|gesture|pose/],
+      ["outfit", /dress|shirt|skirt|coat|jacket|uniform|clothes|pants|shorts|socks|stockings|thighhighs|pantyhose|legwear|boots|shoes|gloves|hat|cap|ribbon|tie|collar|scarf|swimsuit|bikini|lingerie|armor|apron|hoodie|sweater|bra|panties|accessor|jewel/],
+      ["environment", /rain|snow|weather|sky|cloud|sunset|sunrise|night|day|morning|evening|season|wind|fog|mist|water|fire|flower|tree|grass/],
+      ["scene", /indoors|outdoors|room|bedroom|classroom|school|street|city|forest|garden|beach|ocean|mountain|library|station|platform|park|cafe|restaurant|office|background|scenery/],
+      ["appearance", /hair|eyes|skin|breast|chest|ass|hips|waist|body|face|ears|horns|tail|wings|age|girl|boy|female|male|solo|multiple_/],
+    ];
+    kind = rules.find(([, pattern]) => pattern.test(text))?.[0] || kind;
+  }
+
+  if (kind === "appearance") return { major: "character", sub: "appearance" };
+  if (kind === "outfit") {
+    if (/boots|shoes|socks|stockings|thighhighs|pantyhose|legwear|sandals|heels|footwear/.test(text)) return { major: "styling", sub: "footwear" };
+    if (/hat|cap|ribbon|tie|collar|scarf|gloves|jewel|accessor|bag|belt|necklace|earring/.test(text)) return { major: "styling", sub: "accessory" };
+    return { major: "styling", sub: "clothing" };
+  }
+  if (kind === "expression") return { major: "action", sub: "expression" };
+  if (kind === "action") {
+    if (/looking|facing|eye_contact|gaze/.test(text)) return { major: "action", sub: "gaze" };
+    if (/holding|hug|kiss|touch|fighting|reading|eating|drinking|interaction/.test(text)) return { major: "action", sub: "interaction" };
+    return { major: "action", sub: "pose" };
+  }
+  if (kind === "scene") return { major: "world", sub: "place" };
+  if (kind === "environment") return { major: "world", sub: /rain|snow|weather|sunset|sunrise|night|day|morning|evening|wind|fog|mist/.test(text) ? "weather" : "object" };
+  if (kind === "composition") return { major: "visual", sub: "composition" };
+  if (kind === "lighting") return { major: "visual", sub: "lighting" };
+  if (kind === "quality") return { major: "visual", sub: "quality" };
+  return { major: "other", sub: kind === "manual" ? "manual" : "general" };
+}
+
+function buildTagTaxonomy(tags) {
+  const entries = (tags || []).map((item, index) => ({ item, index, ...inferTagTaxonomy(item) }));
+  return TAG_MAJOR_GROUPS.map(group => {
+    const groupEntries = entries.filter(entry => entry.major === group.key);
+    const subKeys = [...new Set(groupEntries.map(entry => entry.sub))];
+    return { ...group, entries: groupEntries, subKeys };
+  }).filter(group => group.entries.length);
+}
 
 function splitPromptTags(text) {
   const result = [];
@@ -100,9 +189,15 @@ function normalizeTagItem(value, defaults = {}) {
     category: raw.category || defaults.category || "general",
     kind: raw.kind || defaults.kind || "general",
     source: raw.source || defaults.source || "manual",
-    weight: Number.isFinite(weightValue) ? Math.max(-2, Math.min(2, weightValue)) : 1,
+    // Weight is intentionally not clamped. Advanced prompt syntaxes may use
+    // values outside the usual -2..2 range; only reject non-finite values.
+    weight: Number.isFinite(weightValue) ? weightValue : 1,
     enabled: raw.enabled !== false,
   };
+}
+
+function isGachaItem(item) {
+  return String(item?.source || "").startsWith("gacha");
 }
 
 function mergeTagItems(current, incoming, defaults = {}) {
@@ -246,7 +341,7 @@ function resetEdits(post) {
 function flattenEffectiveTags(post) {
   const t = getEffectiveTags(post);
   const out = [];
-  ["artist", "copyright", "character", "general"].forEach(k => {
+  ["artist", "copyright", "character", "general", "meta"].forEach(k => {
     (t[k] || []).forEach(tag => out.push(tag));
   });
   return out;
@@ -323,6 +418,7 @@ const TagSearchPanel = {
           tag: item.tag,
           cn_name: item.cn_name,
           category: item.category,
+          kind: item.kind,
           score: item.score,
         });
       }
@@ -376,6 +472,7 @@ const TagSearchPanel = {
         tag: item.tag,
         cn_name: item.cn_name,
         category: item.category,
+        kind: item.kind,
         score: item.cooc_score,
       });
       loadRelated();
@@ -386,7 +483,7 @@ const TagSearchPanel = {
           tag: s.tag,
           translation: s.cn_name || "",
           category: String(s.category || "general").toLowerCase(),
-          kind: "semantic",
+          kind: s.kind || "semantic",
           source: "semantic",
           weight: 1,
           enabled: true,
@@ -638,6 +735,31 @@ const PostEditDialog = {
       return parts;
     }
 
+    function detailSections() {
+      const sections = [];
+      TAG_CATEGORIES.forEach(cat => {
+        const tags = store.value[cat.key] || [];
+        if (!tags.length) return;
+        if (cat.key !== "general") {
+          sections.push({ key: cat.key, label: cat.label, category: cat.key, tags });
+          return;
+        }
+        const buckets = new Map();
+        tags.forEach(tag => {
+          const taxonomy = inferTagTaxonomy({ tag, translation: translationCache[tag], category: cat.key, kind: "detail" });
+          const key = taxonomy.major + "/" + taxonomy.sub;
+          if (!buckets.has(key)) buckets.set(key, { taxonomy, tags: [] });
+          buckets.get(key).tags.push(tag);
+        });
+        for (const [key, bucket] of buckets) {
+          const majorLabel = TAG_MAJOR_GROUPS.find(item => item.key === bucket.taxonomy.major)?.label || "其他";
+          const subLabel = TAG_SUBGROUP_LABELS[bucket.taxonomy.sub] || bucket.taxonomy.sub;
+          sections.push({ key: "general-" + key, label: majorLabel + " / " + subLabel, category: cat.key, tags: bucket.tags });
+        }
+      });
+      return sections;
+    }
+
     function copyTags() {
       const text = selectableTags()
         .filter(item => highlighted.has(item.tag))
@@ -689,59 +811,51 @@ const PostEditDialog = {
             h("div", { class: "dbs-detail-preview" }, [
               h("img", {
                 src: proxiedImageUrl(post.large_file_url || post.file_url || post.preview_file_url),
-                style: { maxWidth: "100%", maxHeight: "62vh", objectFit: "contain" },
+                alt: "Danbooru #" + post.id,
               }),
             ]),
-
-            h("div", { class: "dbs-detail-tags" }, TAG_CATEGORIES.map(cat => {
-            const tags = store.value[cat.key] || [];
-            if (tags.length === 0) return null;
-            return h("div", { class: "dbs-tag-section", key: cat.key }, [
-              h("div", { class: "dbs-tag-section-title" }, cat.label + " (" + tags.length + ")"),
-              h("div", { class: "dbs-tag-group" }, tags.map(tag => {
-                const cn = translationCache[tag];
-                return h("div", {
-                  class: ["dbs-tag-chip", "dbs-tag-category-" + cat.key, highlighted.has(tag) ? "highlighted" : ""],
-                  key: tag,
-                  title: cn ? (tag + " · " + cn) : tag,
-                  onClick: () => toggleHighlighted(tag),
-                  onContextmenu: e => showCtxMenu(e, tag, cat.key),
-                }, cn ? (tag + " (" + cn + ")") : tag);
-              })),
-            ]);
-            })),
-          ]),
-
-          // 添加标签
-          h("div", { class: "dbs-add-tag-row" }, [
-            h("select", {
-              class: "dbs-select",
-              value: addCategory.value,
-              onChange: e => { addCategory.value = e.target.value; },
-            }, TAG_CATEGORIES.map(c => h("option", { value: c.key }, c.label))),
-            h("input", {
-              class: "dbs-input-line",
-              style: { flex: "1", margin: "0" },
-              placeholder: "输入新标签，回车添加",
-              value: addValue.value,
-              onInput: e => { addValue.value = e.target.value; },
-              onKeydown: e => {
-                if (e.key === "Enter") { e.preventDefault(); addTag(); }
-              },
-            }),
-            h("button", { class: "dbs-btn small", onClick: addTag }, "➕ 添加"),
-          ]),
-
-          h("div", { class: "dbs-detail-actions" }, [
-            h("button", { class: "dbs-detail-btn", onClick: selectAllTags }, "全选"),
-            h("button", { class: "dbs-detail-btn", onClick: () => highlighted.clear() }, "清除高亮"),
-            h("button", { class: "dbs-detail-btn primary", onClick: addHighlighted }, "➕ 加入节点标签"),
-            h("button", { class: "dbs-detail-btn primary", onClick: copyTags }, "📋 复制高亮标签"),
-            h("button", {
-              class: "dbs-detail-btn",
-              disabled: !edited,
-              onClick: doReset,
-            }, "🔄 重置标签"),
+            h("div", { class: "dbs-detail-side" }, [
+              h("div", { class: "dbs-detail-tags" }, detailSections().map(section => h("div", { class: "dbs-tag-section", key: section.key }, [
+                h("div", { class: "dbs-tag-section-title" }, section.label + " (" + section.tags.length + ")"),
+                h("div", { class: "dbs-tag-group" }, section.tags.map(tag => {
+                  const cn = translationCache[tag];
+                  const mode = danbooruUiSettings.tagDisplayLanguage;
+                  const label = mode === "zh" && cn ? cn : (mode === "bilingual" && cn ? (tag + " (" + cn + ")") : tag);
+                  return h("div", {
+                    class: ["dbs-tag-chip", "dbs-tag-category-" + section.category, highlighted.has(tag) ? "highlighted" : ""],
+                    key: tag,
+                    title: cn ? (tag + " · " + cn) : tag,
+                    onClick: () => toggleHighlighted(tag),
+                    onContextmenu: e => showCtxMenu(e, tag, section.category),
+                  }, label);
+                })),
+              ]))),
+              h("div", { class: "dbs-detail-footer" }, [
+                h("div", { class: "dbs-add-tag-row" }, [
+                  h("select", {
+                    class: "dbs-select",
+                    value: addCategory.value,
+                    onChange: e => { addCategory.value = e.target.value; },
+                  }, TAG_CATEGORIES.map(c => h("option", { value: c.key }, c.label))),
+                  h("input", {
+                    class: "dbs-input-line",
+                    style: { flex: "1", margin: "0" },
+                    placeholder: "输入新标签，回车添加",
+                    value: addValue.value,
+                    onInput: e => { addValue.value = e.target.value; },
+                    onKeydown: e => { if (e.key === "Enter") { e.preventDefault(); addTag(); } },
+                  }),
+                  h("button", { class: "dbs-btn small", onClick: addTag }, "➕ 添加"),
+                ]),
+                h("div", { class: "dbs-detail-actions" }, [
+                  h("button", { class: "dbs-detail-btn", onClick: selectAllTags }, "全选"),
+                  h("button", { class: "dbs-detail-btn", onClick: () => highlighted.clear() }, "清除高亮"),
+                  h("button", { class: "dbs-detail-btn primary", onClick: addHighlighted }, "➕ 加入节点标签"),
+                  h("button", { class: "dbs-detail-btn primary", onClick: copyTags }, "📋 复制高亮标签"),
+                  h("button", { class: "dbs-detail-btn", disabled: !edited, onClick: doReset }, "🔄 重置标签"),
+                ]),
+              ]),
+            ]),
           ]),
 
           h(TagContextMenu, {
@@ -778,6 +892,8 @@ const GalleryPanel = {
     const selected = reactive(new Set());
     const selectedPosts = ref([]);
     const ratingFilter = ref("general");
+    const pageLimit = ref(PAGE_LIMIT);
+    const lazyLoadImages = ref(true);
 
     const gridRef = ref(null);
     const detailPost = ref(null);
@@ -812,7 +928,7 @@ const GalleryPanel = {
           body: JSON.stringify({
             tags: tags.value,
             page: pageNum,
-            limit: PAGE_LIMIT,
+            limit: pageLimit.value,
             rating_filter: ratingFilter.value,
           }),
         });
@@ -829,7 +945,9 @@ const GalleryPanel = {
             const merged = incoming.filter(p => !existIds.has(String(p.id)));
             posts.value = posts.value.concat(merged);
           }
-          hasMore.value = incoming.length >= PAGE_LIMIT;
+          hasMore.value = typeof data.has_more === "boolean"
+            ? data.has_more
+            : incoming.length >= pageLimit.value;
         } else {
           errorMsg.value = data.error || "搜索失败";
           if (replace) posts.value = [];
@@ -934,8 +1052,14 @@ const GalleryPanel = {
       try {
         const res = await fetch("/danbooru_search/settings");
         const data = await res.json();
-        if (data.success && data.settings?.rating_filter) {
-          ratingFilter.value = data.settings.rating_filter;
+        if (data.success && data.settings) {
+          if (data.settings.rating_filter) {
+            ratingFilter.value = data.settings.rating_filter;
+          }
+          lazyLoadImages.value = data.settings.lazy_load_images !== false;
+          // 缩略图并发设置只负责资源请求策略，不能改变远端分页大小或总量。
+          // 保持固定页大小；滚动到末端后继续异步请求下一页。
+          pageLimit.value = PAGE_LIMIT;
         }
       } catch (_) {
         // 设置接口不可用时沿用 general，不阻断图库。
@@ -988,6 +1112,7 @@ const GalleryPanel = {
                   class: ["dbg-card", isSelected ? "selected" : ""],
                   key: id,
                   onClick: () => toggleSelect(post),
+                  onContextmenu: e => { e.preventDefault(); openDetail(post, e); },
                 }, [
                   edited ? h("div", { class: "dbs-edited-badge" }, "已编辑") : null,
 
@@ -995,7 +1120,7 @@ const GalleryPanel = {
                     h("img", {
                       class: "dbg-img",
                       src: proxiedImageUrl(post.preview_file_url || post.large_file_url),
-                      loading: "lazy",
+                      loading: lazyLoadImages.value ? "lazy" : "eager",
                       onError: e => {
                         if (!e.target._errFixed) {
                           e.target._errFixed = true;
@@ -1068,6 +1193,66 @@ const TagEditor = {
     const hoverIndex = ref(-1);
     const dragIndex = ref(-1);
     const dropIndex = ref(-1);
+    const selectedKeys = ref(new Set());
+    const selectionAnchor = ref(-1);
+    const listElement = ref(null);
+    const marquee = ref(null);
+    const activeMajor = ref("");
+    const activeSub = ref("");
+    function itemKey(item) { return String(item?.tag || "") + "\u0000" + String(item?.source || ""); }
+    function setSelected(keys) { selectedKeys.value = new Set(keys); }
+    function selectChip(index, event) {
+      const items = props.tags || [];
+      const key = itemKey(items[index]);
+      const next = new Set(selectedKeys.value);
+      if (event.shiftKey && selectionAnchor.value >= 0) {
+        if (!event.ctrlKey && !event.metaKey) next.clear();
+        const [start, end] = [selectionAnchor.value, index].sort((a, b) => a - b);
+        for (let i = start; i <= end; i++) next.add(itemKey(items[i]));
+      } else if (event.ctrlKey || event.metaKey) {
+        next.has(key) ? next.delete(key) : next.add(key);
+        selectionAnchor.value = index;
+      } else if (!next.has(key)) {
+        next.clear(); next.add(key); selectionAnchor.value = index;
+      }
+      setSelected(next);
+    }
+    function startMarquee(event) {
+      if (event.button !== 0 || event.target.closest?.(".dbte-chip")) return;
+      const el = listElement.value;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (!event.ctrlKey && !event.metaKey) setSelected([]);
+      marquee.value = { startX: event.clientX - rect.left, startY: event.clientY - rect.top, x: event.clientX - rect.left, y: event.clientY - rect.top, w: 0, h: 0, additive: event.ctrlKey || event.metaKey, base: new Set(selectedKeys.value) };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    }
+    function moveMarquee(event) {
+      if (!marquee.value || !listElement.value) return;
+      const rect = listElement.value.getBoundingClientRect();
+      const currentX = event.clientX - rect.left;
+      const currentY = event.clientY - rect.top;
+      const box = {
+        ...marquee.value,
+        x: Math.min(marquee.value.startX, currentX),
+        y: Math.min(marquee.value.startY, currentY),
+        w: Math.abs(currentX - marquee.value.startX),
+        h: Math.abs(currentY - marquee.value.startY),
+      };
+      marquee.value = box;
+      const next = box.additive ? new Set(box.base) : new Set();
+      listElement.value.querySelectorAll(".dbte-chip[data-tag-key]").forEach(chip => {
+        const chipRect = chip.getBoundingClientRect();
+        const relative = { left: chipRect.left - rect.left, right: chipRect.right - rect.left, top: chipRect.top - rect.top, bottom: chipRect.bottom - rect.top };
+        if (relative.right >= box.x && relative.left <= box.x + box.w && relative.bottom >= box.y && relative.top <= box.y + box.h) next.add(chip.dataset.tagKey);
+      });
+      setSelected(next);
+    }
+    function finishMarquee(event) {
+      if (!marquee.value) return;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      marquee.value = null;
+    }
     function emit(items) { props.onChange && props.onChange(items); }
     function addManual() {
       const values = splitPromptTags(input.value);
@@ -1081,18 +1266,32 @@ const TagEditor = {
     function reorder(from, target) {
       if (from < 0 || target < 0 || from === target || from >= (props.tags || []).length || target >= (props.tags || []).length) return;
       const items = (props.tags || []).slice();
-      const [moving] = items.splice(from, 1);
-      items.splice(target, 0, moving);
-      emit(items);
-      if (editingIndex.value === from) editingIndex.value = target;
-      else if (editingIndex.value >= 0) editingIndex.value = -1;
-      hoverIndex.value = target;
+      const draggedKey = itemKey(items[from]);
+      if (!selectedKeys.value.has(draggedKey)) setSelected([draggedKey]);
+      const movingKeys = new Set(selectedKeys.value.has(draggedKey) ? selectedKeys.value : [draggedKey]);
+      const targetKey = itemKey(items[target]);
+      if (movingKeys.has(targetKey)) return;
+      const moving = items.filter(item => movingKeys.has(itemKey(item)));
+      const remaining = items.filter(item => !movingKeys.has(itemKey(item)));
+      const insertAt = Math.max(0, remaining.findIndex(item => itemKey(item) === targetKey));
+      remaining.splice(insertAt, 0, ...moving);
+      emit(remaining);
+      editingIndex.value = -1;
+      hoverIndex.value = Math.min(insertAt, remaining.length - 1);
     }
     function finishDrag() {
       dragIndex.value = -1;
       dropIndex.value = -1;
     }
     return () => {
+      const taxonomyGroups = buildTagTaxonomy(props.tags || []);
+      const grouped = danbooruUiSettings.groupOutputTags && taxonomyGroups.length > 0;
+      const currentMajor = taxonomyGroups.some(group => group.key === activeMajor.value) ? activeMajor.value : (taxonomyGroups[0]?.key || "");
+      const majorGroup = taxonomyGroups.find(group => group.key === currentMajor);
+      const currentSub = majorGroup?.subKeys.includes(activeSub.value) ? activeSub.value : (majorGroup?.subKeys[0] || "");
+      const visibleEntries = grouped
+        ? (majorGroup?.entries || []).filter(entry => !currentSub || entry.sub === currentSub)
+        : (props.tags || []).map((item, index) => ({ item, index }));
       const inspectorIndex = editingIndex.value >= 0 ? editingIndex.value : hoverIndex.value;
       const inspectorItem = (props.tags || [])[inspectorIndex];
       const inspectorCn = inspectorItem ? resolveTranslation(inspectorItem.tag, inspectorItem.translation) : "";
@@ -1113,6 +1312,8 @@ const TagEditor = {
         ]),
         props.gachaName ? h("span", { class: "dbs-gacha-name" }, props.gachaName) : null,
         props.gachaName ? h("button", { class: "dbs-btn small", onClick: props.onClearGacha }, "清除抽卡") : null,
+        selectedKeys.value.size ? h("span", { class: "dbte-selection-count" }, "已框选 " + selectedKeys.value.size) : null,
+        selectedKeys.value.size ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => selectedKeys.value.has(itemKey(item)) && item.enabled !== false).map(item => item.tag.replace(/_/g, " ")).join(", ")).catch(() => {}) }, "复制框选") : null,
         (props.tags || []).length ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => item.enabled !== false).map(item => {
           const tag = item.tag.replace(/_/g, " ");
           const weight = Number(item.weight == null ? 1 : item.weight);
@@ -1129,15 +1330,35 @@ const TagEditor = {
           onInput: e => { input.value = e.target.value; }, onKeydown: e => { if (e.key === "Enter") addManual(); } }),
         h("button", { class: "dbs-btn", onClick: addManual }, "+ 添加"),
       ]),
-      h("div", { class: "dbte-list" }, (props.tags || []).length ? (props.tags || []).map((item, index) => {
+      grouped ? h("div", { class: "dbte-taxonomy" }, [
+        h("div", { class: "dbte-major-tabs" }, taxonomyGroups.map(group => h("button", {
+          class: currentMajor === group.key ? "active" : "",
+          onClick: () => { activeMajor.value = group.key; activeSub.value = group.subKeys[0] || ""; },
+        }, [group.label, h("span", {}, String(group.entries.length))]))),
+        majorGroup?.subKeys.length > 1 ? h("div", { class: "dbte-sub-tabs" }, majorGroup.subKeys.map(key => h("button", {
+          class: currentSub === key ? "active" : "",
+          onClick: () => { activeSub.value = key; },
+        }, [TAG_SUBGROUP_LABELS[key] || key, h("span", {}, String(majorGroup.entries.filter(entry => entry.sub === key).length))]))) : null,
+      ]) : null,
+      h("div", {
+        class: "dbte-list",
+        ref: listElement,
+        onPointerdown: startMarquee,
+        onPointermove: moveMarquee,
+        onPointerup: finishMarquee,
+        onPointercancel: finishMarquee,
+      }, visibleEntries.length ? visibleEntries.map(({ item, index }) => {
         const cn = resolveTranslation(item.tag, item.translation);
+        const key = itemKey(item);
         const weight = Number(item.weight == null ? 1 : item.weight);
         const weightText = Number.isInteger(weight) ? weight.toFixed(1) : String(Math.round(weight * 100) / 100);
         return h("div", {
-          class: ["dbte-chip", "kind-" + (item.kind || item.category || "general"), item.enabled === false ? "disabled" : "", dragIndex.value === index ? "dragging" : "", dropIndex.value === index ? "drop-target" : ""],
+          class: ["dbte-chip", "kind-" + (item.kind || item.category || "general"), item.enabled === false ? "disabled" : "", selectedKeys.value.has(key) ? "group-selected" : "", dragIndex.value === index ? "dragging" : "", dropIndex.value === index ? "drop-target" : ""],
           key: (item.tag || "tag") + "-" + index,
+          "data-tag-key": key,
           draggable: true,
-          title: "按住拖拽排序；悬浮查看编辑器；右键固定；双击屏蔽/恢复输出",
+          title: "空白处拖框多选；Ctrl/Shift 追加；拖动任一已选标签可整组移动",
+          onPointerdown: e => selectChip(index, e),
           onMouseenter: () => { if (editingIndex.value < 0) hoverIndex.value = index; },
           onContextmenu: e => { e.preventDefault(); editingIndex.value = editingIndex.value === index ? -1 : index; },
           onDblclick: () => updateAt(index, { enabled: item.enabled === false }),
@@ -1156,12 +1377,12 @@ const TagEditor = {
         }, [
           h("span", { class: "dbte-drag-handle", title: "拖拽排序" }, "⠿"),
           h("span", { class: "dbte-text" }, [
-            h("span", { class: "dbte-name" }, item.tag.replace(/_/g, " ")),
-            h("span", { class: "dbte-cn" }, cn || "未翻译"),
+            danbooruUiSettings.tagDisplayLanguage !== "zh" || !cn ? h("span", { class: "dbte-name" }, item.tag.replace(/_/g, " ")) : h("span", { class: "dbte-name" }, cn),
+            danbooruUiSettings.tagDisplayLanguage === "bilingual" ? h("span", { class: "dbte-cn" }, cn || "未翻译") : null,
           ]),
           Math.abs(weight - 1) > 0.0001 ? h("span", { class: "dbte-weight-badge" }, weightText) : null,
         ]);
-      }) : [h("div", { class: "dbte-empty" }, "从语义搜索、图片详情高亮或角色抽卡加入标签")]),
+      }).concat(marquee.value ? [h("div", { class: "dbte-marquee", style: { left: marquee.value.x + "px", top: marquee.value.y + "px", width: marquee.value.w + "px", height: marquee.value.h + "px" } })] : []) : [h("div", { class: "dbte-empty" }, (props.tags || []).length ? "当前分类暂无标签" : "从语义搜索、图片详情高亮或角色抽卡加入标签")]),
       ]),
       inspectorItem ? h("div", { class: ["dbte-inspector", editingIndex.value >= 0 ? "pinned" : ""] }, [
         h("div", { class: "dbte-pop-head" }, [
@@ -1171,15 +1392,16 @@ const TagEditor = {
         ]),
         h("div", { class: "dbte-pop-row" }, [
           h("label", {}, ["用途 ", h("select", { class: "dbte-kind-select", value: inspectorItem.kind || "general", onChange: e => updateAt(inspectorIndex, { kind: e.target.value }) },
-            ["general", "outfit", "action", "scene", "composition", "lighting", "quality", "manual", "semantic", "detail"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))
+            ["general", "outfit", "action", "expression", "scene", "environment", "composition", "lighting", "quality", "manual", "semantic", "detail"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))
           )]),
           h("label", {}, ["Danbooru 类型 ", h("select", { class: "dbte-kind-select", value: inspectorItem.category || "general", onChange: e => updateAt(inspectorIndex, { category: e.target.value }) },
             ["general", "character", "copyright", "artist", "meta"].map(kind => h("option", { value: kind }, kind))
           )]),
-          h("label", {}, ["权重 ", h("input", { class: "dbte-weight", type: "number", min: -2, max: 2, step: 0.1, value: inspectorWeightText,
+          h("label", {}, ["权重 ", h("input", { class: "dbte-weight", type: "number", step: 0.1, value: inspectorWeightText,
+            title: "支持任意有限数值；常用范围通常为 0–2",
             style: { width: Math.max(3.5, inspectorWeightText.length + 1) + "ch" }, onChange: e => {
               const value = Number(e.target.value);
-              updateAt(inspectorIndex, { weight: Number.isFinite(value) ? Math.max(-2, Math.min(2, value)) : 1 });
+              updateAt(inspectorIndex, { weight: Number.isFinite(value) ? value : 1 });
             } })]),
         ]),
         h("label", { class: "dbte-translation" }, ["译名 ", h("input", { value: inspectorCn, placeholder: "可选中文说明", onChange: e => updateAt(inspectorIndex, { translation: e.target.value.trim() }) })]),
@@ -1249,8 +1471,16 @@ const SettingsDialog = {
   props: {
     visible: Boolean,
     onClose: Function,
+    onSaved: Function,
   },
   setup(props) {
+    const activeTab = ref("general");
+    const tagDisplayLanguage = ref("bilingual");
+    const groupOutputTags = ref(true);
+    const includeSelectedImageTags = ref(true);
+    const underscoreMode = ref("space");
+    const normalizePunctuation = ref(true);
+    const defaultGalleryCollapsed = ref(false);
     const modelPath = ref("");
     const username = ref("");
     const apiKey = ref("");
@@ -1259,19 +1489,102 @@ const SettingsDialog = {
     const proxyUrl = ref("");
     const apiBaseUrl = ref("https://danbooru.donmai.us");
     const enableModelCalls = ref(false);
-    const gachaProvider = ref("rules");
+    const searchMode = ref("hybrid");
+    const searchTopK = ref(80);
+    const searchResultLimit = ref(80);
+    const searchPopularityWeight = ref(0.15);
+    const searchTagTypes = ref(["General", "Artist", "Copyright", "Character", "Meta"]);
+    const gachaProvider = ref("database");
+    const gachaCounts = ref({ outfit: 2, action: 2, expression: 1, scene: 2, environment: 2, composition: 1, lighting: 1 });
+    const gachaAvoidDuplicates = ref(true);
+    const gachaSeed = ref(-1);
+    const gachaOnlineQuery = ref("");
+    const gachaMinPostCount = ref(5000);
     const gachaApiProfile = ref("");
     const gachaLocalUrl = ref("http://127.0.0.1:11434/v1");
     const gachaLocalModel = ref("");
     const gachaComfyModel = ref("");
     const gachaComfyDevice = ref("auto");
     const gachaComfyDtype = ref("bf16");
+    const exclusiveModelMemory = ref(true);
+    const historyLimit = ref(50);
+    const thumbnailConcurrency = ref(6);
+    const lazyLoadImages = ref(true);
     const gachaProfiles = ref([]);
     const localModels = ref([]);
     const tagDataStatus = ref(null);
     const reloadingTags = ref(false);
     const saving = ref(false);
     const errorMsg = ref("");
+    const importInput = ref(null);
+
+    const tabs = [
+      ["general", "通用"], ["connection", "Danbooru 连接"], ["search", "搜索与匹配"],
+      ["data", "标签数据"], ["gacha", "抽卡"], ["models", "模型"], ["workspace", "工作区与性能"],
+    ];
+
+    function applySettings(s) {
+      tagDisplayLanguage.value = s.tag_display_language || "bilingual";
+      groupOutputTags.value = s.group_output_tags !== false;
+      includeSelectedImageTags.value = s.include_selected_image_tags !== false;
+      applyDanbooruUiSettings(s);
+      underscoreMode.value = s.underscore_mode || "space";
+      normalizePunctuation.value = s.normalize_punctuation !== false;
+      defaultGalleryCollapsed.value = s.default_gallery_collapsed === true;
+      modelPath.value = s.model_path || "";
+      username.value = s.danbooru_username || "";
+      apiKey.value = s.danbooru_api_key || "";
+      ratingFilter.value = s.rating_filter || "general";
+      hideAi.value = s.hide_ai !== false;
+      proxyUrl.value = s.proxy_url || "";
+      apiBaseUrl.value = s.api_base_url || "https://danbooru.donmai.us";
+      searchMode.value = s.search_mode || "hybrid";
+      searchTopK.value = Number(s.search_top_k || 80);
+      searchResultLimit.value = Number(s.search_result_limit || 80);
+      searchPopularityWeight.value = Number(s.search_popularity_weight ?? 0.15);
+      searchTagTypes.value = Array.isArray(s.search_tag_types) ? s.search_tag_types.slice() : ["General", "Artist", "Copyright", "Character", "Meta"];
+      enableModelCalls.value = s.enable_model_calls === true;
+      gachaProvider.value = s.gacha_provider || "database";
+      gachaCounts.value = { ...gachaCounts.value, ...(s.gacha_category_counts || {}) };
+      gachaAvoidDuplicates.value = s.gacha_avoid_duplicates !== false;
+      gachaSeed.value = Number(s.gacha_seed ?? -1);
+      gachaOnlineQuery.value = s.gacha_online_query || "";
+      gachaMinPostCount.value = Number(s.gacha_min_post_count || 5000);
+      gachaApiProfile.value = s.gacha_api_profile || "";
+      gachaLocalUrl.value = s.gacha_local_url || "http://127.0.0.1:11434/v1";
+      gachaLocalModel.value = s.gacha_local_model || "";
+      gachaComfyModel.value = s.gacha_comfy_model || "";
+      gachaComfyDevice.value = s.gacha_comfy_device || "auto";
+      gachaComfyDtype.value = s.gacha_comfy_dtype || "bf16";
+      exclusiveModelMemory.value = s.exclusive_model_memory !== false;
+      historyLimit.value = Number(s.history_limit || 50);
+      thumbnailConcurrency.value = Number(s.thumbnail_concurrency || 6);
+      lazyLoadImages.value = s.lazy_load_images !== false;
+    }
+
+    function collectSettings() {
+      return {
+        tag_display_language: tagDisplayLanguage.value,
+        group_output_tags: groupOutputTags.value,
+        include_selected_image_tags: includeSelectedImageTags.value,
+        underscore_mode: underscoreMode.value, normalize_punctuation: normalizePunctuation.value,
+        default_gallery_collapsed: defaultGalleryCollapsed.value, model_path: modelPath.value,
+        danbooru_username: username.value, danbooru_api_key: apiKey.value,
+        rating_filter: ratingFilter.value, hide_ai: hideAi.value, proxy_url: proxyUrl.value,
+        api_base_url: apiBaseUrl.value, search_mode: searchMode.value,
+        search_top_k: searchTopK.value, search_result_limit: searchResultLimit.value,
+        search_popularity_weight: searchPopularityWeight.value, search_tag_types: searchTagTypes.value,
+        enable_model_calls: enableModelCalls.value, gacha_provider: gachaProvider.value,
+        gacha_category_counts: gachaCounts.value, gacha_avoid_duplicates: gachaAvoidDuplicates.value,
+        gacha_seed: gachaSeed.value, gacha_online_query: gachaOnlineQuery.value,
+        gacha_min_post_count: gachaMinPostCount.value, gacha_api_profile: gachaApiProfile.value,
+        gacha_local_url: gachaLocalUrl.value, gacha_local_model: gachaLocalModel.value,
+        gacha_comfy_model: gachaComfyModel.value, gacha_comfy_device: gachaComfyDevice.value,
+        gacha_comfy_dtype: gachaComfyDtype.value, exclusive_model_memory: exclusiveModelMemory.value,
+        history_limit: historyLimit.value, thumbnail_concurrency: thumbnailConcurrency.value,
+        lazy_load_images: lazyLoadImages.value,
+      };
+    }
 
     async function loadSettings() {
       errorMsg.value = "";
@@ -1280,21 +1593,7 @@ const SettingsDialog = {
         const data = await res.json();
 
         if (data.success && data.settings) {
-          modelPath.value = data.settings.model_path || "";
-          username.value = data.settings.danbooru_username || "";
-          apiKey.value = data.settings.danbooru_api_key || "";
-          ratingFilter.value = data.settings.rating_filter || "general";
-          hideAi.value = data.settings.hide_ai !== false;
-          proxyUrl.value = data.settings.proxy_url || "";
-          apiBaseUrl.value = data.settings.api_base_url || "https://danbooru.donmai.us";
-          enableModelCalls.value = data.settings.enable_model_calls === true;
-          gachaProvider.value = data.settings.gacha_provider || "rules";
-          gachaApiProfile.value = data.settings.gacha_api_profile || "";
-          gachaLocalUrl.value = data.settings.gacha_local_url || "http://127.0.0.1:11434/v1";
-          gachaLocalModel.value = data.settings.gacha_local_model || "";
-          gachaComfyModel.value = data.settings.gacha_comfy_model || "";
-          gachaComfyDevice.value = data.settings.gacha_comfy_device || "auto";
-          gachaComfyDtype.value = data.settings.gacha_comfy_dtype || "bf16";
+          applySettings(data.settings);
         } else {
           errorMsg.value = data.error || "读取设置失败";
         }
@@ -1322,28 +1621,15 @@ const SettingsDialog = {
         const res = await fetch("/danbooru_search/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model_path: modelPath.value,
-            danbooru_username: username.value,
-            danbooru_api_key: apiKey.value,
-            rating_filter: ratingFilter.value,
-            hide_ai: hideAi.value,
-            proxy_url: proxyUrl.value,
-            api_base_url: apiBaseUrl.value,
-            enable_model_calls: enableModelCalls.value,
-            gacha_provider: gachaProvider.value,
-            gacha_api_profile: gachaApiProfile.value,
-            gacha_local_url: gachaLocalUrl.value,
-            gacha_local_model: gachaLocalModel.value,
-            gacha_comfy_model: gachaComfyModel.value,
-            gacha_comfy_device: gachaComfyDevice.value,
-            gacha_comfy_dtype: gachaComfyDtype.value,
-          }),
+          body: JSON.stringify(collectSettings()),
         });
         const data = await res.json();
         if (!res.ok || !data.success) {
           throw new Error(data.error || ("HTTP " + res.status));
         }
+        const savedSettings = data.settings || collectSettings();
+        applyDanbooruUiSettings(savedSettings);
+        if (props.onSaved) props.onSaved(savedSettings);
         if (props.onClose) props.onClose();
       } catch (e) {
         errorMsg.value = "保存失败: " + e.message;
@@ -1370,6 +1656,45 @@ const SettingsDialog = {
       }
     }
 
+    async function unloadModel(kind) {
+      errorMsg.value = "";
+      try {
+        const res = await fetch("/danbooru_search/unload_" + kind + "_model", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || ("HTTP " + res.status));
+        errorMsg.value = "✅ " + data.message;
+      } catch (error) { errorMsg.value = "释放模型失败: " + error.message; }
+    }
+
+    async function testDanbooru() {
+      errorMsg.value = "正在测试 Danbooru…";
+      try {
+        const res = await fetch("/danbooru_search/api/posts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tags: "", page: 1, limit: 1, rating_filter: ratingFilter.value }) });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || ("HTTP " + res.status));
+        errorMsg.value = "✅ Danbooru 连接正常";
+      } catch (error) { errorMsg.value = "连接失败: " + error.message; }
+    }
+
+    function exportSettings() {
+      const blob = new Blob([JSON.stringify(collectSettings(), null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url; anchor.download = "danbooru_search_settings.json"; anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function importSettings(event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      try {
+        const value = JSON.parse(await file.text());
+        applySettings(value);
+        errorMsg.value = "✅ 设置已导入到界面，点击保存后生效";
+      } catch (error) { errorMsg.value = "导入失败: " + error.message; }
+      event.target.value = "";
+    }
+
     watch(() => props.visible, (visible) => {
       if (visible) loadSettings();
     }, { immediate: true });
@@ -1377,151 +1702,122 @@ const SettingsDialog = {
     return () => {
       if (!props.visible) return h("div");
 
+      const row = (label, control, hint = "") => h("div", { class: "dbs-setting-row" }, [
+        h("div", { class: "dbs-setting-label" }, label),
+        h("div", { class: "dbs-setting-control" }, [control, hint ? h("small", {}, hint) : null]),
+      ]);
+      const section = (title, children, desc = "") => h("section", { class: "dbs-setting-section" }, [
+        h("h4", {}, title), desc ? h("p", { class: "dbs-setting-desc" }, desc) : null, ...children,
+      ]);
+      const select = (value, onchange, options) => h("select", { class: "dbs-input-line", value, onChange: e => onchange(e.target.value) }, options.map(option => h("option", { value: option[0], disabled: !!option[2] }, option[1])));
+      const numberInput = (value, onchange, min, max, step = 1) => h("input", { class: "dbs-input-line", type: "number", value, min, max, step, onInput: e => onchange(Number(e.target.value)) });
+      let panel;
+      if (activeTab.value === "general") panel = [
+        section("基础显示", [
+          row("标签显示", select(tagDisplayLanguage.value, v => { tagDisplayLanguage.value = v; }, [["bilingual", "英文 + 中文（两行）"], ["en", "仅英文"], ["zh", "仅中文"]])),
+          row("标签二级分组", h("input", { type: "checkbox", checked: groupOutputTags.value, onChange: e => { groupOutputTags.value = e.target.checked; } }), "按人物、服饰、动作表情、场景环境、构图画面二级整理；仅改变显示，不加载模型"),
+          row("选图合并完整标签", h("input", { type: "checkbox", checked: includeSelectedImageTags.value, onChange: e => { includeSelectedImageTags.value = e.target.checked; } }), "选中图片后，执行时同时输出该图片的完整 Danbooru 标签；关闭后仅输出上方标签编辑区"),
+          row("下划线输出", select(underscoreMode.value, v => { underscoreMode.value = v; }, [["space", "输出时转为空格"], ["keep", "保留下划线"]])),
+          row("标点规范化", h("input", { type: "checkbox", checked: normalizePunctuation.value, onChange: e => { normalizePunctuation.value = e.target.checked; } }), "把中文逗号、分号和顿号统一识别为标签分隔符"),
+          row("默认折叠画廊", h("input", { type: "checkbox", checked: defaultGalleryCollapsed.value, onChange: e => { defaultGalleryCollapsed.value = e.target.checked; } })),
+        ]),
+      ];
+      else if (activeTab.value === "connection") panel = [
+        section("Danbooru API 与账户", [
+          row("用户名", h("input", { class: "dbs-input-line", value: username.value, placeholder: "可选", onInput: e => { username.value = e.target.value; } })),
+          row("API Key", h("input", { class: "dbs-input-line", type: "password", value: apiKey.value, placeholder: "可选", onInput: e => { apiKey.value = e.target.value; } })),
+          row("API 基址", h("input", { class: "dbs-input-line", value: apiBaseUrl.value, onInput: e => { apiBaseUrl.value = e.target.value; } }), "支持官方地址或你信任的 HTTPS 反代；本机可使用 HTTP"),
+          row("本地代理", h("input", { class: "dbs-input-line", value: proxyUrl.value, placeholder: "例如 http://127.0.0.1:7890", onInput: e => { proxyUrl.value = e.target.value; } })),
+          row("默认评级", select(ratingFilter.value, v => { ratingFilter.value = v; }, RATING_OPTIONS.map(item => [item.value, item.label]))),
+          row("隐藏 AI 图片", h("input", { type: "checkbox", checked: hideAi.value, onChange: e => { hideAi.value = e.target.checked; } }), "在响应后过滤，不占用匿名 API 的标签额度"),
+          h("button", { class: "dbs-btn", onClick: testDanbooru }, "测试连接"),
+        ]),
+      ];
+      else if (activeTab.value === "search") panel = [
+        section("搜索与排序", [
+          row("搜索模式", select(searchMode.value, v => { searchMode.value = v; }, [["direct", "直接标签"], ["semantic", "语义搜索"], ["hybrid", "混合搜索"]])),
+          row("Top K", numberInput(searchTopK.value, v => { searchTopK.value = Math.max(1, Math.min(200, v || 1)); }, 1, 200)),
+          row("结果上限", numberInput(searchResultLimit.value, v => { searchResultLimit.value = Math.max(10, Math.min(200, v || 10)); }, 10, 200, 10)),
+          row("热度权重", numberInput(searchPopularityWeight.value, v => { searchPopularityWeight.value = Math.max(0, Math.min(1, v || 0)); }, 0, 1, 0.05)),
+          row("标签类型", h("div", { class: "dbs-setting-checks" }, ["General", "Artist", "Copyright", "Character", "Meta"].map(type => h("label", {}, [h("input", { type: "checkbox", checked: searchTagTypes.value.includes(type), onChange: e => { searchTagTypes.value = e.target.checked ? [...new Set([...searchTagTypes.value, type])] : searchTagTypes.value.filter(v => v !== type); } }), type])))),
+        ], "直接搜索不加载模型；语义/混合搜索才按需加载语义编码器。"),
+      ];
+      else if (activeTab.value === "data") panel = [
+        section("标签数据", [
+          h("div", { class: "dbs-status-card" }, tagDataStatus.value?.tags?.exists ? [
+            h("strong", {}, (tagDataStatus.value.translations_in_memory || 0) + " 条标签"),
+            h("span", {}, "更新: " + (tagDataStatus.value.tags.modified || "未知")),
+            h("code", { title: tagDataStatus.value.tags.path }, tagDataStatus.value.tags.path),
+          ] : "未找到 tags_enhanced.csv"),
+          h("button", { class: "dbs-btn", disabled: reloadingTags.value, onClick: reloadTagData }, reloadingTags.value ? "重载中…" : "重新载入 CSV / Parquet"),
+        ]),
+        section("语义编码器（只用于语义搜索）", [
+          row("已扫描模型", select(modelPath.value, v => { modelPath.value = v; }, [["", "默认 BAAI/bge-m3"], ...localModels.value.filter(model => model.semantic).map(model => [model.name, model.name])])),
+          row("自定义路径", h("input", { class: "dbs-input-line", value: modelPath.value, placeholder: "models/LLM/...、models/text_encoders/... 或绝对路径", onInput: e => { modelPath.value = e.target.value; } })),
+          h("button", { class: "dbs-btn danger", onClick: () => unloadModel("semantic") }, "卸载语义模型"),
+        ], "下拉值保存为 ComfyUI models 相对路径；也支持自定义绝对目录。纯 CLIP/T5 可能不兼容 SentenceTransformer。"),
+      ];
+      else if (activeTab.value === "gacha") panel = [
+        section("抽卡来源", [
+          row("生成方式", select(gachaProvider.value, v => { gachaProvider.value = v; }, [
+            ["database", "本地标签数据文件（零模型 / 零网络）"],
+            ["danbooru_random", "Danbooru 随机帖子（零模型）"],
+            ["gallery", "已选画廊图片（可选来源）"],
+            ["api_profile", "api_config.json 的 LLM Profile", !enableModelCalls.value],
+            ["local_openai", "本地 OpenAI 兼容服务", !enableModelCalls.value],
+            ["comfyui_model", "ComfyUI 本地生成模型", !enableModelCalls.value],
+          ])),
+          gachaProvider.value === "danbooru_random" ? row("在线基础标签", h("input", { class: "dbs-input-line", value: gachaOnlineQuery.value, placeholder: "可留空；匿名访问建议最多填写 1 个标签", onInput: e => { gachaOnlineQuery.value = e.target.value; } })) : null,
+          row("最低标签热度", numberInput(gachaMinPostCount.value, v => { gachaMinPostCount.value = Math.max(0, v || 0); }, 0, 1000000, 100), "仅影响本地标签库，过滤冷门噪声标签"),
+          row("避免近期重复", h("input", { type: "checkbox", checked: gachaAvoidDuplicates.value, onChange: e => { gachaAvoidDuplicates.value = e.target.checked; } })),
+          row("随机种子", numberInput(gachaSeed.value, v => { gachaSeed.value = Number.isFinite(v) ? v : -1; }, -1, 2147483647), "-1 每次随机；固定值便于复现"),
+        ], "本地标签库和 Danbooru 在线随机都不需要选择图片，也不会加载模型。在线随机从同一帖子取共现标签，不足的分类由本地库补齐。"),
+        section("类别配额", [h("div", { class: "dbs-gacha-counts" }, Object.entries(PROMPT_KIND_LABELS || { outfit: "服装", action: "动作", expression: "表情", scene: "场景", environment: "环境", composition: "构图", lighting: "光照" }).map(([kind, label]) => h("label", {}, [h("span", {}, label), numberInput(gachaCounts.value[kind] ?? 0, v => { gachaCounts.value = { ...gachaCounts.value, [kind]: Math.max(0, Math.min(5, v || 0)) }; }, 0, 5)])))]),
+      ];
+      else if (activeTab.value === "models") panel = [
+        section("调用总开关", [
+          row("允许 LLM / API", h("input", { type: "checkbox", checked: enableModelCalls.value, onChange: e => { enableModelCalls.value = e.target.checked; } }), "工作流执行时还必须把节点 enable_language_model 端口设为 true"),
+          row("显存互斥", h("input", { type: "checkbox", checked: exclusiveModelMemory.value, onChange: e => { exclusiveModelMemory.value = e.target.checked; } }), "加载本地生成模型前释放语义模型；开始语义搜索前释放生成模型"),
+        ]),
+        section("Eagle API Profiles", [
+          h("div", { class: "dbs-profile-list" }, gachaProfiles.value.length ? gachaProfiles.value.map(profile => h("div", { class: "dbs-profile-row" }, [h("strong", {}, profile.name), h("span", {}, profile.model || "未填写模型"), h("small", {}, profile.base_url || "")])) : [h("div", { class: "dbs-settings-note" }, "api_config.json 中没有 LLM Profile")]),
+          row("抽卡 Profile", select(gachaApiProfile.value, v => { gachaApiProfile.value = v; }, [["", "使用当前激活 LLM"], ...gachaProfiles.value.map(profile => [profile.name, profile.name + (profile.model ? " · " + profile.model : "")])])),
+        ], "这里只读取 api_config.json 的安全摘要；新增、编辑和删除仍由 Eagle API 配置加载器统一同步。"),
+        section("本地服务与 ComfyUI 生成模型", [
+          row("服务 URL", h("input", { class: "dbs-input-line", value: gachaLocalUrl.value, onInput: e => { gachaLocalUrl.value = e.target.value; } })),
+          row("服务模型名", h("input", { class: "dbs-input-line", value: gachaLocalModel.value, onInput: e => { gachaLocalModel.value = e.target.value; } })),
+          row("ComfyUI 模型", select(gachaComfyModel.value, v => { gachaComfyModel.value = v; }, [["", "请选择本地生成模型"], ...localModels.value.filter(model => model.generative).map(model => [model.name, model.name])])),
+          h("div", { class: "dbs-inline-settings" }, [row("设备", select(gachaComfyDevice.value, v => { gachaComfyDevice.value = v; }, [["auto", "auto"], ["cuda", "cuda"], ["cpu", "cpu"]])), row("精度", select(gachaComfyDtype.value, v => { gachaComfyDtype.value = v; }, [["bf16", "bf16"], ["fp16", "fp16"], ["fp32", "fp32"]]))]),
+          h("button", { class: "dbs-btn danger", onClick: () => unloadModel("language") }, "卸载本地生成模型"),
+        ], "models/LLM 与 models/text_encoders 会同时扫描；只有配置声明为生成架构的模型进入此下拉。"),
+      ];
+      else panel = [
+        section("工作区", [
+          row("历史上限", numberInput(historyLimit.value, v => { historyLimit.value = Math.max(10, Math.min(500, v || 10)); }, 10, 500, 10)),
+          h("div", { class: "dbs-setting-actions" }, [
+            h("button", { class: "dbs-btn", onClick: exportSettings }, "导出设置"),
+            h("button", { class: "dbs-btn", onClick: () => importInput.value?.click() }, "导入设置"),
+            h("input", { ref: importInput, type: "file", accept: ".json,application/json", style: { display: "none" }, onChange: importSettings }),
+          ]),
+        ]),
+        section("性能", [
+          row("缩略图并发", numberInput(thumbnailConcurrency.value, v => { thumbnailConcurrency.value = Math.max(1, Math.min(16, v || 1)); }, 1, 16)),
+          row("缩略图懒加载", h("input", { type: "checkbox", checked: lazyLoadImages.value, onChange: e => { lazyLoadImages.value = e.target.checked; } }), "只在进入可视区时加载图片，降低节点展开时的带宽和内存占用"),
+        ]),
+      ];
+
       return h("div", { class: "dbs-modal-backdrop", onClick: props.onClose }, [
         h("div", {
           class: "dbs-modal dbs-settings-modal",
           onClick: e => e.stopPropagation(),
         }, [
-          h("h3", {}, "⚙ 设置"),
-
-          h("label", { style: { marginTop: "12px" } }, "Danbooru 用户名（可选）"),
-          h("input", {
-            class: "dbs-input-line",
-            value: username.value,
-            placeholder: "用于访问 R-18 内容",
-            onInput: e => { username.value = e.target.value; },
-          }),
-
-          h("label", { style: { marginTop: "8px" } }, "Danbooru API Key（可选）"),
-          h("input", {
-            class: "dbs-input-line",
-            type: "password",
-            value: apiKey.value,
-            placeholder: "在 danbooru.donmai.us/profile 获取",
-            onInput: e => { apiKey.value = e.target.value; },
-          }),
-
-          h("label", { style: { marginTop: "12px" } }, "默认评级过滤"),
-          h("select", {
-            class: "dbs-input-line",
-            value: ratingFilter.value,
-            onChange: e => { ratingFilter.value = e.target.value; },
-          }, RATING_OPTIONS.map(o => h("option", { value: o.value }, o.label))),
-
-          h("label", { class: "dbs-check", style: { marginTop: "12px" } }, [
-            h("input", {
-              type: "checkbox",
-              checked: hideAi.value,
-              onChange: e => { hideAi.value = e.target.checked; },
-            }),
-            " 隐藏 AI 生成图片",
+          h("div", { class: "dbs-settings-head" }, [h("div", {}, [h("h3", {}, "⚙ Danbooru 标签搜索设置"), h("small", {}, "搜索、抽卡、模型与工作区资源独立管理")]), h("button", { class: "dbs-btn", onClick: props.onClose }, "×")]),
+          h("div", { class: "dbs-settings-shell" }, [
+            h("nav", { class: "dbs-settings-nav" }, tabs.map(tab => h("button", { class: activeTab.value === tab[0] ? "active" : "", onClick: () => { activeTab.value = tab[0]; } }, tab[1]))),
+            h("main", { class: "dbs-settings-content" }, panel),
           ]),
-
-          h("label", { style: { marginTop: "12px" } }, "本地代理地址（连不上 danbooru.donmai.us 时填这个）"),
-          h("input", {
-            class: "dbs-input-line",
-            value: proxyUrl.value,
-            placeholder: "例如 http://127.0.0.1:7890，留空则直连",
-            onInput: e => { proxyUrl.value = e.target.value; },
-          }),
-
-          h("label", { style: { marginTop: "12px" } }, "Danbooru API 基址（高级）"),
-          h("input", {
-            class: "dbs-input-line",
-            value: apiBaseUrl.value,
-            placeholder: "https://danbooru.donmai.us",
-            onInput: e => { apiBaseUrl.value = e.target.value; },
-          }),
-          h("div", {
-            style: { marginTop: "5px", color: "#8b8b96", fontSize: "11px", lineHeight: "1.4" },
-          }, "官方站被 Cloudflare 拦截时，可填写你信任的 Danbooru API 反代地址。"),
-
-          h("div", { class: "dbs-settings-separator" }, "标签数据与语义模型"),
-          h("label", {}, "语义搜索模型（models/text_encoders 或 models/LLM）"),
-          h("select", {
-            class: "dbs-input-line", value: modelPath.value,
-            onChange: e => { modelPath.value = e.target.value; },
-          }, [h("option", { value: "" }, "默认 BAAI/bge-m3")].concat(
-            modelPath.value && !localModels.value.some(model => model.path === modelPath.value)
-              ? [h("option", { value: modelPath.value }, "当前自定义路径")]
-              : [],
-            localModels.value.filter(model => model.semantic).map(model => h("option", { value: model.path }, model.name))
-          )),
-          h("label", { style: { marginTop: "8px" } }, "或手动填写 SentenceTransformer 模型路径"),
-          h("input", { class: "dbs-input-line", value: modelPath.value, placeholder: "留空使用 BAAI/bge-m3", onInput: e => { modelPath.value = e.target.value; } }),
-          h("div", { class: "dbs-settings-note" }, "语义搜索要求模型兼容 SentenceTransformer；纯 CLIP/T5 即使能列出，也可能不兼容。顶部路径框仍可手动填写任意本地路径。"),
-          h("div", { class: "dbs-tag-data-row" }, [
-            h("button", { class: "dbs-btn", disabled: reloadingTags.value, onClick: reloadTagData }, reloadingTags.value ? "重载中…" : "🔄 重新载入标签数据"),
-            h("span", { class: "dbs-settings-note" }, tagDataStatus.value?.tags?.exists
-              ? ((tagDataStatus.value.translations_in_memory || 0) + " 条 · " + (tagDataStatus.value.tags.modified || "时间未知"))
-              : "未找到 tags_enhanced.csv"),
-          ]),
-          tagDataStatus.value?.tags?.path ? h("div", { class: "dbs-data-path", title: tagDataStatus.value.tags.path }, tagDataStatus.value.tags.path) : null,
-
-          h("div", { class: "dbs-settings-separator" }, "角色外内容抽卡"),
-          h("label", { class: "dbs-check dbs-model-master-switch" }, [
-            h("input", { type: "checkbox", checked: enableModelCalls.value, onChange: e => { enableModelCalls.value = e.target.checked; } }),
-            h("span", {}, [h("strong", {}, "允许语言模型 / API 调用"), h("small", {}, "关闭时绝不加载生成模型，也不请求 LLM API")]),
-          ]),
-          h("label", {}, "抽卡生成方式"),
-          h("select", {
-            class: "dbs-input-line",
-            value: gachaProvider.value,
-            onChange: e => { gachaProvider.value = e.target.value; },
-          }, [
-            h("option", { value: "rules" }, "本地规则引擎（推荐，零模型占用）"),
-            h("option", { value: "gallery" }, "从已选画廊图片抽取标签（零模型占用）"),
-            h("option", { value: "api_profile", disabled: !enableModelCalls.value }, "api_config.json 中的大语言模型"),
-            h("option", { value: "local_openai", disabled: !enableModelCalls.value }, "本地 OpenAI 兼容服务"),
-            h("option", { value: "comfyui_model", disabled: !enableModelCalls.value }, "ComfyUI models 中的本地生成模型"),
-          ]),
-
-          gachaProvider.value === "api_profile" ? h("div", {}, [
-            h("label", { style: { marginTop: "8px" } }, "API 模型配置"),
-            h("select", {
-              class: "dbs-input-line",
-              value: gachaApiProfile.value,
-              onChange: e => { gachaApiProfile.value = e.target.value; },
-            }, [h("option", { value: "" }, "使用 api_config 当前激活模型")].concat(
-              gachaProfiles.value.map(p => h("option", { value: p.name }, p.name + (p.model ? " · " + p.model : "")))
-            )),
-          ]) : null,
-
-          gachaProvider.value === "local_openai" ? h("div", {}, [
-            h("label", { style: { marginTop: "8px" } }, "本地服务 URL"),
-            h("input", {
-              class: "dbs-input-line", value: gachaLocalUrl.value,
-              placeholder: "Ollama / LM Studio / llama.cpp，例如 http://127.0.0.1:11434/v1",
-              onInput: e => { gachaLocalUrl.value = e.target.value; },
-            }),
-            h("label", { style: { marginTop: "8px" } }, "模型名称或路径（作为 model 参数）"),
-            h("input", {
-              class: "dbs-input-line", value: gachaLocalModel.value,
-              placeholder: "例如 qwen2.5:7b；由本地服务负责加载模型",
-              onInput: e => { gachaLocalModel.value = e.target.value; },
-            }),
-          ]) : null,
-          gachaProvider.value === "comfyui_model" ? h("div", {}, [
-            h("label", { style: { marginTop: "8px" } }, "本地生成模型"),
-            h("select", {
-              class: "dbs-input-line", value: gachaComfyModel.value,
-              onChange: e => { gachaComfyModel.value = e.target.value; },
-            }, [h("option", { value: "" }, "请选择模型")].concat(
-              localModels.value.filter(model => model.generative).map(model => h("option", { value: model.name }, model.name))
-            )),
-            h("div", { class: "dbs-inline-settings" }, [
-              h("label", {}, ["设备", h("select", { class: "dbs-input-line", value: gachaComfyDevice.value, onChange: e => { gachaComfyDevice.value = e.target.value; } },
-                ["auto", "cuda", "cpu"].map(value => h("option", { value }, value)))]),
-              h("label", {}, ["精度", h("select", { class: "dbs-input-line", value: gachaComfyDtype.value, onChange: e => { gachaComfyDtype.value = e.target.value; } },
-                ["bf16", "fp16", "fp32"].map(value => h("option", { value }, value)))]),
-            ]),
-            h("div", { class: "dbs-settings-note" }, "复用“本地大模型反推”的模型缓存。首次使用会加载模型；纯编码器不会出现在此下拉框。"),
-          ]) : null,
-          h("div", { class: "dbs-settings-note" }, "模型仅负责根据前置角色/风格约束编排服装、动作、场景、构图和光照。自动执行还必须把节点左侧 enable_language_model 端口设为 true；任一开关关闭都不会加载模型。"),
-
-          errorMsg.value ? h("div", { class: "dbs-error", style: { marginTop: "10px" } }, errorMsg.value) : null,
-
-          h("div", { class: "dbs-modal-actions" }, [
+          errorMsg.value ? h("div", { class: ["dbs-settings-message", errorMsg.value.startsWith("✅") ? "ok" : ""] }, errorMsg.value) : null,
+          h("div", { class: "dbs-modal-actions dbs-settings-footer" }, [
             h("button", { class: "dbs-btn", onClick: props.onClose }, "取消"),
             h("button", {
               class: "dbs-btn primary",
@@ -1601,7 +1897,7 @@ const DanbooruSearchApp = {
       gachaStatus.value = "";
       try {
         const currentContext = selectedOutputTags.value
-          .filter(item => item.enabled !== false && item.source !== "gacha")
+          .filter(item => item.enabled !== false && !isGachaItem(item))
           .map(item => item.tag).join(", ");
         const response = await fetch("/danbooru_search/gacha", {
           method: "POST",
@@ -1620,9 +1916,10 @@ const DanbooruSearchApp = {
         }
         if (!response.ok || !data.success) throw new Error(data.error || ("HTTP " + response.status));
         lastGachaCard.value = data.name || "新组合";
-        const kept = selectedOutputTags.value.filter(item => item.source !== "gacha");
+        const kept = selectedOutputTags.value.filter(item => !isGachaItem(item));
         selectedOutputTags.value = mergeTagItems(kept, data.tags || [], { source: "gacha" });
-        gachaStatus.value = data.warning ? ("已回退规则卡：" + data.warning) : (data.provider === "rules" ? "本地规则卡" : data.provider === "gallery" ? "已选画廊标签组合" : "模型智能编排");
+        const providerLabels = { database: "本地标签库", danbooru_random: "Danbooru 在线共现", gallery: "已选画廊标签组合", rules: "旧版规则卡" };
+        gachaStatus.value = data.warning ? data.warning : (providerLabels[data.provider] || "语言模型智能编排");
         syncSelection();
       } catch (error) {
         gachaStatus.value = "抽卡失败：" + error.message;
@@ -1632,7 +1929,7 @@ const DanbooruSearchApp = {
     }
 
     function clearGacha() {
-      selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+      selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
       lastGachaCard.value = "";
       gachaStatus.value = "";
       syncSelection();
@@ -1683,7 +1980,7 @@ const DanbooruSearchApp = {
         if (Array.isArray(saved.selected_tags)) selectedOutputTags.value = saved.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
         galleryCollapsed.value = !!saved.gallery_collapsed;
         autoGacha.value = !!saved.auto_gacha;
-        if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+        if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
         gachaContext.value = saved.gacha_context || "";
       } catch (_) {
         // 旧工作流值损坏时忽略，仍继续尝试服务端缓存。
@@ -1697,14 +1994,21 @@ const DanbooruSearchApp = {
             if (Array.isArray(data.selected_tags)) selectedOutputTags.value = data.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
             galleryCollapsed.value = !!data.gallery_collapsed;
             if (typeof data.auto_gacha === "boolean") autoGacha.value = data.auto_gacha;
-            if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+            if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
             if (typeof data.gacha_context === "string") gachaContext.value = data.gacha_context;
           }
         })
         .catch(() => {});
     }
 
-    onMounted(() => {
+    onMounted(async () => {
+      try {
+        const response = await fetch("/danbooru_search/settings");
+        const data = await response.json();
+        if (response.ok && data.success && data.settings) applyDanbooruUiSettings(data.settings);
+      } catch (_) {
+        // 设置读取失败不阻断节点加载，使用模块内默认值。
+      }
       setTimeout(restoreSelection, 500);
     });
 
@@ -1726,7 +2030,7 @@ const DanbooruSearchApp = {
             onAutoGacha: value => {
               autoGacha.value = value;
               if (value) {
-                selectedOutputTags.value = selectedOutputTags.value.filter(item => item.source !== "gacha");
+                selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
                 lastGachaCard.value = "";
                 gachaStatus.value = "已启用：每次执行根据 character_tags 动态生成，界面不显示过期抽卡标签";
               }
@@ -1779,6 +2083,7 @@ const DanbooruSearchApp = {
           ? h(SettingsDialog, {
               visible: true,
               onClose: () => { settingsOpen.value = false; },
+              onSaved: applyDanbooruUiSettings,
             })
           : null,
       ]);
@@ -1795,7 +2100,12 @@ const CSS = `
 .dbs-root {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
   background: #1a1a1e;
   color: #ddd;
   font-family: sans-serif;
@@ -1852,18 +2162,31 @@ const CSS = `
 .dbte-tip { color: #7f8794; font-size: 10px; white-space: nowrap; padding: 0 4px; }
 .dbte-add { display: flex; align-items:center; gap: 6px; }
 .dbte-add .dbs-input-line { margin: 0; min-width: 160px; flex:1; }
-.dbte-list { display: flex; flex-wrap: wrap; align-items:flex-start; gap: 5px; overflow-y: auto; }
+.dbte-taxonomy { display:flex; flex-direction:column; gap:5px; padding:5px 6px; background:#15171c; border:1px solid #30343d; border-radius:6px; }
+.dbte-major-tabs,.dbte-sub-tabs { display:flex; align-items:center; flex-wrap:wrap; gap:4px; }
+.dbte-taxonomy button { display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border:1px solid #3e434d; border-radius:999px; background:#24272e; color:#aeb5c1; font-size:10px; cursor:pointer; }
+.dbte-taxonomy button:hover { border-color:#6081ae; color:#fff; }
+.dbte-taxonomy button.active { border-color:#4b87cb; background:#294b78; color:#fff; }
+.dbte-sub-tabs { padding-top:4px; border-top:1px solid #292d35; }
+.dbte-sub-tabs button { background:#1c2026; }
+.dbte-taxonomy button span { min-width:15px; padding:0 4px; border-radius:8px; background:#101216; color:#8e99a9; text-align:center; }
+.dbte-list { position:relative; display: flex; flex-wrap: wrap; align-items:flex-start; align-content:flex-start; gap: 5px; overflow-y: auto; }
 .dbte.expanded .dbte-list { align-content: flex-start; max-height:145px; }
 .dbte-empty { color: #666; padding: 6px; }
 .dbte-chip { position:relative; display: inline-flex; align-items: center; gap: 4px; min-height:31px; border: 1px solid #466985; background: #203746; border-radius: 5px; padding: 3px 6px; cursor:grab; user-select:none; }
 .dbte-chip:active { cursor:grabbing; }
 .dbte-chip.dragging { opacity:.28; transform:scale(.96); }
 .dbte-chip.drop-target { outline:2px solid #77aaff; outline-offset:2px; }
+.dbte-chip.group-selected { outline:2px solid #8fb8ff; outline-offset:1px; box-shadow:0 0 0 2px #17243c inset; }
+.dbte-selection-count { color:#9dc0ff; font-size:10px; white-space:nowrap; }
+.dbte-marquee { position:absolute; z-index:30; pointer-events:none; border:1px solid #6aa3ff; background:rgba(75,132,225,.2); border-radius:3px; }
 .dbte-drag-handle { color:#9aa1ae; font-size:13px; line-height:1; }
 .dbte-drag-note { color:#7f8795; font-size:10px; margin-right:auto; }
 .dbte-chip.kind-outfit { background:#3b3152; border-color:#775da2; }
 .dbte-chip.kind-action { background:#264936; border-color:#4c8b69; }
+.dbte-chip.kind-expression { background:#4a2f3d; border-color:#985c78; }
 .dbte-chip.kind-scene { background:#423b24; border-color:#8e7d3f; }
+.dbte-chip.kind-environment { background:#24453f; border-color:#4f8c7f; }
 .dbte-chip.kind-composition { background:#263d51; border-color:#4e7898; }
 .dbte-chip.kind-lighting { background:#4b3523; border-color:#9b6a3d; }
 .dbte-chip.kind-quality { background:#4c294c; border-color:#965696; }
@@ -2479,15 +2802,53 @@ const CSS = `
 
 /* 详情 / 编辑弹窗 */
 .dbs-detail-modal {
-  width: min(1080px, 90vw) !important;
-  max-height: 85vh;
+  width: min(1180px, 94vw) !important;
+  height: min(820px, 90vh);
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-sizing: border-box;
 }
-.dbs-settings-modal { width:min(760px,92%); max-height:86%; overflow-y:auto; box-sizing:border-box; }
+.dbs-settings-modal { width:min(980px,94%); height:min(720px,88%); max-height:88%; overflow:hidden; box-sizing:border-box; padding:0; display:flex; flex-direction:column; }
+.dbs-settings-head { min-height:58px; padding:12px 16px; border-bottom:1px solid #373741; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+.dbs-settings-head h3 { margin:0 0 3px; }
+.dbs-settings-head small { color:#777f8e; }
+.dbs-settings-shell { display:grid; grid-template-columns:180px minmax(0,1fr); flex:1; min-height:0; }
+.dbs-settings-nav { padding:10px 8px; border-right:1px solid #373741; background:#1c1d22; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+.dbs-settings-nav button { text-align:left; color:#aeb3be; background:transparent; border:1px solid transparent; border-radius:6px; padding:9px 10px; cursor:pointer; }
+.dbs-settings-nav button:hover { background:#292b32; color:#eee; }
+.dbs-settings-nav button.active { background:#294b79; border-color:#477fbd; color:#fff; }
+.dbs-settings-content { min-width:0; min-height:0; padding:14px; overflow-y:auto; background:#202126; }
+.dbs-setting-section { border:1px solid #393b45; border-radius:8px; background:#1b1c21; margin-bottom:12px; overflow:hidden; }
+.dbs-setting-section h4 { margin:0; padding:10px 12px; color:#e4e7ed; border-bottom:1px solid #343640; font-size:12px; }
+.dbs-setting-desc { margin:0; padding:8px 12px; color:#858c9b; background:#1e2026; line-height:1.45; }
+.dbs-setting-row { display:grid; grid-template-columns:150px minmax(0,1fr); gap:12px; align-items:start; padding:9px 12px; border-top:1px solid #2c2e36; }
+.dbs-setting-row:first-of-type { border-top:0; }
+.dbs-setting-label { color:#b9bec8; padding-top:6px; }
+.dbs-setting-control { min-width:0; }
+.dbs-setting-control .dbs-input-line { margin:0; }
+.dbs-setting-control small { display:block; color:#747c8b; margin-top:5px; line-height:1.4; }
+.dbs-setting-checks { display:flex; flex-wrap:wrap; gap:10px; padding:5px 0; }
+.dbs-setting-checks label { display:flex; align-items:center; gap:4px; margin:0; }
+.dbs-status-card { margin:10px 12px; padding:9px; border:1px solid #344b42; border-radius:6px; background:#1c2b25; display:flex; flex-direction:column; gap:4px; }
+.dbs-status-card code { color:#778397; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dbs-setting-section > .dbs-btn,.dbs-setting-section > .dbs-setting-actions { margin:0 12px 10px; }
+.dbs-gacha-counts { display:grid; grid-template-columns:repeat(4,minmax(110px,1fr)); gap:8px; padding:10px 12px; }
+.dbs-gacha-counts label { display:flex; align-items:center; gap:6px; margin:0; color:#bbb; }
+.dbs-gacha-counts label span { flex:1; }
+.dbs-gacha-counts .dbs-input-line { width:54px; margin:0; }
+.dbs-profile-list { margin:10px 12px; border:1px solid #343742; border-radius:6px; overflow:hidden; }
+.dbs-profile-row { display:grid; grid-template-columns:160px 1fr 1.3fr; gap:8px; padding:7px 9px; border-top:1px solid #30323b; }
+.dbs-profile-row:first-child { border-top:0; }
+.dbs-profile-row span,.dbs-profile-row small { color:#8c94a3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbs-setting-actions { display:flex; gap:8px; }
+.dbs-settings-message { padding:7px 14px; color:#ff9a9a; background:#351e22; border-top:1px solid #53343a; flex-shrink:0; }
+.dbs-settings-message.ok { color:#82d8a6; background:#183326; border-color:#295440; }
+.dbs-settings-footer { margin:0; padding:10px 14px; flex-shrink:0; background:#1c1d22; }
+@media (max-width:760px) { .dbs-settings-shell { grid-template-columns:130px minmax(0,1fr); } .dbs-setting-row { grid-template-columns:1fr; gap:4px; } .dbs-gacha-counts { grid-template-columns:repeat(2,1fr); } }
 
-.dbs-detail-body { display:grid; grid-template-columns:minmax(280px, 42%) 1fr; gap:14px; flex:1; min-height:0; overflow:hidden; }
+.dbs-detail-body { display:grid; grid-template-columns:minmax(300px, 44%) minmax(0, 1fr); gap:14px; flex:1; min-height:0; overflow:hidden; }
 
 .dbs-detail-header {
   display: flex;
@@ -2502,21 +2863,25 @@ const CSS = `
 .dbs-detail-preview {
   display: flex;
   justify-content: center;
-  align-items: center;
+  align-items: flex-start;
   background: #000;
   border-radius: 6px;
-  overflow: hidden;
+  overflow: auto;
   margin-bottom: 0;
-  min-height: 180px;
-  flex-shrink: 0;
+  min-height: 0;
 }
+.dbs-detail-preview img { display:block; width:auto; max-width:100%; height:auto; object-fit:contain; }
+.dbs-detail-side { min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 
 .dbs-detail-tags {
   flex: 1;
   overflow-y: auto;
-  margin-bottom: 12px;
+  margin-bottom: 0;
   min-height: 0;
+  padding-right: 6px;
+  scrollbar-gutter: stable;
 }
+.dbs-detail-footer { flex-shrink:0; padding-top:9px; background:#222228; border-top:1px solid #33343b; }
 
 .dbs-tag-section { margin-bottom: 12px; }
 
@@ -2562,14 +2927,15 @@ const CSS = `
 
 .dbs-detail-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  padding-top: 12px;
+  padding-top: 8px;
   border-top: 1px solid #333;
   flex-shrink: 0;
 }
 
 .dbs-detail-btn {
-  flex: 1;
+  flex: 1 1 120px;
   padding: 8px 12px;
   background: #2a2a30;
   border: 1px solid #3a3a3a;
@@ -2577,6 +2943,11 @@ const CSS = `
   color: #ddd;
   font-size: 12px;
   cursor: pointer;
+}
+
+@media (max-width:760px) {
+  .dbs-detail-modal { height:min(900px,94vh); }
+  .dbs-detail-body { grid-template-columns:1fr; grid-template-rows:minmax(180px,38vh) minmax(0,1fr); }
 }
 
 .dbs-detail-btn:hover { background: #35353c; }
@@ -2623,8 +2994,8 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       onNodeCreated?.apply(this, arguments);
 
-      if (this._dbsInit) return;
-      this._dbsInit = true;
+      if (this._dbsInit || this._dbsMounting) return;
+      this._dbsMounting = true;
 
       this.setSize([1200, 700]);
 
@@ -2645,36 +3016,97 @@ app.registerExtension({
         }
       }, 300);
 
-      if (!document.getElementById("dbs-style")) {
-        const style = document.createElement("style");
-        style.id = "dbs-style";
+      let container = null;
+      let vueApp = null;
+      try {
+        // Always refresh this node's scoped stylesheet. This also fixes stale
+        // CSS left behind by a frontend hot reload without touching ComfyUI's
+        // global theme or any other Vue node.
+        let style = document.getElementById("dbs-style");
+        if (!style) {
+          style = document.createElement("style");
+          style.id = "dbs-style";
+          document.head.appendChild(style);
+        }
         style.textContent = CSS;
-        document.head.appendChild(style);
+
+          container = document.createElement("div");
+          container.style.cssText = "width:100%;max-width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;position:relative;";
+
+        const widget = this.addDOMWidget("danbooru_search_vue", "div", container, {
+          serialize: false,
+        });
+        this._dbsWidget = widget;
+
+        vueApp = createApp(DanbooruSearchApp, { node: this });
+        vueApp.config.errorHandler = (error, instance, info) => {
+          console.error("[Eagle Suite] Danbooru Vue render error:", info, error);
+        };
+        vueApp.mount(container);
+        this._vueApp = vueApp;
+        this._dbsContainer = container;
+        this._dbsInit = true;
+
+          const syncWidgetLayout = (size) => {
+            const currentSize = size || this.size || [1200, 700];
+            const nodeWidth = Math.max(640, Number(currentSize[0]) || 1200);
+            const nodeHeight = Math.max(480, Number(currentSize[1]) || 700);
+            const hgt = Math.max(400, nodeHeight - 80);
+
+            container.style.width = "100%";
+            container.style.maxWidth = "100%";
+            container.style.minWidth = "0";
+            container.style.height = hgt + "px";
+
+            const host = container.parentElement;
+            if (host) {
+              host.style.width = "100%";
+              host.style.maxWidth = "100%";
+              host.style.minWidth = "0";
+              host.style.boxSizing = "border-box";
+              host.style.overflow = "hidden";
+            }
+
+            widget.computeSize = () => {
+              // LiteGraph can pass only the remaining row width while selecting a
+              // node.  Binding the Vue host to that value caused the panel to be
+              // cut in half after a click.
+              return [Math.max(100, nodeWidth - 20), hgt];
+            };
+            return hgt;
+          };
+          this._dbsSyncLayout = syncWidgetLayout;
+          syncWidgetLayout(this.size);
+          requestAnimationFrame(() => syncWidgetLayout(this.size));
+
+          const onResize = this.onResize;
+          this.onResize = function (size) {
+            onResize?.apply(this, arguments);
+            this._dbsSyncLayout?.(size);
+          };
+
+          const onConfigure = this.onConfigure;
+          this.onConfigure = function () {
+            onConfigure?.apply(this, arguments);
+            hideWidget(this);
+            requestAnimationFrame(() => this._dbsSyncLayout?.(this.size));
+          };
+      } catch (error) {
+        try { vueApp?.unmount(); } catch (_) {}
+        this._vueApp = null;
+        this._dbsInit = false;
+        console.error("[Eagle Suite] Danbooru Vue mount failed:", error);
+        if (container) {
+          container.replaceChildren();
+          const errorBox = document.createElement("div");
+          errorBox.className = "dbs-mount-error";
+          errorBox.style.cssText = "padding:16px;color:#ff8b8b;white-space:pre-wrap;";
+          errorBox.textContent = "Danbooru 界面加载失败。请刷新 ComfyUI 前端；详细错误已写入浏览器控制台。\n" + String(error?.message || error);
+          container.appendChild(errorBox);
+        }
+      } finally {
+        this._dbsMounting = false;
       }
-
-      const container = document.createElement("div");
-      container.style.cssText = "width:100%;height:100%;overflow:hidden;position:relative;";
-
-      const widget = this.addDOMWidget("danbooru_search_vue", "div", container, {
-        serialize: false,
-      });
-
-      const vueApp = createApp(DanbooruSearchApp, { node: this });
-      vueApp.mount(container);
-      this._vueApp = vueApp;
-
-      const applyHeight = (nodeHeight) => {
-        const hgt = Math.max(400, nodeHeight - 80);
-        container.style.height = hgt + "px";
-        return hgt;
-      };
-      applyHeight(this.size[1]);
-
-      const onResize = this.onResize;
-      this.onResize = function (size) {
-        onResize?.apply(this, arguments);
-        applyHeight(size[1]);
-      };
     };
 
     const onRemoved = nodeType.prototype.onRemoved;
@@ -2683,6 +3115,11 @@ app.registerExtension({
         this._vueApp.unmount();
         this._vueApp = null;
       }
+      this._dbsInit = false;
+      this._dbsMounting = false;
+          this._dbsContainer = null;
+          this._dbsWidget = null;
+          this._dbsSyncLayout = null;
       onRemoved?.apply(this, arguments);
     };
   },

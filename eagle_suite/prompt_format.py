@@ -105,6 +105,46 @@ PROMPT_PRESETS: Dict[str, Dict[str, object]] = {
         ),
         "post_processor": lambda text: _format_anima(text),
     },
+
+    "标签提取": {
+        "system_prompt": (
+            "You are an expert image tagger. Analyze the image and output concise, "
+            "accurate English tags that describe its subject, attributes, style, and scene. "
+            "Do not write sentences or explanations."
+        ),
+        "user_suffix": (
+            "\n\n[REQUIRED OUTPUT FORMAT]\n"
+            "Output ONLY English comma-separated tags. No sentences, no explanations. "
+            "Example: 1girl, solo, blue hair, school uniform, classroom, soft lighting,"
+        ),
+        "post_processor": lambda text: _format_sdxl(text),
+    },
+
+    "密集描述": {
+        "system_prompt": (
+            "You are a meticulous image analyst. Produce a dense caption that lists "
+            "every notable element: subjects, clothing, pose, facial expression, "
+            "background objects, lighting, color palette, and overall atmosphere."
+        ),
+        "user_suffix": (
+            "\n\n[REQUIRED OUTPUT FORMAT]\n"
+            "Write a detailed dense caption covering subjects, attributes, actions, "
+            "background, lighting, colors, and mood. Be exhaustive but coherent."
+        ),
+        "post_processor": lambda text: _clean_natural_language(text),
+    },
+
+    "场景分析": {
+        "system_prompt": (
+            "You are a professional photography and art critic. Analyze the image's "
+            "composition, lighting, color grading, mood, and stylistic intent."
+        ),
+        "user_suffix": (
+            "\n\n[REQUIRED OUTPUT FORMAT]\n"
+            "Analyze composition, lighting, color, mood, and style. Use clear paragraphs."
+        ),
+        "post_processor": lambda text: _clean_natural_language(text),
+    },
 }
 
 

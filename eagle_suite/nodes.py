@@ -10,7 +10,7 @@ from .batch_video_nodes import (
 )
 from .api_key_node import EagleAPIKeyNode, EagleAPILoader
 from .api_model_loader import EagleAPIUnifiedNode, EagleAPIImageNode
-from .local_llm_node import EagleLocalLLMNode, EagleLocalLLMServerNode
+from .local_llm_node import EagleLocalLLMLoader, EagleLocalLLMNode, EagleLocalLLMServerNode
 from .gif_compressor import GifCompressorNode
 from .local_loader import LocalImageLoader
 from .wallhaven_gallery import WallhavenGalleryNode
@@ -22,11 +22,13 @@ from .danbooru_search import DanbooruVueSearchNode
 from .text_switch_node import EagleTextSwitchMulti
 from .unified_media_browser import UnifiedMediaBrowser
 from .video_preview_node import EagleVideoGifPreviewNode
+from .h3_director_node import EagleH3DirectorNode
 
 # ── 工具节点 ─────────────────────────────────────────────
 from ..nodes.audio_browser import EagleAudioList
 from ..nodes.prompt_presets import EaglePromptPresets
 from ..nodes.string_tools import EagleStringRows
+from .prompt_variables_node import EaglePromptVariablesNode
 
 # ── 节点映射 ─────────────────────────────────────────────
 
@@ -56,6 +58,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleAPIImageNode":   EagleAPIImageNode,
     "EagleAPIKeyNode":      EagleAPIKeyNode,
     "EagleAPILoader":       EagleAPILoader,
+    "EagleLocalLLMLoader":      EagleLocalLLMLoader,
     "EagleLocalLLMNode":        EagleLocalLLMNode,
     "EagleLocalLLMServerNode":  EagleLocalLLMServerNode,
 
@@ -67,12 +70,14 @@ NODE_CLASS_MAPPINGS = {
     "EagleGalleryNode": EagleGalleryNode,
     "EagleLoraGalleryNode": EagleLoraGalleryNode,
     "UnifiedMediaBrowser": UnifiedMediaBrowser,
+    "EagleH3DirectorNode": EagleH3DirectorNode,
 
     # Danbooru
     "DanbooruVueSearchNode": DanbooruVueSearchNode,
 
     # 文本
     "EagleTextSwitchMulti": EagleTextSwitchMulti,
+    "EaglePromptVariablesNode": EaglePromptVariablesNode,
 
     # 工具
     "EagleAudioList":       EagleAudioList,
@@ -107,6 +112,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleAPIImageNode":   "🦅 API 生图",
     "EagleAPIKeyNode":      "🦅 API Key Input",
     "EagleAPILoader":       "🦅 API 配置加载器",
+    "EagleLocalLLMLoader":      "🦅 本地大模型加载器",
     "EagleLocalLLMNode":        "🦅 本地大模型反推",
     "EagleLocalLLMServerNode":  "🦅 本地大模型服务(OpenAI兼容)",
 
@@ -118,11 +124,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleGalleryNode": "🦅 Eagle Gallery",
     "EagleLoraGalleryNode": "🦅 LoRA Gallery",
     "UnifiedMediaBrowser": "🦅 统一媒体浏览器",
+    "EagleH3DirectorNode": "🦅 H3 导演台",
     # Danbooru
     "DanbooruVueSearchNode": "🦅 Danbooru 标签搜索",
 
    # 文本
     "EagleTextSwitchMulti": "🦅 多重文本切换",
+    "EaglePromptVariablesNode": "🦅 变量输入",
 
     # 工具
     "EagleAudioList":     "🦅 音频浏览器",
@@ -172,16 +180,21 @@ _CATEGORY_GROUPS = {
         EagleAPIImageNode,
         EagleAPIKeyNode,
         EagleAPILoader,
+        EagleLocalLLMLoader,
         EagleLocalLLMNode,
         EagleLocalLLMServerNode,
     ),
     f"{MENU_ROOT}/文本": (
         EagleTextSwitchMulti,
+        EaglePromptVariablesNode,
         *tuple(NODE_CLASS_MAPPINGS_TEXT.values()),
     ),
     f"{MENU_ROOT}/工具": (
         EaglePromptPresets,
         EagleStringRows,
+    ),
+    f"{MENU_ROOT}/H3 导演台": (
+        EagleH3DirectorNode,
     ),
 }
 

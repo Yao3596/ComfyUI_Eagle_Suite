@@ -319,6 +319,205 @@ function _showProfileDialog(title, initial = {}, onSave) {
     });
 }
 
+// ── 远端模型分类与选择弹窗 ────────────────────────────────────
+
+const _MODEL_CATEGORY_LABELS = {
+    all: '全部',
+    llm: '大语言 / 对话',
+    image: '生图 / 视觉生成',
+    vision: '视觉理解 (VLM)',
+    embedding: '文本嵌入',
+    audio: '语音 / 音频',
+    other: '其他',
+};
+
+function _guessModelCategory(name) {
+    const lower = String(name || '').toLowerCase();
+    if (/dall[e\-]|midjourney|stable.diffusion|sdxl|flux|kolors|ideogram|recraft|seedream|gpt.image|imagen|kling|wan|hunyuan|cogview|image.?gen|text.to.image|t2i/.test(lower)) {
+        return 'image';
+    }
+    if (/embed|text.embedding|bge/.test(lower)) {
+        return 'embedding';
+    }
+    if (/whisper|tts|speech|audio/.test(lower)) {
+        return 'audio';
+    }
+    if(/\bvl\b|vision/.test(lower)) {
+        return 'vision';
+    }
+    if (/gpt|claude|qwen|qwq|deepseek|llama|gemini|mistral|yi|glm|baichuan|chat/.test(lower)) {
+        return 'llm';
+    }
+    return 'other';
+}
+
+function _showModelPickerDialog(models, profile) {
+    const categories = {};
+    models.forEach(m => {
+        const cat = _guessModelCategory(m);
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(m);
+    });
+    Object.keys(categories).forEach(cat => categories[cat].sort());
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+        display: flex; align-items: center; justify-content: center;
+        z-index: 9999; font-family: system-ui, sans-serif;
+    `;
+
+    const box = document.createElement('div');
+    box.style.cssText = `
+        background: #1e1e24; border: 1px solid #444; border-radius: 10px;
+        width: 460px; max-width: 92vw; padding: 20px; color: #ddd;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    `;
+
+    const heading = document.createElement('h3');
+    heading.textContent = `🔄 从 API 选择模型 (${models.length} 个)`;
+    heading.style.cssText = 'margin: 0 0 16px 0; font-size: 15px; font-weight: 600;';
+    box.appendChild(heading);
+
+    const info = document.createElement('div');
+    info.textContent = `Base URL: ${profile.base_url || ''}`;
+    info.style.cssText = 'font-size: 11px; color: #888; margin-bottom: 14px; word-break: break-all;';
+    box.appendChild(info);
+
+    const inputs = {};
+
+    function _makeRow(label, element) {
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom: 12px;';
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        lbl.style.cssText = 'display:block;font-size:12px;color:#aaa;margin-bottom:5px;';
+        element.style.cssText = `
+            width: 100%; padding: 8px 10px; border: 1px solid #444; border-radius: 5px;
+            background: #121216; color: #e0e0e0; font-size: 13px; box-sizing: border-box;
+        `;
+        row.appendChild(lbl);
+        row.appendChild(element);
+        box.appendChild(row);
+        return row;
+    }
+
+    // 分类筛选
+    const categorySelect = document.createElement('select');
+    const allCats = ['all', ...Object.keys(categories).sort()];
+    allCats.forEach(cat => {
+        const opt = document.createElement('option');
+        opt.value = cat;
+        opt.textContent = _MODEL_CATEGORY_LABELS[cat] || cat;
+        categorySelect.appendChild(opt);
+    });
+    _makeRow('模型分类', categorySelect);
+    inputs.category = categorySelect;
+
+    // 模型下拉
+    const modelSelect = document.createElement('select');
+    modelSelect.style.maxHeight = '260px';
+    _makeRow('选择模型', modelSelect);
+    inputs.model = modelSelect;
+
+    function _refreshModelOptions(category) {
+        const current = modelSelect.value;
+        modelSelect.innerHTML = '';
+        const list = category === 'all'
+            ? models.slice()
+            : (categories[category] || []);
+        list.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            modelSelect.appendChild(opt);
+        });
+        if (list.includes(current)) {
+            modelSelect.value = current;
+        } else if (list.length) {
+            modelSelect.value = list[0];
+        }
+    }
+
+    categorySelect.addEventListener('change', () => {
+        _refreshModelOptions(categorySelect.value);
+    });
+    _refreshModelOptions('all');
+
+    // 模型类型
+    const typeSelect = document.createElement('select');
+    Object.entries(_MODEL_TYPE_LABELS).forEach(([value, label]) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = label;
+        typeSelect.appendChild(opt);
+    });
+    typeSelect.value = profile.model_type || 'llm';
+    _makeRow('模型类型', typeSelect);
+    inputs.model_type = typeSelect;
+
+    // API Key
+    const keyInput = document.createElement('input');
+    keyInput.type = 'password';
+    keyInput.value = _decodeKey(profile.api_key || '');
+    _makeRow('API Key', keyInput);
+    inputs.api_key = keyInput;
+
+    // Base URL
+    const urlInput = document.createElement('input');
+    urlInput.type = 'text';
+    urlInput.value = profile.base_url || '';
+    _makeRow('Base URL', urlInput);
+    inputs.base_url = urlInput;
+
+    const ft = document.createElement('div');
+    ft.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;margin-top:18px;';
+
+    const btnSave = document.createElement('button');
+    btnSave.textContent = '保存';
+    btnSave.style.cssText = `
+        padding: 7px 18px; border: none; border-radius: 5px; background: #2a4a8a;
+        color: #fff; font-size: 13px; cursor: pointer;
+    `;
+
+    const btnCancel = document.createElement('button');
+    btnCancel.textContent = '取消';
+    btnCancel.style.cssText = `
+        padding: 7px 18px; border: 1px solid #444; border-radius: 5px;
+        background: #2a2a32; color: #ccc; font-size: 13px; cursor: pointer;
+    `;
+
+    ft.appendChild(btnCancel);
+    ft.appendChild(btnSave);
+    box.appendChild(ft);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    return new Promise(resolve => {
+        btnCancel.addEventListener('click', () => {
+            overlay.remove();
+            resolve(null);
+        });
+        btnSave.addEventListener('click', () => {
+            const result = {
+                model: String(inputs.model.value || '').trim(),
+                model_type: inputs.model_type.value,
+                api_key: _encodeKey(String(inputs.api_key.value || '').trim()),
+                base_url: String(inputs.base_url.value || '').trim(),
+                name: String(inputs.model.value || '').trim(),
+            };
+            overlay.remove();
+            resolve(result);
+        });
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) {
+                overlay.remove();
+                resolve(null);
+            }
+        });
+    });
+}
+
 async function _addProfile(node) {
     const savedName = await _showProfileDialog('➕ 添加 API 模型', {
         model_type: 'llm',
@@ -424,40 +623,36 @@ async function _fetchModelsFromApi(node) {
             return;
         }
 
-        // 选择远端模型后进入统一编辑框，可明确指定 LLM / 生图类型。
-        if (data.models && data.models.length > 0) {
-            const selected = prompt(
-                `从 API 获取到 ${data.models.length} 个模型。\n输入要添加的模型名称（直接创建新 Profile）：`,
-                data.models[0]
-            );
-            if (selected && selected.trim()) {
-                const profile = await _getProfile(profileName);
-                if (profile) {
-                    const newName = selected.trim();
-                    const savedName = await _showProfileDialog('🔄 保存 API 模型到本地', {
-                        api_key: profile.api_key,
-                        base_url: profile.base_url,
-                        model: newName,
-                        model_type: data.model_type || profile.model_type || 'llm',
-                    }, async result => {
-                        try {
-                            const saveRes = await _callApi('/api_loader/save_profile', result);
-                            if (!saveRes.success) {
-                                alert('保存失败：' + (saveRes.error || '未知错误'));
-                                return false;
-                            }
-                            return saveRes.profile_name || result.name;
-                        } catch (e) {
-                            alert('保存失败：' + e.message);
-                            return false;
-                        }
-                    });
-                    if (savedName) {
-                        await _syncProfileNodes(node, savedName);
-                        console.log('[EagleAPILoader] 已从 API 写入 api_config.json:', savedName);
-                    }
-                }
+        if (!data.models || data.models.length === 0) {
+            alert('API 未返回任何模型');
+            return;
+        }
+
+        const profile = await _getProfile(profileName);
+        if (!profile) {
+            alert('无法获取当前模型配置');
+            return;
+        }
+
+        // 使用 Vue 风格弹窗选择模型，支持分类过滤
+        const result = await _showModelPickerDialog(data.models, {
+            api_key: profile.api_key,
+            base_url: profile.base_url,
+            model_type: data.model_type || profile.model_type || 'llm',
+        });
+
+        if (!result || !result.model) return;
+
+        try {
+            const saveRes = await _callApi('/api_loader/save_profile', result);
+            if (!saveRes.success) {
+                alert('保存失败：' + (saveRes.error || '未知错误'));
+                return;
             }
+            await _syncProfileNodes(node, saveRes.profile_name || result.name);
+            console.log('[EagleAPILoader] 已从 API 写入 api_config.json:', saveRes.profile_name || result.name);
+        } catch (e) {
+            alert('保存失败：' + e.message);
         }
     } catch (e) {
         console.warn('[EagleAPILoader] 从 API 拉取模型失败:', e);

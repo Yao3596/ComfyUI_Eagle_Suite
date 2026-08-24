@@ -136,8 +136,11 @@ class UnifiedMediaBrowser {
       selectedItems: new Map(),
     };
 
-    this.restoreStateFromNode();
-    this.init();
+    // ✅ 延迟恢复状态，确保 widgets 已完全初始化
+    setTimeout(() => {
+      this.restoreStateFromNode();
+      this.init();
+    }, 0);
   }
 
   getWidget(name) {
@@ -145,18 +148,26 @@ class UnifiedMediaBrowser {
   }
 
   restoreStateFromNode() {
+    // ✅ 如果 widgets 还没初始化，延迟重试
+    if (!this.node.widgets || this.node.widgets.length === 0) {
+      console.warn("[UnifiedMediaBrowser] widgets 未就绪，延迟恢复");
+      setTimeout(() => this.restoreStateFromNode(), 50);
+      return;
+    }
+
     const directory = String(this.getWidget("directory")?.value || "").trim();
     const mediaType = String(this.getWidget("media_type")?.value || "all");
     const recursiveValue = this.getWidget("recursive")?.value;
     const viewMode = String(this.getWidget("view_mode")?.value || "grid");
     const fallbackMode = String(this.getWidget("fallback_mode")?.value || "sequential");
+    
     this.state.directory = directory;
     this.state.currentDirectory = directory;
     this.state.mediaType = ["all", "image", "video"].includes(mediaType) ? mediaType : "all";
     this.state.recursive = recursiveValue === undefined ? true : Boolean(recursiveValue);
     this.state.viewMode = viewMode === "list" ? "list" : "grid";
     this.state.fallbackMode = fallbackMode === "random" ? "random" : "sequential";
-    this.state.batchCount = Math.max(1, Number(this.getWidget("batch_count")?.value || 1));
+    this.state.batchCount = Math.max(0, Number(this.getWidget("batch_count")?.value ?? 1));
     this.state.startIndex = Math.max(0, Number(this.getWidget("start_index")?.value || 0));
     this.state.randomSeed = Number(this.getWidget("random_seed")?.value ?? -1);
     this.state.aspectRatio = String(this.getWidget("aspect_ratio")?.value || "all");
@@ -168,9 +179,14 @@ class UnifiedMediaBrowser {
           if (item?.id && item?.path) this.state.selectedItems.set(item.id, item);
         });
       }
-    } catch (_) {
-      // 工作流中的旧值损坏时仅忽略，不影响浏览器挂载。
+    } catch (error) {
+      console.warn("[UnifiedMediaBrowser] 恢复选择数据失败:", error);
     }
+
+    console.log("[UnifiedMediaBrowser] 状态已恢复:", {
+      directory: this.state.directory,
+      selectedCount: this.state.selectedItems.size
+    });
   }
 
   syncBrowserSettings() {
@@ -196,8 +212,17 @@ class UnifiedMediaBrowser {
     this.render();
     this.renderSelected();
     this.updateCounts();
-    // 延迟绑定事件，等待 DOM 完全渲染
-    setTimeout(() => this.attachEvents(), 50);
+    
+    // ✅ 增加延迟时间，确保 DOM 和事件都准备好
+    setTimeout(() => {
+      this.attachEvents();
+      // ✅ 如果工作流中有保存的目录，自动加载
+      if (this.state.directory) {
+        console.log("[UnifiedMediaBrowser] 自动加载目录:", this.state.directory);
+        this.loadFolders();
+        this.loadItems();
+      }
+    }, 100);
   }
 
   render() {
@@ -230,7 +255,7 @@ class UnifiedMediaBrowser {
             <option value="sequential" ${this.state.fallbackMode === 'sequential' ? 'selected' : ''}>未选：顺序批次</option>
             <option value="random" ${this.state.fallbackMode === 'random' ? 'selected' : ''}>未选：随机批次</option>
           </select>
-          <span class="umb-badge">数量</span><input class="umb-num" type="number" min="1" max="64" value="${this.state.batchCount}" data-input="batch-count" title="未选择时的批次数；视频输出为单个 VIDEO，图像可组成批次">
+          <span class="umb-badge">数量</span><input class="umb-num" type="number" min="0" max="64" value="${this.state.batchCount}" data-input="batch-count" title="未选择时输出数量：0=输出全部（最多 64），≥1=按顺序/随机取 N 个；视频仍只输出单个 VIDEO">
           <span class="umb-badge">起始</span><input class="umb-num" type="number" min="0" value="${this.state.startIndex}" data-input="start-index" title="顺序批次起始索引">
           <select class="umb-sel" data-input="aspect" title="宽高比例筛选">
             ${[['all','全部比例'],['landscape','横向'],['portrait','竖向'],['square','方形'],['1:1','1:1'],['4:3','4:3'],['3:4','3:4'],['16:9','16:9'],['9:16','9:16']].map(([value,label]) => `<option value="${value}" ${this.state.aspectRatio === value ? 'selected' : ''}>${label}</option>`).join('')}
@@ -379,7 +404,7 @@ class UnifiedMediaBrowser {
       this.syncBrowserSettings();
     });
     root.querySelector('[data-input="batch-count"]')?.addEventListener("change", event => {
-      this.state.batchCount = Math.max(1, Math.min(64, Number(event.target.value || 1)));
+      this.state.batchCount = Math.max(0, Math.min(64, Number(event.target.value ?? 1)));
       event.target.value = this.state.batchCount;
       this.syncBrowserSettings();
     });
@@ -395,12 +420,6 @@ class UnifiedMediaBrowser {
       this.syncBrowserSettings();
       this.loadItems();
     });
-
-    // 重新打开工作流时恢复保存的目录和浏览设置。
-    if (this.state.directory) {
-      this.loadFolders();
-      this.loadItems();
-    }
   }
 
   async loadFolders() {
@@ -719,15 +738,15 @@ app.registerExtension({
     const hideWidgets = (node) => {
       if (!node.widgets) return false;
       let found = false;
-      for (const w of node.widgets) {
-        if (HIDDEN_WIDGETS.includes(w.name)) {
-          w.type = "hidden";
-          w.computeSize = () => [0, -4];
-          w.hidden = true;
-          w.draw = () => {};
-          found = true;
+        for (const w of node.widgets) {
+          if (HIDDEN_WIDGETS.includes(w.name)) {
+            w.type = "hidden";
+            w.computeSize = () => [0, -4];
+            // 不设置 w.hidden，确保 ComfyUI 序列化 prompt 时仍把值传给后端
+            w.draw = () => {};
+            found = true;
+          }
         }
-      }
       if (found) node.setDirtyCanvas(true, true);
       return found;
     };

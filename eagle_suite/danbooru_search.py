@@ -20,10 +20,12 @@ import csv
 import json
 import re
 import random
+import math
 import time
 import asyncio
 import traceback
 import ipaddress
+from collections import deque
 from urllib.parse import urlparse
 
 import numpy as np
@@ -55,11 +57,14 @@ _model = None                 # BGE-M3 SentenceTransformer
 _tag_rows = None              # [{tag, cn_name, category, embedding}]
 _tag_embeddings = None        # np.ndarray  (N, dim)
 _tag_translations = None      # { tag: cn_name }
+_tag_catalog = None           # 标签数据文件中的轻量元数据（抽卡使用，不加载模型）
+_gacha_buckets = None         # {prompt_kind: [catalog row]}
 _selection_cache = {}         # { node_id: {selections, selected_tags, ...} }
 _engine = None                # danbooru_engine.core.engine.DanbooruTagger
 _engine_lock = None
 _danbooru_session = None
 _gacha_counter = 0
+_gacha_history = deque(maxlen=300)
 
 GACHA_RULE_CARDS = [
     {"name": "放学后的教室", "hints": ("school", "uniform", "student", "serafuku"), "tags": {
@@ -111,7 +116,14 @@ GACHA_RULE_CARDS = [
 # ────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_SETTINGS = {
-    "_config_version": 2,
+    "_config_version": 4,
+    # 通用
+    "tag_display_language": "bilingual",
+    "group_output_tags": True,
+    "include_selected_image_tags": True,
+    "underscore_mode": "space",
+    "normalize_punctuation": True,
+    "default_gallery_collapsed": False,
     "model_path": "",
     "danbooru_username": "",
     "danbooru_api_key": "",
@@ -119,15 +131,36 @@ DEFAULT_SETTINGS = {
     "hide_ai": True,
     "proxy_url": "",
     "api_base_url": DANBOORU_BASE,
+    # 搜索与匹配
+    "search_mode": "hybrid",
+    "search_top_k": 80,
+    "search_result_limit": 80,
+    "search_popularity_weight": 0.15,
+    "search_tag_types": ["General", "Artist", "Copyright", "Character", "Meta"],
     # 总开关：关闭时 Danbooru 节点绝不会加载本地生成模型或请求 LLM API。
     "enable_model_calls": False,
-    "gacha_provider": "rules",
+    # 抽卡默认直接使用标签数据文件，不加载模型，也不要求选择图片。
+    "gacha_provider": "database",
+    "gacha_category_counts": {
+        "outfit": 2, "action": 2, "expression": 1, "scene": 2,
+        "environment": 2, "composition": 1, "lighting": 1,
+    },
+    "gacha_avoid_duplicates": True,
+    "gacha_seed": -1,
+    "gacha_online_query": "",
+    "gacha_min_post_count": 5000,
     "gacha_api_profile": "",
     "gacha_local_url": "http://127.0.0.1:11434/v1",
     "gacha_local_model": "",
     "gacha_comfy_model": "",
     "gacha_comfy_device": "auto",
     "gacha_comfy_dtype": "bf16",
+    # 本地显存策略：加载生成模型前卸载语义模型，反之亦然。
+    "exclusive_model_memory": True,
+    # 工作区与性能
+    "history_limit": 50,
+    "thumbnail_concurrency": 6,
+    "lazy_load_images": True,
 }
 
 
@@ -139,6 +172,15 @@ def load_settings():
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
         merged.update({key: value for key, value in data.items() if key in DEFAULT_SETTINGS})
+        # v3 把旧版固定 JSON 规则卡迁移为动态本地标签库抽卡。只迁移旧配置；
+        # 新版中用户主动选择“规则卡”时仍会保留该选择。
+        try:
+            source_version = int(data.get("_config_version", 0) or 0)
+        except (TypeError, ValueError):
+            source_version = 0
+        if source_version < 3 and str(data.get("gacha_provider") or "rules") == "rules":
+            merged["gacha_provider"] = "database"
+        merged["_config_version"] = DEFAULT_SETTINGS["_config_version"]
     except Exception as error:
         logger.warning(f"[DanbooruSearch] 读取设置失败 {SETTINGS_PATH}: {error}")
     return merged
@@ -262,86 +304,130 @@ def _is_allowed_image_url(url: str) -> bool:
 # 标签库与翻译加载
 # ────────────────────────────────────────────────────────────────────────────
 
-def _load_tag_translations():
-    """
-    从 tags_enhanced.csv 读取 { tag: cn_name }。
-
-    CSV 假定含表头，列名里带 tag / name / cn / chinese / 中文 等关键字。
-    若你的 CSV 列名不同，改这里的列名匹配逻辑即可。
-    """
-    global _tag_translations
-    if _tag_translations is not None:
-        return _tag_translations
-
-    translations = {}
-
-    if not os.path.exists(TAGS_CSV_PATH):
-        # 旧安装可能只保留了 embedding metadata，作为只读后备来源。
-        if os.path.isfile(TAG_METADATA_PATH):
-            try:
-                import pandas as pd
-                frame = pd.read_parquet(TAG_METADATA_PATH, columns=["name", "cn_name"])
-                translations = {
-                    str(name): str(cn or "")
-                    for name, cn in zip(frame["name"], frame["cn_name"])
-                    if str(name)
-                }
-                logger.info(f"[DanbooruSearch] 标签 CSV 缺失，已从 metadata 后备加载 {len(translations)} 条翻译")
-            except Exception as error:
-                logger.warning(f"[DanbooruSearch] metadata 后备翻译读取失败: {error}")
-        else:
-            logger.warning(f"[DanbooruSearch] 未找到标签表: {TAGS_CSV_PATH}")
-        _tag_translations = translations
-        return translations
-
-    try:
-        with open(TAGS_CSV_PATH, "rb") as f:
-            sample = f.read(65536)
+def _detect_tag_csv_encoding():
+    """识别标签表编码；同时阻止把明显的乱码文本当成有效中文。"""
+    with open(TAGS_CSV_PATH, "rb") as handle:
+        sample = handle.read(131072)
+    for encoding in ("utf-8-sig", "gb18030"):
         try:
-            sample.decode("utf-8-sig")
-            csv_encoding = "utf-8-sig"
+            decoded = sample.decode(encoding)
         except UnicodeDecodeError:
-            csv_encoding = "gb18030"
+            continue
+        # UTF-8 误判为本地编码时通常会产生大量替换字符。
+        if decoded.count("�") <= 2:
+            return encoding
+    return "utf-8-sig"
 
-        with open(TAGS_CSV_PATH, "r", encoding=csv_encoding, newline="") as f:
-            reader = csv.reader(f)
-            header = next(reader, None)
-            if not header:
-                _tag_translations = translations
-                return translations
 
-            # 猜测列索引
-            tag_idx, cn_idx = 0, None
-            for i, col in enumerate(header):
-                low = (col or "").strip().lower()
-                if low in ("tag", "name", "tag_name", "标签"):
-                    tag_idx = i
-                if any(k in low for k in ("cn", "chinese", "中文", "zh", "translation", "译名")):
-                    cn_idx = i
+def _load_tag_catalog():
+    """读取轻量标签元数据。只读 CSV，不加载语义模型或向量索引。"""
+    global _tag_catalog
+    if _tag_catalog is not None:
+        return _tag_catalog
 
-            if cn_idx is None:
-                cn_idx = 1 if len(header) > 1 else 0
+    catalog = []
+    if os.path.isfile(TAGS_CSV_PATH):
+        try:
+            with open(TAGS_CSV_PATH, "r", encoding=_detect_tag_csv_encoding(), newline="") as handle:
+                for row in csv.DictReader(handle):
+                    tag = str(row.get("name") or row.get("tag") or row.get("tag_name") or "").strip()
+                    if not tag:
+                        continue
+                    try:
+                        post_count = max(0, int(float(row.get("post_count") or row.get("count") or 0)))
+                    except (TypeError, ValueError):
+                        post_count = 0
+                    try:
+                        category_code = int(float(row.get("category") or 0))
+                    except (TypeError, ValueError):
+                        category_code = 0
+                    catalog.append({
+                        "tag": tag,
+                        "cn_name": str(row.get("cn_name") or row.get("translation") or "").strip(),
+                        "wiki": str(row.get("wiki") or "").strip(),
+                        "post_count": post_count,
+                        "category": {0: "general", 1: "artist", 3: "copyright", 4: "character", 5: "meta"}.get(category_code, "general"),
+                        "nsfw": str(row.get("nsfw") or "0").strip() in {"1", "true", "True"},
+                    })
+        except Exception as error:
+            logger.warning(f"[DanbooruSearch] 标签目录读取失败: {error}")
 
-            for row in reader:
-                if len(row) <= max(tag_idx, cn_idx):
-                    continue
-                tag = (row[tag_idx] or "").strip()
-                cn = (row[cn_idx] or "").strip()
+    if not catalog and os.path.isfile(TAG_METADATA_PATH):
+        try:
+            import pandas as pd
+            frame = pd.read_parquet(TAG_METADATA_PATH)
+            for record in frame.to_dict("records"):
+                tag = str(record.get("name") or record.get("tag") or "").strip()
                 if tag:
-                    translations[tag] = cn
+                    catalog.append({
+                        "tag": tag,
+                        "cn_name": str(record.get("cn_name") or "").strip(),
+                        "wiki": str(record.get("wiki") or "").strip(),
+                        "post_count": int(record.get("post_count") or record.get("count") or 0),
+                        "category": str(record.get("category") or "general").lower(),
+                        "nsfw": str(record.get("nsfw") or "0") == "1",
+                    })
+        except Exception as error:
+            logger.warning(f"[DanbooruSearch] metadata 后备目录读取失败: {error}")
 
-        logger.info(f"[DanbooruSearch] 已加载 {len(translations)} 条标签翻译")
-    except Exception as e:
-        logger.warning(f"[DanbooruSearch] 加载翻译失败: {e}")
-
-    _tag_translations = translations
-    return translations
+    _tag_catalog = catalog
+    logger.info(f"[DanbooruSearch] 已加载 {len(catalog)} 条轻量标签元数据")
+    return catalog
 
 
-def _guess_category(tag, cn_name=""):
-    """粗略推断标签类别（仅用于结果标注，不影响搜索）。"""
-    # 真实项目里应从 CSV 的 category 列读取，这里给个占位
+def _load_tag_translations():
+    """从标签目录建立 ``{tag: 中文译名}``，与抽卡共用一次文件读取。"""
+    global _tag_translations
+    if _tag_translations is None:
+        _tag_translations = {
+            item["tag"]: item.get("cn_name", "")
+            for item in _load_tag_catalog()
+            if item.get("tag")
+        }
+    return _tag_translations
+
+
+def _classify_tag_kind(tag, cn_name="", category="general"):
+    """把 Danbooru 标签归入稳定的提示词用途类别。
+
+    向量模型继续负责相似度检索；分类使用 Danbooru 原始类别和轻量规则，
+    避免为了界面分组常驻第二份模型，也避免相同标签每次得到不同类别。
+    """
+    category = str(category or "general").lower()
+    if category in {"artist", "copyright", "character", "meta"}:
+        return category
+
+    text = f"{tag or ''} {cn_name or ''}".lower().replace(" ", "_")
+    patterns = (
+        ("quality", r"(?:masterpiece|best_quality|highres|absurdres|lowres|bad_quality|watermark|signature|commentary|request|censored|monochrome|greyscale)"),
+        ("lighting", r"(?:light|lighting|shadow|sunlight|backlight|glow|ray|reflection|bloom|neon|rim_light|lens_flare)"),
+        ("composition", r"(?:view|shot|angle|focus|depth_of_field|perspective|portrait|close-up|close_up|full_body|upper_body|cowboy_shot|from_|dutch_angle|fisheye)"),
+        ("expression", r"(?:smile|grin|blush|frown|angry|cry|tears|expression|closed_eyes|half-closed_eyes|one_eye_closed|open_mouth|closed_mouth|tongue|pout|surprised|embarrassed)"),
+        ("action", r"(?:holding|sitting|standing|walking|running|kneeling|lying|looking|facing|leaning|reaching|raised_|spread_|crossed_|hug|kiss|fighting|dancing|reading|eating|drinking|sleeping|gesture|pose)"),
+        ("outfit", r"(?:dress|shirt|skirt|coat|jacket|uniform|clothes|clothing|pants|shorts|socks|stockings|thighhighs|pantyhose|legwear|boots|shoes|gloves|hat|cap|ribbon|tie|collar|scarf|swimsuit|bikini|lingerie|armor|apron|hoodie|sweater|bra|panties|accessory|jewelry)"),
+        ("environment", r"(?:rain|snow|weather|sky|cloud|sunset|sunrise|night|day|morning|evening|season|wind|fog|mist|water|fire|flower|tree|grass)"),
+        ("scene", r"(?:indoors|outdoors|room|bedroom|classroom|school|street|city|forest|garden|beach|ocean|mountain|library|station|platform|park|cafe|restaurant|office|background|scenery)"),
+        ("appearance", r"(?:hair|eyes|skin|breast|chest|ass|hips|waist|body|face|ears|horns|tail|wings|age|girl|boy|female|male|solo|multiple_)"),
+    )
+    for kind, pattern in patterns:
+        if re.search(pattern, text):
+            return kind
     return "general"
+
+
+def _resolve_model_source(value):
+    """把 ComfyUI models 相对路径解析为本地目录；远程模型 ID 保持原样。"""
+    source = str(value or "").strip()
+    if not source:
+        return source
+    try:
+        from .local_llm_node import _normalize_model_path
+        resolved = _normalize_model_path(source)
+        if os.path.isdir(resolved):
+            return resolved
+    except Exception:
+        pass
+    return source
 
 
 def _load_model():
@@ -358,7 +444,7 @@ def _load_model():
 
     settings = load_settings()
     model_path = (settings.get("model_path") or "").strip()
-    source = model_path if model_path else "BAAI/bge-m3"
+    source = _resolve_model_source(model_path) if model_path else "BAAI/bge-m3"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[DanbooruSearch] 加载 BGE-M3 模型: {source} (device={device})")
@@ -378,18 +464,22 @@ def _load_tag_database():
     if _tag_rows is not None and _tag_embeddings is not None:
         return _tag_rows, _tag_embeddings
 
-    translations = _load_tag_translations()
-    if not translations:
+    catalog = _load_tag_catalog()
+    if not catalog:
         _tag_rows, _tag_embeddings = [], np.zeros((0, 1024), dtype=np.float32)
         return _tag_rows, _tag_embeddings
 
     rows = []
     texts = []
-    for tag, cn in translations.items():
+    for item in catalog:
+        tag = item.get("tag", "")
+        cn = item.get("cn_name", "")
+        category = item.get("category", "general")
         rows.append({
             "tag": tag,
             "cn_name": cn,
-            "category": _guess_category(tag, cn),
+            "category": category,
+            "kind": _classify_tag_kind(tag, cn, category),
         })
         # 用中文名 + 英文标签做编码，兼顾中英查询
         texts.append(f"{cn} {tag.replace('_', ' ')}".strip())
@@ -438,6 +528,7 @@ def _semantic_search(query, top_k=60, category="all"):
             "tag": row["tag"],
             "cn_name": row.get("cn_name", ""),
             "category": row.get("category", "general"),
+            "kind": row.get("kind", "general"),
             "score": float(scores[idx]),
         })
         if len(results) >= top_k:
@@ -514,6 +605,8 @@ async def _get_search_engine():
         if not model_path:
             _repair_incomplete_bge_cache()
             model_path = "BAAI/bge-m3"
+        else:
+            model_path = _resolve_model_source(model_path)
         engine = DanbooruTagger(
             model_path=model_path,
             csv_file=TAGS_CSV_PATH,
@@ -549,8 +642,67 @@ def _target_categories(category: str) -> list[str]:
     return ["General", "Artist", "Copyright", "Character", "Meta"]
 
 
+def _direct_catalog_search(query, category="all", show_nsfw=False, limit=80, popularity_weight=0.15):
+    """零模型标签查找：英文/译名/释义直接匹配，并用热度做可调排序。"""
+    tokens = [token.lower().replace(" ", "_") for token in _tokenize_query(query)]
+    if not tokens:
+        return []
+    settings = load_settings()
+    allowed_types = {str(value).lower() for value in settings.get("search_tag_types", [])}
+    ranked = []
+    max_count = max((int(item.get("post_count") or 0) for item in _load_tag_catalog()), default=1)
+    log_max = max(1.0, math.log1p(max_count))
+    for item in _load_tag_catalog():
+        item_category = str(item.get("category") or "general").lower()
+        if category != "all" and item_category != category:
+            continue
+        if allowed_types and item_category not in allowed_types:
+            continue
+        if item.get("nsfw") and not show_nsfw:
+            continue
+        tag = str(item.get("tag") or "").lower()
+        cn = str(item.get("cn_name") or "").lower()
+        wiki = str(item.get("wiki") or "").lower()
+        scores = []
+        for token in tokens:
+            display_token = token.replace("_", " ")
+            if tag == token:
+                scores.append(1.0)
+            elif tag.startswith(token):
+                scores.append(0.92)
+            elif token in tag:
+                scores.append(0.82)
+            elif display_token and display_token in cn:
+                scores.append(0.78)
+            elif display_token and display_token in wiki:
+                scores.append(0.62)
+        if not scores:
+            continue
+        direct_score = sum(scores) / len(tokens)
+        hot_score = math.log1p(int(item.get("post_count") or 0)) / log_max
+        weight = max(0.0, min(1.0, float(popularity_weight)))
+        score = direct_score * (1.0 - weight) + hot_score * weight
+        ranked.append((score, {
+            "tag": item["tag"], "cn_name": item.get("cn_name", ""),
+            "category": item_category, "score": score, "semantic_score": 0.0,
+            "kind": _classify_tag_kind(item["tag"], item.get("cn_name", ""), item_category),
+            "count": int(item.get("post_count") or 0), "source": "direct",
+            "layer": "标签数据", "wiki": item.get("wiki", ""),
+            "nsfw": "1" if item.get("nsfw") else "0",
+        }))
+    ranked.sort(key=lambda pair: (-pair[0], -pair[1]["count"], pair[1]["tag"]))
+    return [item for _, item in ranked[:max(1, int(limit))]]
+
+
 async def _search_with_engine(query, search_mode, category, show_nsfw):
     from .danbooru_engine.core.models import SearchRequest
+
+    if load_settings().get("exclusive_model_memory", True):
+        try:
+            from .local_llm_node import unload_local_models
+            unload_local_models()
+        except Exception:
+            pass
 
     mode_options = {
         "full_scene": {
@@ -575,6 +727,13 @@ async def _search_with_engine(query, search_mode, category, show_nsfw):
         },
     }
     options = mode_options.get(search_mode, mode_options["full_scene"])
+    settings = load_settings()
+    options = {
+        **options,
+        "top_k": max(1, min(200, int(settings.get("search_top_k", options["top_k"])) or options["top_k"])),
+        "limit": max(10, min(200, int(settings.get("search_result_limit", options["limit"])) or options["limit"])),
+        "popularity_weight": max(0.0, min(1.0, float(settings.get("search_popularity_weight", options["popularity_weight"])) or 0.0)),
+    }
     request = SearchRequest(
         query=query,
         show_nsfw=bool(show_nsfw),
@@ -592,6 +751,7 @@ async def _search_with_engine(query, search_mode, category, show_nsfw):
             "tag": item.tag,
             "cn_name": item.cn_name,
             "category": item.category,
+            "kind": _classify_tag_kind(item.tag, item.cn_name, item.category),
             "score": float(item.final_score),
             "semantic_score": float(item.semantic_score),
             "count": int(item.count),
@@ -617,6 +777,7 @@ async def _related_with_engine(tags, limit, show_nsfw):
             "tag": item.tag,
             "cn_name": item.cn_name,
             "category": item.category,
+            "kind": _classify_tag_kind(item.tag, item.cn_name, item.category),
             "cooc_score": float(item.cooc_score),
             "cooc_count": int(item.cooc_count),
             "sources": item.sources,
@@ -644,9 +805,35 @@ async def route_search(request):
         if not query:
             return web.json_response({"success": False, "error": "查询为空"}, status=400)
 
-        results, keywords = await _search_with_engine(
-            query, search_mode, category, show_nsfw
-        )
+        settings = load_settings()
+        strategy = str(settings.get("search_mode") or "hybrid")
+        limit = max(10, min(200, int(settings.get("search_result_limit", 80))))
+        popularity = max(0.0, min(1.0, float(settings.get("search_popularity_weight", 0.15))))
+        direct = _direct_catalog_search(query, category, show_nsfw, limit, popularity) if strategy in {"direct", "hybrid"} else []
+        semantic, semantic_keywords = [], []
+        if strategy in {"semantic", "hybrid"}:
+            try:
+                semantic, semantic_keywords = await _search_with_engine(query, search_mode, category, show_nsfw)
+            except Exception:
+                if strategy == "semantic":
+                    raise
+                logger.warning("[DanbooruSearch] 混合搜索的语义模型不可用，已仅返回直接匹配", exc_info=True)
+        if strategy == "direct":
+            results, keywords = direct, _tokenize_query(query)
+        elif strategy == "semantic":
+            results, keywords = semantic[:limit], semantic_keywords
+        else:
+            merged = {}
+            for item in semantic:
+                merged[item["tag"]] = dict(item)
+            for item in direct:
+                if item["tag"] in merged:
+                    merged[item["tag"]]["score"] = max(float(merged[item["tag"]].get("score", 0)), float(item.get("score", 0))) + 0.08
+                    merged[item["tag"]]["source"] = "hybrid"
+                else:
+                    merged[item["tag"]] = item
+            results = sorted(merged.values(), key=lambda item: (-float(item.get("score", 0)), -int(item.get("count", 0))))[:limit]
+            keywords = semantic_keywords or _tokenize_query(query)
 
         return web.json_response({
             "success": True,
@@ -741,14 +928,23 @@ async def route_posts(request):
         limit = max(1, min(200, int(data.get("limit", PAGE_LIMIT))))
         rating_filter = data.get("rating_filter", "general")
 
-        posts = await asyncio.to_thread(_fetch_posts, tags, page, limit, rating_filter)
-        return web.json_response({"success": True, "posts": posts})
+        posts, has_more = await asyncio.to_thread(
+            _fetch_posts, tags, page, limit, rating_filter, True
+        )
+        return web.json_response({
+            "success": True,
+            "posts": posts,
+            # 必须依据 Danbooru 原始页判断，而不是依据隐藏 AI/无效资源后的
+            # posts 数量判断；否则一页只要被过滤掉一张，前端就会误判末页。
+            "has_more": has_more,
+            "next_page": page + 1 if has_more else None,
+        })
     except Exception as e:
         traceback.print_exc()
         return web.json_response({"success": False, "error": str(e)})
 
 
-def _fetch_posts(tags, page, limit, rating_filter):
+def _fetch_posts(tags, page, limit, rating_filter, include_page_info=False):
     settings = load_settings()
 
     tag_parts = tags.split() if tags else []
@@ -764,10 +960,6 @@ def _fetch_posts(tags, page, limit, rating_filter):
         if rating_filter in rating_map:
             tag_parts.append(rating_map[rating_filter])
 
-    # 隐藏 AI 图
-    if settings.get("hide_ai", True):
-        tag_parts.append("-ai-generated")
-
     params = {
         "tags": " ".join(tag_parts),
         "page": page,
@@ -775,9 +967,20 @@ def _fetch_posts(tags, page, limit, rating_filter):
     }
 
     raw = _danbooru_get("/posts.json", params, timeout=25)
+    # Danbooru 返回满页时才可能还有下一页。这个状态必须在本地过滤前记录，
+    # 因为 hide_ai 和无图片过滤会缩短 posts，但不代表远端已经没有后续内容。
+    has_more = isinstance(raw, list) and len(raw) >= limit
 
     posts = []
     for p in raw:
+        # 不把 -ai-generated 放进请求标签，避免匿名 API 的“两标签”上限；
+        # 改为响应后过滤，普通搜索和在线抽卡都更稳定。
+        meta_tags = str(p.get("tag_string_meta") or "").split()
+        if settings.get("hide_ai", True) and (
+            "ai-generated" in meta_tags or "ai-assisted" in meta_tags
+            or bool(p.get("is_ai_generated"))
+        ):
+            continue
         # 跳过没有图片的项
         if not (p.get("file_url") or p.get("large_file_url") or p.get("preview_file_url")):
             continue
@@ -797,6 +1000,8 @@ def _fetch_posts(tags, page, limit, rating_filter):
             "tag_string_general": p.get("tag_string_general", ""),
             "tag_string_meta": p.get("tag_string_meta", ""),
         })
+    if include_page_info:
+        return posts, has_more
     return posts
 
 
@@ -852,14 +1057,8 @@ async def route_post_settings(request):
         previous = load_settings()
         settings = save_settings(data)
         # 改了模型路径 → 下次搜索重新加载
-        global _model, _tag_rows, _tag_embeddings, _engine
         if settings.get("model_path") != previous.get("model_path"):
-            _model = None
-            _tag_rows = None
-            _tag_embeddings = None
-            _engine = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _unload_semantic_models()
         return web.json_response({"success": True, "settings": settings})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)})
@@ -882,6 +1081,7 @@ def _tag_data_status():
         "tags": _file_status(TAGS_CSV_PATH),
         "cooccurrence": _file_status(COOCCURRENCE_PATH),
         "translations_in_memory": len(_tag_translations or {}),
+        "catalog_in_memory": len(_tag_catalog or []),
         "engine_loaded": bool(_engine is not None and getattr(_engine, "is_loaded", False)),
     }
 
@@ -895,8 +1095,10 @@ async def route_tag_data_status(request):
 async def route_reload_tag_data(request):
     """重新读取用户在磁盘上更新的 CSV/Parquet；不在请求线程重建向量。"""
     try:
-        global _tag_translations, _tag_rows, _tag_embeddings, _engine
+        global _tag_translations, _tag_catalog, _gacha_buckets, _tag_rows, _tag_embeddings, _engine
         _tag_translations = None
+        _tag_catalog = None
+        _gacha_buckets = None
         _tag_rows = None
         _tag_embeddings = None
         _engine = None
@@ -944,6 +1146,294 @@ async def route_local_models(request):
         return web.json_response({"success": True, "models": usable})
     except Exception as error:
         return web.json_response({"success": False, "models": [], "error": str(error)}, status=500)
+
+
+def _unload_semantic_models():
+    global _model, _tag_rows, _tag_embeddings, _engine
+    loaded = bool(_model is not None or _engine is not None or _tag_embeddings is not None)
+    _model = None
+    _tag_rows = None
+    _tag_embeddings = None
+    _engine = None
+    try:
+        from .danbooru_engine.core.engine import DanbooruTagger
+        DanbooruTagger._instance = None
+    except Exception:
+        pass
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return loaded
+
+
+@route("POST", "/danbooru_search/unload_semantic_model")
+async def route_unload_semantic_model(request):
+    unloaded = _unload_semantic_models()
+    return web.json_response({"success": True, "unloaded": unloaded, "message": "语义模型缓存已释放"})
+
+
+@route("POST", "/danbooru_search/unload_language_model")
+async def route_unload_language_model(request):
+    try:
+        from .local_llm_node import unload_local_models
+        count = await asyncio.to_thread(unload_local_models)
+        return web.json_response({"success": True, "unloaded": count, "message": f"已释放 {count} 个本地生成模型缓存"})
+    except Exception as error:
+        return web.json_response({"success": False, "error": str(error)}, status=500)
+
+
+PROMPT_KIND_LABELS = {
+    "outfit": "服装",
+    "action": "动作",
+    "expression": "表情",
+    "scene": "场景",
+    "environment": "环境",
+    "composition": "构图",
+    "lighting": "光照",
+}
+
+_PROMPT_KIND_MARKERS = {
+    "lighting": (
+        "lighting", "light", "sunbeam", "sunlight", "moonlight", "shadow", "glow",
+        "reflection", "backlighting", "rim_light", "lens_flare", "chiaroscuro",
+    ),
+    "composition": (
+        "view", "shot", "angle", "perspective", "close-up", "close_up", "portrait",
+        "full_body", "upper_body", "cowboy_shot", "depth_of_field", "symmetry",
+    ),
+    "expression": (
+        "smile", "frown", "blush", "laugh", "crying", "tears", "angry", "expression",
+        "open_mouth", "closed_mouth", "eyes_closed", "half-closed_eyes", "surprised",
+        "embarrassed", "serious", "smirk", "pout", "grin",
+    ),
+    "outfit": (
+        "dress", "skirt", "shirt", "coat", "jacket", "uniform", "swimsuit", "bikini",
+        "boots", "shoes", "sneakers", "heels", "hat", "gloves", "scarf", "socks",
+        "stockings", "pantyhose", "hoodie", "sweater", "cardigan", "armor", "apron",
+        "kimono", "clothes", "clothing", "pants", "shorts", "neckwear", "ribbon",
+        "bag", "pouch",
+    ),
+    "action": (
+        "sitting", "standing", "walking", "running", "jumping", "lying", "kneeling",
+        "holding", "looking", "reading", "drawing", "eating", "drinking", "dancing",
+        "fighting", "sleeping", "waving", "pointing", "reaching", "hugging", "pose",
+        "arms_", "hand_", "crossed_legs", "from_behind",
+    ),
+    "environment": (
+        "rain", "snow", "wind", "fog", "mist", "cloud", "sunset", "sunrise", "night",
+        "day", "dawn", "dusk", "season", "winter", "summer", "autumn", "spring",
+        "weather", "blue_sky", "starry_sky",
+    ),
+    "scene": (
+        "indoors", "outdoors", "room", "street", "city", "forest", "beach", "ocean",
+        "school", "classroom", "garden", "cafe", "library", "station", "platform",
+        "rooftop", "bedroom", "kitchen", "bathroom", "office", "park", "mountain",
+        "river", "lake", "field", "background", "scenery", "building", "temple",
+    ),
+}
+
+_EXACT_GACHA_MARKERS = {
+    # 作为复合词片段时通常是物品/作品名，而不是实际地点。
+    "school", "beach", "ocean", "garden", "cafe", "library", "station", "platform",
+    "park", "mountain", "river", "lake", "field", "building", "temple", "city",
+    "street", "forest", "room",
+    # wind_lift 等是效果/动作，不能当作天气环境。
+    "wind",
+}
+
+_IDENTITY_TAG_PATTERNS = (
+    r"^\d+(?:girl|boy|other)s?$",
+    r"^(?:solo|multiple_girls|multiple_boys|male|female)$",
+    r"^(?:male|female|character)_focus$",
+    r"(?:^|_)(?:hair|eyes?|skin|breasts?|age|teen|adult|child|loli|shota)(?:_|$)",
+    r"(?:^|_)(?:character|copyright|artist)_name(?:_|$)",
+    # 徽章/Logo 等词含有 school/building 等片段，但它们不是可用场景。
+    r"(?:^|_)(?:emblem|logo|crest|insignia)(?:_|$)",
+)
+
+_GACHA_EXCLUDED_PATTERNS = (
+    # entity_focus 往往描述主体身份而非镜头构图，容易抽到 food/pokemon 等无关内容。
+    r"(?:^|_)focus$",
+    # 这些标签虽然包含 light/shadow，但实际是表情或手影题材。
+    r"^light_(?:blush|smile|frown)$",
+    r"(?:^|_)shadow_puppet(?:_|$)",
+)
+
+
+def _infer_prompt_kind(tag, cn_name=""):
+    """把通用 Danbooru 标签映射到抽卡语义槽；内容仍来自数据文件/API。"""
+    value = str(tag or "").strip().lower().replace(" ", "_")
+    cn = str(cn_name or "")
+    def has_marker(marker):
+        escaped = re.escape(marker.replace(" ", "_"))
+        if marker in _EXACT_GACHA_MARKERS or marker in {
+            "day", "night", "summer", "winter", "spring", "autumn",
+        }:
+            return value == marker
+        return bool(re.search(r"(?:^|_)" + escaped + r"(?:_|$)", value))
+
+    for kind in ("lighting", "composition", "expression", "outfit", "action", "environment", "scene"):
+        if any(has_marker(marker) for marker in _PROMPT_KIND_MARKERS[kind]):
+            return kind
+    # 分类只依据英文标准标签的完整词边界。译名只用于显示，避免“光环/肩膀”
+    # 等中文描述把标签误判为光照或构图。
+    return None
+
+
+def _normalized_category_counts(settings=None):
+    raw = (settings or load_settings()).get("gacha_category_counts") or {}
+    defaults = DEFAULT_SETTINGS["gacha_category_counts"]
+    result = {}
+    for kind in PROMPT_KIND_LABELS:
+        try:
+            result[kind] = max(0, min(5, int(raw.get(kind, defaults.get(kind, 0)))))
+        except (TypeError, ValueError):
+            result[kind] = defaults.get(kind, 0)
+    return result
+
+
+def _build_gacha_buckets():
+    global _gacha_buckets
+    if _gacha_buckets is not None:
+        return _gacha_buckets
+    buckets = {kind: [] for kind in PROMPT_KIND_LABELS}
+    for item in _load_tag_catalog():
+        tag = item.get("tag", "")
+        if item.get("category") != "general" or not re.fullmatch(r"[a-z0-9_()'\-]+", tag):
+            continue
+        if any(re.search(pattern, tag) for pattern in (*_IDENTITY_TAG_PATTERNS, *_GACHA_EXCLUDED_PATTERNS)):
+            continue
+        kind = _infer_prompt_kind(tag, item.get("cn_name", ""))
+        if kind:
+            buckets[kind].append(item)
+    _gacha_buckets = buckets
+    return buckets
+
+
+def _weighted_pick(rows, count, rng, excluded, allow_nsfw=False):
+    try:
+        min_count = max(0, int(load_settings().get("gacha_min_post_count", 5000)))
+    except (TypeError, ValueError):
+        min_count = 5000
+    candidates = [
+        item for item in rows
+        if item.get("tag") not in excluded
+        and (allow_nsfw or not item.get("nsfw"))
+        and int(item.get("post_count") or 0) >= min_count
+    ]
+    chosen = []
+    for _ in range(min(count, len(candidates))):
+        weights = [max(1.0, math.pow(int(item.get("post_count") or 0), 0.35)) for item in candidates]
+        item = rng.choices(candidates, weights=weights, k=1)[0]
+        candidates.remove(item)
+        chosen.append(item)
+        excluded.add(item["tag"])
+    return chosen
+
+
+def _gacha_item(tag, kind, source, translation="", post_count=0):
+    return {
+        "tag": str(tag).strip().lower().replace(" ", "_"),
+        "translation": str(translation or "").strip(),
+        "kind": kind,
+        "category": "general",
+        "source": source,
+        "post_count": int(post_count or 0),
+        "weight": 1.0,
+        "enabled": True,
+    }
+
+
+def _is_gacha_source(item):
+    return isinstance(item, dict) and str(item.get("source") or "").startswith("gacha")
+
+
+def _database_gacha(character_tags="", seed=-1, initial_items=None, missing_only=False):
+    """从 tags_enhanced.csv 动态抽卡；不加载 SentenceTransformer/LLM。"""
+    global _gacha_counter
+    _gacha_counter += 1
+    settings = load_settings()
+    try:
+        seed_value = int(seed)
+    except (TypeError, ValueError):
+        seed_value = -1
+    rng = random.Random((time.time_ns() ^ _gacha_counter) if seed_value < 0 else seed_value + _gacha_counter - 1)
+    excluded = {
+        re.sub(r"\s+", "_", value.strip().lower())
+        for value in re.split(r"[,，;；、\n]+", str(character_tags or "")) if value.strip()
+    }
+    if settings.get("gacha_avoid_duplicates", True):
+        excluded.update(_gacha_history)
+    items = list(initial_items or [])
+    excluded.update(item.get("tag", "") for item in items)
+    counts = _normalized_category_counts(settings)
+    buckets = _build_gacha_buckets()
+    allow_nsfw = str(settings.get("rating_filter") or "general") not in {"general", "sensitive"}
+    for kind, quota in counts.items():
+        present = sum(1 for item in items if item.get("kind") == kind)
+        needed = max(0, quota - present) if missing_only else quota
+        for row in _weighted_pick(buckets.get(kind, []), needed, rng, excluded, allow_nsfw):
+            items.append(_gacha_item(row["tag"], kind, "gacha_database", row.get("cn_name"), row.get("post_count")))
+    for item in items:
+        if item.get("tag"):
+            _gacha_history.append(item["tag"])
+    if not items:
+        raise ValueError("标签数据文件没有形成可用抽卡池，请在设置中重新载入标签数据")
+    return {"name": "本地标签库随机组合", "tags": items, "provider": "database"}
+
+
+def _danbooru_random_gacha(character_tags="", seed=-1):
+    """从随机 Danbooru 帖子的真实共现标签抽卡；无需选择画廊图片或加载模型。"""
+    settings = load_settings()
+    try:
+        seed_value = int(seed)
+    except (TypeError, ValueError):
+        seed_value = -1
+    rng = random.Random(None if seed_value < 0 else seed_value)
+    query = str(settings.get("gacha_online_query") or "").strip()
+    # order:random 是 Danbooru 官方元标签；若镜像不支持则回退随机页。
+    try:
+        request_tags = query if query else "order:random"
+        posts = _fetch_posts(request_tags, 1, 20, settings.get("rating_filter", "general"))
+    except Exception:
+        posts = _fetch_posts(query, rng.randint(1, 200), 20, settings.get("rating_filter", "general"))
+    if not posts:
+        raise ValueError("Danbooru 没有返回可用于抽卡的帖子")
+    post = rng.choice(posts)
+    translations = _load_tag_translations()
+    excluded = {
+        re.sub(r"\s+", "_", value.strip().lower())
+        for value in re.split(r"[,，;；、\n]+", str(character_tags or "")) if value.strip()
+    }
+    buckets = {kind: [] for kind in PROMPT_KIND_LABELS}
+    for tag in str(post.get("tag_string_general") or "").split():
+        if tag in excluded or any(
+            re.search(pattern, tag)
+            for pattern in (*_IDENTITY_TAG_PATTERNS, *_GACHA_EXCLUDED_PATTERNS)
+        ):
+            continue
+        kind = _infer_prompt_kind(tag, translations.get(tag, ""))
+        if kind:
+            buckets[kind].append(tag)
+    counts = _normalized_category_counts(settings)
+    items = []
+    for kind, quota in counts.items():
+        values = list(dict.fromkeys(buckets[kind]))
+        rng.shuffle(values)
+        for tag in values[:quota]:
+            items.append(_gacha_item(tag, kind, "gacha_danbooru", translations.get(tag, "")))
+    # 随机帖子缺少某些槽时用本地数据池补齐，仍然不加载任何模型。
+    result = _database_gacha(character_tags, seed, initial_items=items, missing_only=True)
+    result.update({
+        "name": f"Danbooru 随机帖子 #{post.get('id', '?')}",
+        "provider": "danbooru_random",
+        "post_id": post.get("id"),
+    })
+    return result
 
 
 def _gacha_items_from_card(card, variant_index=None):
@@ -1132,7 +1622,9 @@ def _extract_llm_json(text):
             tag = str(value).strip().strip("`'\"").lower().replace(" ", "_")
             if tag and re.fullmatch(r"[a-z0-9_()'\-]+", tag):
                 try:
-                    weight = max(-2.0, min(2.0, float(weight)))
+                    weight = float(weight)
+                    if not math.isfinite(weight):
+                        weight = 1.0
                 except (TypeError, ValueError):
                     weight = 1.0
                 tags.append({"tag": tag, "kind": kind, "category": "general", "source": "gacha", "weight": weight, "enabled": True})
@@ -1167,6 +1659,8 @@ def _llm_gacha(
     system_prompt, prompt = _gacha_prompts(character_tags)
 
     if provider == "comfyui_model":
+        if load_settings().get("exclusive_model_memory", True):
+            _unload_semantic_models()
         from .local_llm_node import generate_local_text
         if not comfy_model:
             raise ValueError("请选择 ComfyUI 本地生成模型")
@@ -1226,20 +1720,28 @@ async def route_gacha(request):
     try:
         data = await request.json()
         settings = load_settings()
-        provider = str(data.get("provider") or settings.get("gacha_provider") or "rules")
+        provider = str(data.get("provider") or settings.get("gacha_provider") or "database")
         character_tags = str(data.get("character_tags") or "")
         seed = data.get("seed", -1)
-        if provider == "rules":
+        if provider == "database":
+            result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+        elif provider == "danbooru_random":
+            try:
+                result = await asyncio.to_thread(_danbooru_random_gacha, character_tags, seed)
+            except Exception as error:
+                result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+                result["warning"] = f"在线随机不可用，已回退本地标签库: {error}"
+        elif provider == "rules":
             result = _rule_gacha(character_tags, seed)
         elif provider == "gallery":
             try:
                 result = _gallery_gacha(data.get("selections") or [], character_tags, seed)
             except Exception as error:
-                result = _rule_gacha(character_tags, seed)
-                result["warning"] = f"画廊标签不可用，已回退规则卡组: {error}"
+                result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+                result["warning"] = f"画廊标签不可用，已回退本地标签库: {error}"
         elif not bool(settings.get("enable_model_calls", False)):
-            result = _rule_gacha(character_tags, seed)
-            result["warning"] = "语言模型/API 调用总开关已关闭，未加载模型并回退规则卡组"
+            result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+            result["warning"] = "语言模型/API 调用总开关已关闭，未加载模型并回退本地标签库"
         else:
             try:
                 result = await asyncio.to_thread(
@@ -1252,9 +1754,9 @@ async def route_gacha(request):
                     data.get("comfy_dtype") or settings.get("gacha_comfy_dtype", "bf16"),
                 )
             except Exception as error:
-                logger.warning(f"[DanbooruSearch] AI 抽卡失败，回退规则卡组: {error}")
-                result = _rule_gacha(character_tags, seed)
-                result["warning"] = f"AI 不可用，已回退规则卡组: {error}"
+                logger.warning(f"[DanbooruSearch] AI 抽卡失败，回退本地标签库: {error}")
+                result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+                result["warning"] = f"AI 不可用，已回退本地标签库: {error}"
         return web.json_response({"success": True, **result})
     except Exception as error:
         return web.json_response({"success": False, "error": str(error)}, status=400)
@@ -1265,12 +1767,13 @@ async def route_get_cache(request):
     node_id = request.query.get("node_id", "")
     entry = _selection_cache.get(str(node_id))
     if not entry:
+        settings = load_settings()
         return web.json_response({
             "success": True,
             "found": False,
             "selections": [],
             "selected_tags": [],
-            "gallery_collapsed": False,
+            "gallery_collapsed": bool(settings.get("default_gallery_collapsed", False)),
             "auto_gacha": False,
             "gacha_context": "",
         })
@@ -1404,7 +1907,7 @@ class DanbooruVueSearchNode:
         return re.sub(r"\s+", " ", text.replace("_", " ").strip().lower())
 
     @staticmethod
-    def _format_selected_tag(item):
+    def _format_selected_tag(item, underscore_mode="space"):
         if isinstance(item, str):
             tag = item.strip()
             weight = 1.0
@@ -1420,7 +1923,7 @@ class DanbooruVueSearchNode:
             return ""
         if not tag or not enabled:
             return ""
-        rendered = tag.replace("_", " ")
+        rendered = tag if underscore_mode == "keep" else tag.replace("_", " ")
         if abs(weight - 1.0) < 1e-6:
             return rendered
         return f"({rendered}:{weight:g})"
@@ -1441,27 +1944,35 @@ class DanbooruVueSearchNode:
 
         if bool(parsed.get("auto_gacha", False)):
             settings = load_settings()
-            provider = str(settings.get("gacha_provider") or "rules")
+            provider = str(settings.get("gacha_provider") or "database")
             context = ", ".join(filter(None, [
                 str(character_tags or "").strip(),
                 str(parsed.get("gacha_context") or "").strip(),
                 ", ".join(
                     str(item.get("tag") or "") for item in (selected_tags or [])
-                    if isinstance(item, dict) and item.get("enabled", True) and item.get("source") != "gacha"
+                    if isinstance(item, dict) and item.get("enabled", True) and not _is_gacha_source(item)
                 ),
             ]))
             try:
-                if provider == "rules":
+                if provider == "database":
+                    card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                elif provider == "danbooru_random":
+                    try:
+                        card = _danbooru_random_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                    except Exception as error:
+                        logger.warning(f"[DanbooruSearch] 在线抽卡失败，回退本地标签库: {error}")
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                elif provider == "rules":
                     card = _rule_gacha(context, parsed.get("gacha_seed", -1))
                 elif provider == "gallery":
                     try:
                         card = _gallery_gacha(selections, context, parsed.get("gacha_seed", -1))
                     except Exception as error:
-                        logger.warning(f"[DanbooruSearch] 画廊标签抽卡失败，回退规则卡组: {error}")
-                        card = _rule_gacha(context, parsed.get("gacha_seed", -1))
+                        logger.warning(f"[DanbooruSearch] 画廊标签抽卡失败，回退本地标签库: {error}")
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
                 elif not (bool(enable_language_model) and bool(settings.get("enable_model_calls", False))):
                     # 两级开关防止节点加载时或误执行时占用本地模型/API。
-                    card = _rule_gacha(context, parsed.get("gacha_seed", -1))
+                    card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
                 else:
                     try:
                         card = _llm_gacha(
@@ -1472,22 +1983,39 @@ class DanbooruVueSearchNode:
                             settings.get("gacha_comfy_dtype", "bf16"),
                         )
                     except Exception as error:
-                        logger.warning(f"[DanbooruSearch] 自动 AI 抽卡失败，回退规则卡组: {error}")
-                        card = _rule_gacha(context, parsed.get("gacha_seed", -1))
-                selected_tags = [item for item in (selected_tags or []) if not (isinstance(item, dict) and item.get("source") == "gacha")]
+                        logger.warning(f"[DanbooruSearch] 自动 AI 抽卡失败，回退本地标签库: {error}")
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                selected_tags = [item for item in (selected_tags or []) if not _is_gacha_source(item)]
                 selected_tags.extend(card.get("tags", []))
             except Exception as error:
                 logger.warning(f"[DanbooruSearch] 自动抽卡失败，保留当前标签: {error}")
 
+        output_settings = load_settings()
         tensors = []
-        # 新版工作流以顶部标签编辑器为唯一标签源；旧工作流
-        # 没有 selected_tags 字段时，仍回退到“已选图片的全部标签”。
+        # 顶部标签编辑器、前置角色标签和已选图片完整标签共同组成输出。
+        # 是否合并图片标签由设置控制，默认开启；这也修复了新版前端总是
+        # 提交 selected_tags 后意外跳过图片标签的问题。
         all_tags = self._split_external_tags(character_tags)
         if selected_tags is not None:
-            all_tags.extend(filter(None, (self._format_selected_tag(item) for item in selected_tags)))
+            all_tags.extend(filter(None, (self._format_selected_tag(item, output_settings.get("underscore_mode", "space")) for item in selected_tags)))
+        include_image_tags = bool(output_settings.get("include_selected_image_tags", True))
         target_size = None
 
         for sel in selections:
+            if include_image_tags or selected_tags is None:
+                tags = list(sel.get("tags", [])) if isinstance(sel.get("tags"), list) else []
+                # tag_groups 是完整分类数据；即使旧工作流里的扁平 tags 缺少 meta，
+                # 也要合并全部分组，最终统一去重。
+                if isinstance(sel.get("tag_groups"), dict):
+                    for values in sel["tag_groups"].values():
+                        if isinstance(values, list):
+                            tags.extend(values)
+                underscore_mode = output_settings.get("underscore_mode", "space")
+                all_tags.extend(
+                    str(tag).strip() if underscore_mode == "keep" else str(tag).strip().replace("_", " ")
+                    for tag in tags if str(tag).strip()
+                )
+
             url = sel.get("large_file_url") or sel.get("file_url") or sel.get("preview_file_url")
             if not url:
                 continue
@@ -1496,12 +2024,6 @@ class DanbooruVueSearchNode:
             except Exception as e:
                 print(f"[DanbooruSearch] 下载失败 {url}: {e}")
                 continue
-
-            # 记录标签
-            if selected_tags is None:
-                tags = sel.get("tags", [])
-                if isinstance(tags, list):
-                    all_tags.extend(tag.replace("_", " ") for tag in tags)
 
             # 统一尺寸到第一张图，方便 batch
             if target_size is None:

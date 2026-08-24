@@ -9,7 +9,7 @@
  */
 
 /* ── CSS 自定义属性（默认蓝色主题） ─────────────────────────────── */
-:root {
+.gal-root {
     --gal-primary: #4a7de0;
     --gal-primary-hover: #5a8fe0;
     --gal-primary-active: #2a4a8a;
@@ -508,3 +508,4 @@ select.gal-btn {
     flex-shrink: 0;
 }
 .gal-mode-label { color: #888; font-size: 10px; margin-right: 4px; }
+
