@@ -198,8 +198,6 @@ _CATEGORY_GROUPS = {
     ),
     f"{MENU_ROOT}/H3 导演台": (
         EagleH3DirectorNode,
-    ),
-    f"{MENU_ROOT}/导演技能": (
         EagleDirectorSkillNode,
     ),
 }

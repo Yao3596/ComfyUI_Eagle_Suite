@@ -14,6 +14,10 @@ nodes/prompts/user_templates.json
 nodes/prompts/covers/
 nodes/prompts/user_templates/
 eagle_suite/prompts/
+# 导演技能库（用户数据，不入库）
+nodes/prompts/director_skills/
+nodes/prompts/director_skills.json
+nodes/prompts/filmstrip/
 
 # ── Danbooru generated caches / models ──
 eagle_suite/danbooru_engine/tags_embedding/

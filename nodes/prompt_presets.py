@@ -10,6 +10,7 @@ import os
 import re
 import copy
 import io
+import shutil
 import mimetypes
 from pathlib import Path
 from datetime import datetime
@@ -908,9 +909,16 @@ async def export_templates(request):
 # 导演技能管理
 # ─────────────────────────────────────────────────────────
 
-DIRECTOR_SKILLS_FILE = BASE_DIR / "director_skills.json"
-FILMSTRIP_DIR = BASE_DIR / "filmstrip"
+# 导演技能库统一存放到专用子目录，避免与提示词模板、封面图混杂
+DIRECTOR_SKILLS_DIR = BASE_DIR / "director_skills"
+DIRECTOR_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+DIRECTOR_SKILLS_FILE = DIRECTOR_SKILLS_DIR / "skills.json"
+FILMSTRIP_DIR = DIRECTOR_SKILLS_DIR / "filmstrip"
 FILMSTRIP_DIR.mkdir(exist_ok=True)
+
+# 旧路径（用于一次性迁移）
+LEGACY_DIRECTOR_SKILLS_FILE = BASE_DIR / "director_skills.json"
+LEGACY_FILMSTRIP_DIR = BASE_DIR / "filmstrip"
 
 
 def load_director_skills() -> Dict:
@@ -932,6 +940,70 @@ def save_director_skills(skills: Dict):
             json.dump(skills, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"保存导演技能失败: {e}")
+
+
+def _ensure_default_skill():
+    """首次使用时创建一个默认导演技能，避免空库报错。"""
+    default_skill = {
+        "id": str(uuid.uuid4()),
+        "name": "默认导演技能 / Default Director Skill",
+        "content": (
+            "# 导演技能模板\n\n"
+            "## 世界观与风格\n\n"
+            "- 视觉基调：cinematic, high detail\n"
+            "- 运镜偏好：stable camera, medium shot\n"
+            "- 声音氛围：immersive ambient\n\n"
+            "## 使用方式\n\n"
+            "在此编辑可复用的导演上下文，连接到 H3 导演台的 `director_skill` 端口即可注入生成。"
+        ),
+        "filmstrip": [],
+        "updated_at": datetime.now().isoformat(),
+        "created_at": datetime.now().isoformat(),
+    }
+    save_director_skills({default_skill["id"]: default_skill})
+
+
+def _migrate_director_skills_storage():
+    """将旧路径的导演技能数据迁移到专用子目录（一次性，保留旧文件作备份）。"""
+    try:
+        migrated = False
+
+        # 迁移 skills.json
+        if LEGACY_DIRECTOR_SKILLS_FILE.exists() and not DIRECTOR_SKILLS_FILE.exists():
+            shutil.copy2(str(LEGACY_DIRECTOR_SKILLS_FILE), str(DIRECTOR_SKILLS_FILE))
+            logger.info(
+                f"已迁移导演技能库: {LEGACY_DIRECTOR_SKILLS_FILE} -> {DIRECTOR_SKILLS_FILE}"
+            )
+            migrated = True
+
+        # 迁移素材胶片图片
+        if LEGACY_FILMSTRIP_DIR.exists() and LEGACY_FILMSTRIP_DIR.is_dir():
+            moved_images = 0
+            for img in LEGACY_FILMSTRIP_DIR.iterdir():
+                if img.is_file():
+                    target = FILMSTRIP_DIR / img.name
+                    if not target.exists():
+                        shutil.copy2(str(img), str(target))
+                        moved_images += 1
+            if moved_images:
+                logger.info(
+                    f"已迁移 {moved_images} 张素材胶片: {LEGACY_FILMSTRIP_DIR} -> {FILMSTRIP_DIR}"
+                )
+                migrated = True
+
+        # 新库为空时自动创建默认技能，保证首次加载有内容
+        if not DIRECTOR_SKILLS_FILE.exists():
+            _ensure_default_skill()
+            migrated = True
+
+        if migrated:
+            logger.info("导演技能库初始化/迁移完成")
+    except Exception as e:
+        logger.error(f"导演技能库迁移失败: {e}")
+
+
+# 模块加载时执行一次性迁移与初始化
+_migrate_director_skills_storage()
 
 
 @route("GET", "/eaglePromptPresets/director_skills")

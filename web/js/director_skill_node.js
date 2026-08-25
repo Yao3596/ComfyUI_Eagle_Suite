@@ -116,6 +116,7 @@ var DirectorSkillApp = {
     var skillFilmstrip = ref([]);
     var filmstripUploading = ref(false);
     var errorMsg = ref("");
+    var infoMsg = ref("");
 
     var selectedSkill = computed(function () {
       return skills.value.find(function (s) { return s.id === selectedSkillId.value; }) || null;
@@ -141,6 +142,19 @@ var DirectorSkillApp = {
         var data = await resp.json();
         if (!data.success) throw new Error(data.error || "加载失败");
         skills.value = data.data || [];
+        errorMsg.value = "";
+
+        if (!skills.value.length) {
+          // 空库是正常状态，给友好提示，不当作错误
+          infoMsg.value = "暂无导演技能，点击「+ 新建」创建第一个技能。";
+          selectedSkillId.value = "";
+          skillContent.value = "";
+          skillFilmstrip.value = [];
+          pushToOutput();
+          return;
+        }
+        infoMsg.value = "";
+
         var st = {};
         try {
           var uw = nodeWidget("ui_state");
@@ -154,7 +168,8 @@ var DirectorSkillApp = {
         }
       } catch (e) {
         console.error("加载导演技能失败:", e);
-        errorMsg.value = "加载技能失败：" + e.message;
+        infoMsg.value = "";
+        errorMsg.value = "加载技能失败：" + (e.message || "未知错误") + "\n请检查 ComfyUI 后端日志。";
         skills.value = [];
       }
     }
@@ -294,10 +309,14 @@ var DirectorSkillApp = {
         ]),
 
         errorMsg.value
-          ? h("div", { style: { padding: "10px", color: "#e06c5a" } }, errorMsg.value)
-          : h("div", { class: "pp-director-layout" }, [
-              h("aside", { class: "pp-director-sidebar" }, [
-                h("div", { class: "pp-skills-list" },
+          ? h("div", { style: { padding: "10px", color: "#e06c5a", whiteSpace: "pre-wrap" } }, errorMsg.value)
+          : h("div", { style: { display: "flex", flexDirection: "column", flex: "1 1 auto", minHeight: "0" } }, [
+              infoMsg.value
+                ? h("div", { style: { padding: "10px", color: "#61afef", background: "#1e2a3a", borderBottom: "1px solid #2f455a" } }, infoMsg.value)
+                : null,
+              h("div", { class: "pp-director-layout" }, [
+                h("aside", { class: "pp-director-sidebar" }, [
+                  h("div", { class: "pp-skills-list" },
                   skills.value.map(function (skill) {
                     return h("button", {
                       type: "button",
@@ -363,6 +382,7 @@ var DirectorSkillApp = {
                 ])
               ])
             ])
+          ])
       ]);
     };
   }
