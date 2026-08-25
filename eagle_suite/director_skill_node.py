@@ -27,9 +27,13 @@ class EagleDirectorSkillNode:
                     "tooltip": "当前选中的导演技能内容（Markdown）。由前端从技能库写入，"
                                "作为输出端口供其他节点（如 H3 导演台）连接使用。",
                 }),
+                "ui_state": ("STRING", {
+                    "default": "{}",
+                    "multiline": False,
+                    "dynamicPrompts": False,
+                }),
             },
             "hidden": {
-                "ui_state": "STRING",
                 "unique_id": "UNIQUE_ID",
                 "extra_pnginfo": "EXTRA_PNGINFO",
             },

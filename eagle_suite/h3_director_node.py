@@ -178,13 +178,21 @@ def _build_shot_blocks(shots):
             parts.append(f"At {s['time']},")
         if s.get("framing"):
             parts.append(f"[{s['framing']}]")
+        if s.get("transitionIn"):
+            parts.append(f"Transition in: {s['transitionIn']}.")
         parts.append(s.get("content") or "(no content)")
+        if s.get("intent"):
+            parts.append(f"Narrative intent: {s['intent']}.")
         if s.get("action"):
             parts.append(f"Action: {s['action']}.")
         if s.get("camera"):
             parts.append(f"Camera: {s['camera']}.")
+        if s.get("lens"):
+            parts.append(f"Lens/focus: {s['lens']}.")
         if s.get("sound"):
             parts.append(f"Sound: {s['sound']}.")
+        if s.get("transitionOut"):
+            parts.append(f"Transition out: {s['transitionOut']}.")
         lines.append(f"[Shot {i + 1}: {s.get('title') or 'untitled'}] " + " ".join(parts))
     if not lines:
         return ""
@@ -607,10 +615,69 @@ def compile_h3_params(project, scenes, llm_hint=""):
 
 _SKILL_SYSTEM = (
     "You are a professional H3 (MiniMax H3) video director assistant. "
-    "You help write screenplays, break them into camera-ready shots, and "
-    "extract dialogue for AI video generation. "
+    "You turn dramatic intent into editable, camera-ready coverage for AI video generation. "
+    "Every camera move and cut must have a narrative motivation. Preserve screen direction, "
+    "eyelines, action continuity, subject identity, spatial geography, and duration budget. "
+    "Prefer precise staging, shot scale, motion path, speed curve, transition bridge, sound cue, "
+    "and end composition over vague cinematic adjectives. "
     "Always respond with valid JSON only, no extra commentary."
 )
+
+_INTERNAL_DIRECTOR_PROFILES = {
+    "balanced": (
+        "Use classical coverage: establish geography, develop action with motivated medium coverage, "
+        "reserve close-ups for emotional or informational turns, and finish on a visual or sound hook."
+    ),
+    "cinematic": (
+        "Favor controlled blocking, layered foreground/midground/background composition, motivated "
+        "dolly or arc movement, restrained lens changes, and visual match cuts. Avoid random camera motion."
+    ),
+    "dynamic": (
+        "Build escalating kinetic coverage using tracking, leading/trailing movement, cut-on-action, "
+        "foreground wipes and speed contrast. Keep axis, direction and action phase continuous."
+    ),
+    "intimate": (
+        "Prioritize performance, eyelines, breath, hands and reaction shots. Use slow push-ins, selective "
+        "focus and sound bridges; keep movement subtle and let emotional beats breathe."
+    ),
+    "commercial": (
+        "Use clean product/subject reveals, graphic composition, controlled highlights, rhythmic inserts, "
+        "feature-to-benefit causality and a decisive hero ending."
+    ),
+}
+
+
+def _filter_director_skill_for_task(text, task):
+    """Keep only composed Markdown skill sections applicable to the current task."""
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    sections = re.split(r"\n\s*---\s*\n", text)
+    selected = []
+    for section in sections:
+        task_match = re.search(r"tasks\s*:\s*([^\n>|]+)", section, flags=re.I)
+        if task_match:
+            allowed = {item.strip().lower() for item in task_match.group(1).split(",") if item.strip()}
+            if allowed and task.lower() not in allowed and "all" not in allowed:
+                continue
+        selected.append(section.strip())
+    return "\n\n---\n\n".join(item for item in selected if item)
+
+
+def _compose_director_guidance(task, request, director_skill):
+    request = request if isinstance(request, dict) else {}
+    profile_name = str(request.get("profile") or "balanced").lower()
+    profile = _INTERNAL_DIRECTOR_PROFILES.get(profile_name, _INTERNAL_DIRECTOR_PROFILES["balanced"])
+    external = _filter_director_skill_for_task(director_skill, task)
+    policy = str(request.get("skillPolicy") or "merge").lower()
+    if policy == "external_only" and external:
+        return external
+    if policy == "internal_only" or not external:
+        return "## Internal directing profile: %s\n\n%s" % (profile_name, profile)
+    return (
+        "## Internal directing profile: %s\n\n%s\n\n---\n\n"
+        "## Connected Director Skill layers\n\n%s" % (profile_name, profile, external)
+    )
 
 
 def _select_transport(api_config, local_model, pref):
@@ -713,10 +780,11 @@ def _extract_json(text):
     return None
 
 
-def _build_skill_prompts(task, project, scene, hint, director_skill=""):
+def _build_skill_prompts(task, project, scene, hint, director_skill="", request=None):
     """返回 (system, user) 提示词。"""
     foundation = (project.get("foundation") or "").strip()
     director_skill = (director_skill or project.get("director_skill") or "").strip()
+    director_skill = _compose_director_guidance(task, request, director_skill)
     title = (scene.get("title") or "").strip() or "未命名场景"
     preamble = (scene.get("preamble") or "").strip()
     director_ctx = ""
@@ -741,7 +809,9 @@ def _build_skill_prompts(task, project, scene, hint, director_skill=""):
             "【现有台本】\n" + (preamble or "(空)") + "\n\n"
             "请将台本拆分为镜头条目。输出 ONLY JSON：\n"
             "{\"shots\":[{\"title\":\"\",\"time\":\"00:00.000\",\"framing\":\"\","
-            "\"content\":\"\",\"camera\":\"\",\"action\":\"\",\"sound\":\"\",\"estSeconds\":2.5}]}\n"
+            "\"content\":\"\",\"camera\":\"\",\"lens\":\"\",\"intent\":\"\","
+            "\"action\":\"\",\"sound\":\"\",\"transitionIn\":\"\",\"transitionOut\":\"\","
+            "\"estSeconds\":2.5}]}\n"
             "要求：time 顺序递增；estSeconds 之和约等于场景时长；framing 用 "
             "extreme_close_up / close_up / medium_shot / cowboy_shot / full_body / wide_shot "
             "之一或空；content 为英文镜头描述。"
@@ -763,8 +833,11 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
     """运行导演 Skill，返回 {scene_id, preamble, dialogues, shots, transport, error}。"""
     out = {
         "scene_id": request.get("sceneId"),
+        "sceneId": request.get("sceneId"),
         "preamble": None, "dialogues": None, "shots": None,
         "transport": None, "error": None,
+        "skill_profile": request.get("profile", "balanced"),
+        "skill_policy": request.get("skillPolicy", "merge"),
     }
     try:
         tasks = request.get("tasks") or []
@@ -790,6 +863,7 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
             out["error"] = "没有可用场景。"
             return out
         out["scene_id"] = scene.get("id")
+        out["sceneId"] = scene.get("id")
 
         cur = {
             "preamble": scene.get("preamble", ""),
@@ -799,7 +873,9 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         for task in tasks:
             if task not in ("script", "shots", "dialogue"):
                 continue
-            sys_p, user_p = _build_skill_prompts(task, project, cur, hint, director_skill)
+            sys_p, user_p = _build_skill_prompts(
+                task, project, cur, hint, director_skill, request=request
+            )
             raw = _call_llm(kind, transport, sys_p, user_p, temperature)
             parsed = _extract_json(raw)
             if not parsed:

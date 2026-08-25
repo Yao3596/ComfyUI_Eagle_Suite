@@ -1,0 +1,128 @@
+{
+  "bde3c0da-57c2-4458-bba5-fc0218d6ce3b": {
+    "id": "bde3c0da-57c2-4458-bba5-fc0218d6ce3b",
+    "name": "默认导演技能 / Default Director Skill",
+    "content": "# 导演技能模板\n\n## 世界观与风格\n\n- 视觉基调：cinematic, high detail\n- 运镜偏好：stable camera, medium shot\n- 声音氛围：immersive ambient\n\n## 使用方式\n\n在此编辑可复用的导演上下文，连接到 H3 导演台的 `director_skill` 端口即可注入生成。",
+    "filmstrip": [],
+    "updated_at": "2026-08-25T16:45:06.576925",
+    "created_at": "2026-08-25T16:45:06.576931"
+  },
+  "pro-v1-story-architecture": {
+    "id": "pro-v1-story-architecture",
+    "name": "故事节拍与场面调度",
+    "category": "narrative",
+    "tasks": [
+      "script",
+      "shots",
+      "dialogue"
+    ],
+    "tags": [
+      "beat",
+      "blocking",
+      "continuity",
+      "setup-payoff"
+    ],
+    "content": "# 故事节拍与场面调度\n\n## 目标\n- 每场必须有明确的欲望、阻力、转折和新的局面，避免镜头只做画面罗列。\n- 用动作和空间关系表达人物权力变化；台词只承担画面无法表达的信息。\n- 建立 setup → development → payoff，结尾保留动作、视线或声音钩子供下一场承接。\n\n## 输出纪律\n- 先确定场景的 dramatic question，再设计主镜头、覆盖镜头和反应镜头。\n- 每次切镜必须回答：信息改变、情绪改变、视点改变或节奏改变。\n- 保持人物轴线、屏幕方向、道具位置、服装和光线连续性。",
+    "filmstrip": [],
+    "created_at": "2026-08-25T16:45:06.57806",
+    "updated_at": "2026-08-25T16:45:06.57806"
+  },
+  "pro-v1-shot-language": {
+    "id": "pro-v1-shot-language",
+    "name": "景别、构图与视点语言",
+    "category": "shot_language",
+    "tasks": [
+      "shots"
+    ],
+    "tags": [
+      "framing",
+      "composition",
+      "pov",
+      "coverage"
+    ],
+    "content": "# 景别、构图与视点语言\n\n- Extreme wide / wide：建立地理、规模、孤独或压迫；主体必须有清晰的空间关系。\n- Full / medium：呈现行为、调度和人物关系；优先保证动作可读。\n- Close-up / extreme close-up：只在信息或情绪达到临界点时使用，明确眼神、呼吸或关键物件。\n- OTS、POV、two-shot、profile、insert、reaction shot 应服务视点和关系，不把景别当随机装饰。\n- 写明主体位置、前中后景、焦点转移、镜头高度、俯仰角和画面方向；避免连续镜头无动机跳轴。",
+    "filmstrip": [],
+    "created_at": "2026-08-25T16:45:06.57806",
+    "updated_at": "2026-08-25T16:45:06.57806"
+  },
+  "pro-v1-camera-motion": {
+    "id": "pro-v1-camera-motion",
+    "name": "专业运镜与镜头动机",
+    "category": "camera_motion",
+    "tasks": [
+      "shots"
+    ],
+    "tags": [
+      "push",
+      "pull",
+      "pan",
+      "tilt",
+      "tracking",
+      "orbit"
+    ],
+    "content": "# 专业运镜与镜头动机\n\n## 运动词典\n- slow push-in：压缩注意力、逼近领悟或威胁；以人物反应为落点。\n- pull-out / dolly-out：揭示处境、疏离或失去控制；结束时必须出现新空间信息。\n- pan / tilt：跟随视线、揭示信息或连接两个主体；注明起点、触发点、终点。\n- tracking / leading / trailing：伴随行动建立速度与空间；保持主体运动方向连续。\n- orbit / arc：关系逆转、眩晕或英雄化；限制角度并给出前景参照，避免无意义环绕。\n- crane / boom / drone：规模揭示或段落收束；说明升降速度和最终构图。\n- handheld：只用于主观不稳、纪录感或冲突升级；注明震动幅度。\n- rack focus / parallax：在同镜头内转移叙事权重。\n\n## 约束\n每个运动都写成：镜头装置 + 方向/路径 + 速度曲线 + 触发动作 + 结束构图 + 叙事目的。静止镜头也是主动选择。",
+    "filmstrip": [],
+    "created_at": "2026-08-25T16:45:06.57806",
+    "updated_at": "2026-08-25T16:45:06.57806"
+  },
+  "pro-v1-transitions": {
+    "id": "pro-v1-transitions",
+    "name": "转场、连续性与叙事桥接",
+    "category": "transition",
+    "tasks": [
+      "script",
+      "shots"
+    ],
+    "tags": [
+      "match-cut",
+      "j-cut",
+      "l-cut",
+      "whip-pan",
+      "motif"
+    ],
+    "content": "# 转场、连续性与叙事桥接\n\n- cut on action：在动作峰值切换景别，前后动作姿态与方向匹配。\n- eyeline / POV cut：先给视线，再给所见；反打保持轴线和视线高度。\n- match cut：用形状、色彩、动作、构图或语义呼应连接时空。\n- J-cut：下一场声音先入，制造期待或反讽；L-cut：上一场声音延续，保留情绪余波。\n- whip-pan / foreground wipe：只在速度、方向和遮挡物可匹配时使用。\n- dissolve / time-lapse / montage：表达时间、省略过程或记忆，不替代缺失的戏剧转折。\n- hard cut / smash cut：用强烈反差制造笑点、惊吓或观点碰撞。\n\n为每场结尾给出 `transition_out`，下一场给出 `transition_in`，二者须共享声音、动作、视线、色彩或图形中的至少一个桥接元素。",
+    "filmstrip": [],
+    "created_at": "2026-08-25T16:45:06.57806",
+    "updated_at": "2026-08-25T16:45:06.57806"
+  },
+  "pro-v1-rhythm": {
+    "id": "pro-v1-rhythm",
+    "name": "节奏、时长与蒙太奇",
+    "category": "rhythm",
+    "tasks": [
+      "script",
+      "shots"
+    ],
+    "tags": [
+      "pacing",
+      "montage",
+      "duration",
+      "contrast"
+    ],
+    "content": "# 节奏、时长与蒙太奇\n\n- 镜头时长由信息读取时间和情绪停留时间决定；建立镜头较长，动作节点可缩短，关键反应需留余量。\n- 用长短、动静、远近、明暗、响静形成节奏对比，避免所有镜头同速同长。\n- 蒙太奇必须有清楚的组织原则：时间推进、空间并行、动作升级、视觉押韵或因果链。\n- 高潮前减少解释并加速动作切分；高潮落点后保留一个反应或环境镜头让信息沉淀。\n- H3 分镜必须给出可执行的 `estSeconds`，总时长与场景预算一致。",
+    "filmstrip": [],
+    "created_at": "2026-08-25T16:45:06.57806",
+    "updated_at": "2026-08-25T16:45:06.57806"
+  },
+  "pro-v1-sound-dialogue": {
+    "id": "pro-v1-sound-dialogue",
+    "name": "台词、表演与声音叙事",
+    "category": "performance_sound",
+    "tasks": [
+      "script",
+      "dialogue",
+      "shots"
+    ],
+    "tags": [
+      "dialogue",
+      "performance",
+      "soundscape",
+      "j-cut",
+      "l-cut"
+    ],
+    "content": "# 台词、表演与声音叙事\n\n- 台词要可表演、可呼吸、带潜台词；控制句长，避免角色说出已经看见的画面。\n- 每句台词附带动作或反应语境，但不把情绪写成空泛形容词。\n- 设计环境底噪、同步动作声、关键音效、画外声和非叙事音乐的层级。\n- 用声音先行、声音延续、突然静默和声画对位承担转场及悬念。\n- 对白场优先建立 master、双人、OTS、单人和反应镜头的覆盖关系，确保剪辑连续。",
+    "filmstrip": [],
+    "created_at": "2026-08-25T16:45:06.57806",
+    "updated_at": "2026-08-25T16:45:06.57806"
+  }
+}

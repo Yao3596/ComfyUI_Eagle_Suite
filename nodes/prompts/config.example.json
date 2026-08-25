@@ -4,7 +4,14 @@
     "api_url": "https://127.0.0.1:27124",
     "api_key": "",
     "vault_path": "",
-    "prompts_folder": "ComfyUI/Prompts"
+    "prompts_folder": "ComfyUI/Prompts",
+    "director_skills_folder": "ComfyUI/DirectorSkills",
+    "director_skills_file": "Eagle Director Skills.md"
+  },
+  "director_skills": {
+    "source": "eagle",
+    "custom_path": "",
+    "filmstrip_megapixels": 1.0
   },
   "local_paths": [],
   "auto_sync": true,

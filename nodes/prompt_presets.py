@@ -19,7 +19,7 @@ from urllib.parse import quote, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import web
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..eagle_suite.logger import logger
 from ..eagle_suite.route_registry import route
@@ -31,10 +31,15 @@ from ..eagle_suite.route_registry import route
 BASE_DIR = Path(__file__).parent / "prompts"
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SKILL_DIR = PLUGIN_ROOT / "eagle_suite" / "skills"
+LEGACY_SINGULAR_SKILL_DIR = PLUGIN_ROOT / "eagle_suite" / "Skill"
+SKILL_DIR.mkdir(parents=True, exist_ok=True)
+
 CONFIG_FILE = BASE_DIR / "config.json"
 USER_TEMPLATES_FILE = BASE_DIR / "user_templates.json"
-USER_TEMPLATES_DIR = BASE_DIR / "user_templates"
-USER_TEMPLATES_DIR.mkdir(exist_ok=True)
+USER_TEMPLATES_DIR = SKILL_DIR / "user_templates"
+USER_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_DIR = BASE_DIR / "covers"
 COVERS_DIR.mkdir(exist_ok=True)
 
@@ -45,7 +50,14 @@ DEFAULT_CONFIG = {
         "api_url": "https://127.0.0.1:27124",
         "api_key": "",
         "vault_path": "",
-        "prompts_folder": "ComfyUI/Prompts"
+        "prompts_folder": "ComfyUI/Prompts",
+        "director_skills_folder": "ComfyUI/DirectorSkills",
+        "director_skills_file": "Eagle Director Skills.md"
+    },
+    "director_skills": {
+        "source": "eagle",
+        "custom_path": "",
+        "filmstrip_megapixels": 1.0
     },
     "local_paths": [str(USER_TEMPLATES_DIR)],
     "auto_sync": True,
@@ -114,9 +126,32 @@ def load_config() -> dict:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 stored = json.load(f) or {}
                 merged = copy.deepcopy(DEFAULT_CONFIG)
-                merged.update({key: value for key, value in stored.items() if key != "obsidian"})
+                merged.update({key: value for key, value in stored.items() if key not in {"obsidian", "director_skills"}})
                 if isinstance(stored.get("obsidian"), dict):
                     merged["obsidian"].update(stored["obsidian"])
+                if isinstance(stored.get("director_skills"), dict):
+                    merged["director_skills"].update(stored["director_skills"])
+                try:
+                    merged["director_skills"]["filmstrip_megapixels"] = min(
+                        10.0,
+                        max(1.0, float(merged["director_skills"].get("filmstrip_megapixels") or 1.0)),
+                    )
+                except (TypeError, ValueError):
+                    merged["director_skills"]["filmstrip_megapixels"] = 1.0
+                legacy_template_dirs = {
+                    (BASE_DIR / "user_templates").resolve(),
+                    (LEGACY_SINGULAR_SKILL_DIR / "user_templates").resolve(),
+                }
+                normalized_paths = []
+                for raw_path in merged.get("local_paths") or []:
+                    try:
+                        path = Path(str(raw_path)).expanduser().resolve()
+                        normalized_paths.append(
+                            str(USER_TEMPLATES_DIR) if path in legacy_template_dirs else str(raw_path)
+                        )
+                    except Exception:
+                        normalized_paths.append(str(raw_path))
+                merged["local_paths"] = list(dict.fromkeys(normalized_paths))
                 return merged
         except Exception as e:
             logger.error(f"加载配置失败: {e}")
@@ -126,6 +161,14 @@ def load_config() -> dict:
 def save_config(config: dict):
     """保存配置"""
     try:
+        config = copy.deepcopy(config or {})
+        director_settings = config.setdefault("director_skills", {})
+        try:
+            director_settings["filmstrip_megapixels"] = min(
+                10.0, max(1.0, float(director_settings.get("filmstrip_megapixels") or 1.0))
+            )
+        except (TypeError, ValueError):
+            director_settings["filmstrip_megapixels"] = 1.0
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -792,13 +835,13 @@ async def test_obsidian(request):
 def _allowed_cover_path(raw_path: str) -> Optional[Path]:
     try:
         raw_candidate = Path(str(raw_path or "")).expanduser()
-        candidate = (raw_candidate if raw_candidate.is_absolute() else BASE_DIR / raw_candidate).resolve()
-        
-        if candidate.is_symlink():
-            candidate = candidate.readlink().resolve()
-        
+        candidates = (
+            [raw_candidate.resolve()]
+            if raw_candidate.is_absolute()
+            else [(BASE_DIR / raw_candidate).resolve(), (SKILL_DIR / raw_candidate).resolve()]
+        )
         config = load_config()
-        roots = [BASE_DIR.resolve()]
+        roots = [BASE_DIR.resolve(), SKILL_DIR.resolve()]
         for raw_root in config.get("local_paths", []):
             root = Path(str(raw_root)).expanduser()
             if root.is_dir():
@@ -807,9 +850,12 @@ def _allowed_cover_path(raw_path: str) -> Optional[Path]:
         obsidian_root = _resolve_obsidian_local_dir(config.get("obsidian", {}))
         if obsidian_root:
             roots.append(obsidian_root)
-        
-        if candidate.is_file() and any(candidate == root or root in candidate.parents for root in roots):
-            return candidate
+
+        for candidate in candidates:
+            if candidate.is_symlink():
+                candidate = candidate.readlink().resolve()
+            if candidate.is_file() and any(candidate == root or root in candidate.parents for root in roots):
+                return candidate
     except Exception:
         pass
     return None
@@ -909,57 +955,242 @@ async def export_templates(request):
 # 导演技能管理
 # ─────────────────────────────────────────────────────────
 
-# 导演技能库默认存放目录（插件内）
-DIRECTOR_SKILLS_DEFAULT_DIR = BASE_DIR / "director_skills"
+# 导演技能、素材胶片与 Markdown 用户模板统一归档在 eagle_suite/skills 下。
+DIRECTOR_SKILLS_DEFAULT_DIR = SKILL_DIR
 DIRECTOR_SKILLS_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
-DIRECTOR_SKILLS_FILE = DIRECTOR_SKILLS_DEFAULT_DIR / "skills.json"
+DIRECTOR_SKILLS_FILE = DIRECTOR_SKILLS_DEFAULT_DIR / "director_skills.json"
 FILMSTRIP_DIR = DIRECTOR_SKILLS_DEFAULT_DIR / "filmstrip"
 FILMSTRIP_DIR.mkdir(exist_ok=True)
 
-#  (用于一次性迁移)
+# 旧 prompts 路径仅作为一次性兼容迁移来源，不再作为运行时存储。
+LEGACY_PROMPTS_SKILLS_DIR = BASE_DIR / "director_skills"
+LEGACY_PROMPTS_SKILLS_FILE = LEGACY_PROMPTS_SKILLS_DIR / "skills.json"
+LEGACY_PROMPTS_USER_TEMPLATES_DIR = BASE_DIR / "user_templates"
 LEGACY_DIRECTOR_SKILLS_FILE = BASE_DIR / "director_skills.json"
-LEGACY_FILMSTRIP_DIR = BASE_DIR / "filmstrip"
+LEGACY_FILMSTRIP_DIRS = [
+    LEGACY_SINGULAR_SKILL_DIR / "filmstrip",
+    LEGACY_PROMPTS_SKILLS_DIR / "filmstrip",
+    BASE_DIR / "filmstrip",
+]
 
 
-def resolve_director_skills_file():
-    """技能库存储路径：优先使用配置中的用户本地目录，否则用插件默认目录。
+def _director_skill_source(config: Optional[dict] = None) -> str:
+    value = str(((config or load_config()).get("director_skills") or {}).get("source") or "eagle").lower()
+    return value if value in {"eagle", "obsidian", "custom"} else "eagle"
 
-    配置项 config.local_paths 中第一个真实存在的目录会被采用，并在其下创建
-    EagleSuite/director_skills.json。这样用户可以把数据放在 NAS、网盘同步目录等位置。
-    """
-    cfg = load_config()
-    for raw in (cfg.get("local_paths") or []):
-        p = Path(str(raw).strip())
-        if p and p.is_dir():
-            target = p / "EagleSuite" / "director_skills.json"
+
+def resolve_director_skills_file(config: Optional[dict] = None):
+    """解析用户选择的 JSON 技能源；未设置时始终使用 Eagle 节点技能库。"""
+    cfg = config or load_config()
+    if _director_skill_source(cfg) == "custom":
+        raw = str((cfg.get("director_skills") or {}).get("custom_path") or "").strip()
+        if raw:
+            target = Path(raw).expanduser()
+            if target.suffix.lower() != ".json":
+                target = target / "director_skills.json"
+            target = target.resolve()
             target.parent.mkdir(parents=True, exist_ok=True)
             return target
     DIRECTOR_SKILLS_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
     return DIRECTOR_SKILLS_FILE
 
 
-def load_director_skills() -> Dict:
-    """加载所有导演技能"""
-    path = resolve_director_skills_file()
-    if not path.exists():
+def _load_skill_json(path: Path) -> Dict:
+    if not path or not path.is_file():
         return {}
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"加载导演技能失败: {e}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return {str(item.get("id") or uuid.uuid4()): item for item in data if isinstance(item, dict)}
+        return data if isinstance(data, dict) else {}
+    except Exception as error:
+        logger.warning(f"读取导演技能文件失败 ({path}): {error}")
         return {}
+
+
+def _legacy_director_skill_files(config: Optional[dict] = None) -> List[Path]:
+    cfg = config or load_config()
+    candidates = [
+        LEGACY_SINGULAR_SKILL_DIR / "director_skills.json",
+        LEGACY_PROMPTS_SKILLS_FILE,
+        LEGACY_PROMPTS_USER_TEMPLATES_DIR / "EagleSuite" / "director_skills.json",
+        LEGACY_DIRECTOR_SKILLS_FILE,
+    ]
+    for raw in (cfg.get("local_paths") or []):
+        value = str(raw or "").strip()
+        if value:
+            candidates.append(Path(value).expanduser() / "EagleSuite" / "director_skills.json")
+    unique = []
+    seen = set()
+    for item in candidates:
+        key = str(item.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _director_skill_updated_at(skill: Dict) -> float:
+    raw = str((skill or {}).get("updated_at") or (skill or {}).get("created_at") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        pass
+    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw, fmt).timestamp()
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _merge_director_skill_sources(sources: List[Dict]) -> Dict:
+    """按技能名称去重并保留最新版，同时合并同名条目的素材引用。"""
+    selected = {}
+    order = []
+    for source in sources:
+        for skill_id, raw_skill in (source or {}).items():
+            if not isinstance(raw_skill, dict):
+                continue
+            skill = copy.deepcopy(raw_skill)
+            skill_id = str(skill.get("id") or skill_id or uuid.uuid4())
+            skill["id"] = skill_id
+            name = str(skill.get("name") or "").strip().casefold()
+            key = f"name:{name}" if name else f"id:{skill_id}"
+            current = selected.get(key)
+            if current is None:
+                order.append(key)
+                selected[key] = (skill_id, skill)
+                continue
+
+            current_id, current_skill = current
+            merged_filmstrip = list(dict.fromkeys(
+                list(current_skill.get("filmstrip") or []) + list(skill.get("filmstrip") or [])
+            ))
+            if _director_skill_updated_at(skill) > _director_skill_updated_at(current_skill):
+                skill["filmstrip"] = merged_filmstrip
+                selected[key] = (skill_id, skill)
+            else:
+                current_skill["filmstrip"] = merged_filmstrip
+                selected[key] = (current_id, current_skill)
+    return {selected[key][0]: selected[key][1] for key in order}
+
+
+def load_director_skills() -> Dict:
+    """加载所有导演技能"""
+    config = load_config()
+    if _director_skill_source(config) == "obsidian":
+        markdown_file = _director_obsidian_file(config)
+        if markdown_file and markdown_file.is_file():
+            incoming = _director_skills_from_markdown(markdown_file.read_text(encoding="utf-8"))
+            if incoming:
+                eagle = _load_skill_json(DIRECTOR_SKILLS_FILE)
+                for skill_id, skill in incoming.items():
+                    if eagle.get(skill_id, {}).get("filmstrip"):
+                        skill["filmstrip"] = list(eagle[skill_id].get("filmstrip") or [])
+                return incoming
+    return _load_skill_json(resolve_director_skills_file(config))
 
 
 def save_director_skills(skills: Dict):
     """保存导演技能"""
-    path = resolve_director_skills_file()
     try:
+        config = load_config()
+        if _director_skill_source(config) == "obsidian":
+            markdown_file = _director_obsidian_file(config)
+            if markdown_file:
+                markdown_file.parent.mkdir(parents=True, exist_ok=True)
+                markdown_file.write_text(_director_skills_to_markdown(skills), encoding="utf-8")
+                return
+        path = resolve_director_skills_file(config)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(skills, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"保存导演技能失败: {e}")
+
+
+def _director_obsidian_file(config: dict) -> Optional[Path]:
+    """Resolve the local Obsidian Markdown library used by Director Skills."""
+    obsidian = (config or {}).get("obsidian") or {}
+    vault_raw = str(obsidian.get("vault_path") or "").strip()
+    if not vault_raw:
+        return None
+    vault = Path(vault_raw).expanduser().resolve()
+    if not vault.is_dir():
+        return None
+    folder = str(obsidian.get("director_skills_folder") or "ComfyUI/DirectorSkills").strip().strip("/\\")
+    filename = Path(str(obsidian.get("director_skills_file") or "Eagle Director Skills.md")).name
+    target_dir = (vault / folder).resolve() if folder else vault
+    if target_dir != vault and vault not in target_dir.parents:
+        return None
+    return target_dir / filename
+
+
+def _director_skills_to_markdown(skills: Dict) -> str:
+    """Store many skills in one Obsidian-friendly Markdown document."""
+    blocks = [
+        "---",
+        "eagle_type: director_skill_library",
+        "version: 1",
+        f"updated_at: {datetime.now().isoformat()}",
+        "---",
+        "",
+        "# Eagle Director Skills",
+        "",
+        "> 此文件由 ComfyUI Eagle Suite 管理；每个 skill 区块都可以在 Obsidian 中直接编辑。",
+        "",
+    ]
+    for skill in skills.values():
+        metadata = {
+            "id": str(skill.get("id") or uuid.uuid4()),
+            "name": str(skill.get("name") or "未命名技能"),
+            "category": str(skill.get("category") or "custom"),
+            "tasks": list(skill.get("tasks") or []),
+            "tags": list(skill.get("tags") or []),
+        }
+        blocks.extend([
+            "<!-- eagle-skill:start -->",
+            "```eagle-skill-meta",
+            json.dumps(metadata, ensure_ascii=False),
+            "```",
+            "",
+            str(skill.get("content") or "").strip(),
+            "",
+            "<!-- eagle-skill:end -->",
+            "",
+        ])
+    return "\n".join(blocks).rstrip() + "\n"
+
+
+def _director_skills_from_markdown(text: str) -> Dict:
+    """Read skill blocks written by _director_skills_to_markdown."""
+    result = {}
+    pattern = re.compile(
+        r"<!--\s*eagle-skill:start\s*-->\s*"
+        r"```eagle-skill-meta\s*\r?\n(.*?)\r?\n```\s*"
+        r"(.*?)\s*<!--\s*eagle-skill:end\s*-->",
+        re.DOTALL | re.IGNORECASE,
+    )
+    for meta_raw, content in pattern.findall(str(text or "")):
+        try:
+            metadata = json.loads(meta_raw.strip())
+        except Exception:
+            continue
+        skill_id = str(metadata.get("id") or uuid.uuid4())
+        result[skill_id] = {
+            "id": skill_id,
+            "name": str(metadata.get("name") or "未命名技能"),
+            "category": str(metadata.get("category") or "custom"),
+            "tasks": list(metadata.get("tasks") or []),
+            "tags": list(metadata.get("tags") or []),
+            "content": content.strip(),
+            "filmstrip": [],
+            "updated_at": datetime.now().isoformat(),
+        }
+    return result
 
 
 def _ensure_default_skill():
@@ -983,23 +1214,148 @@ def _ensure_default_skill():
     save_director_skills({default_skill["id"]: default_skill})
 
 
+def _ensure_professional_director_pack():
+    """Seed a composable director pack once, without overwriting user skills."""
+    skills = load_director_skills()
+    if any(str(skill_id).startswith("pro-v1-") for skill_id in skills):
+        return
+
+    now = datetime.now().isoformat()
+    pack = [
+        {
+            "id": "pro-v1-story-architecture",
+            "name": "故事节拍与场面调度",
+            "category": "narrative",
+            "tasks": ["script", "shots", "dialogue"],
+            "tags": ["beat", "blocking", "continuity", "setup-payoff"],
+            "content": """# 故事节拍与场面调度
+
+## 目标
+- 每场必须有明确的欲望、阻力、转折和新的局面，避免镜头只做画面罗列。
+- 用动作和空间关系表达人物权力变化；台词只承担画面无法表达的信息。
+- 建立 setup → development → payoff，结尾保留动作、视线或声音钩子供下一场承接。
+
+## 输出纪律
+- 先确定场景的 dramatic question，再设计主镜头、覆盖镜头和反应镜头。
+- 每次切镜必须回答：信息改变、情绪改变、视点改变或节奏改变。
+- 保持人物轴线、屏幕方向、道具位置、服装和光线连续性。""",
+        },
+        {
+            "id": "pro-v1-shot-language",
+            "name": "景别、构图与视点语言",
+            "category": "shot_language",
+            "tasks": ["shots"],
+            "tags": ["framing", "composition", "pov", "coverage"],
+            "content": """# 景别、构图与视点语言
+
+- Extreme wide / wide：建立地理、规模、孤独或压迫；主体必须有清晰的空间关系。
+- Full / medium：呈现行为、调度和人物关系；优先保证动作可读。
+- Close-up / extreme close-up：只在信息或情绪达到临界点时使用，明确眼神、呼吸或关键物件。
+- OTS、POV、two-shot、profile、insert、reaction shot 应服务视点和关系，不把景别当随机装饰。
+- 写明主体位置、前中后景、焦点转移、镜头高度、俯仰角和画面方向；避免连续镜头无动机跳轴。""",
+        },
+        {
+            "id": "pro-v1-camera-motion",
+            "name": "专业运镜与镜头动机",
+            "category": "camera_motion",
+            "tasks": ["shots"],
+            "tags": ["push", "pull", "pan", "tilt", "tracking", "orbit"],
+            "content": """# 专业运镜与镜头动机
+
+## 运动词典
+- slow push-in：压缩注意力、逼近领悟或威胁；以人物反应为落点。
+- pull-out / dolly-out：揭示处境、疏离或失去控制；结束时必须出现新空间信息。
+- pan / tilt：跟随视线、揭示信息或连接两个主体；注明起点、触发点、终点。
+- tracking / leading / trailing：伴随行动建立速度与空间；保持主体运动方向连续。
+- orbit / arc：关系逆转、眩晕或英雄化；限制角度并给出前景参照，避免无意义环绕。
+- crane / boom / drone：规模揭示或段落收束；说明升降速度和最终构图。
+- handheld：只用于主观不稳、纪录感或冲突升级；注明震动幅度。
+- rack focus / parallax：在同镜头内转移叙事权重。
+
+## 约束
+每个运动都写成：镜头装置 + 方向/路径 + 速度曲线 + 触发动作 + 结束构图 + 叙事目的。静止镜头也是主动选择。""",
+        },
+        {
+            "id": "pro-v1-transitions",
+            "name": "转场、连续性与叙事桥接",
+            "category": "transition",
+            "tasks": ["script", "shots"],
+            "tags": ["match-cut", "j-cut", "l-cut", "whip-pan", "motif"],
+            "content": """# 转场、连续性与叙事桥接
+
+- cut on action：在动作峰值切换景别，前后动作姿态与方向匹配。
+- eyeline / POV cut：先给视线，再给所见；反打保持轴线和视线高度。
+- match cut：用形状、色彩、动作、构图或语义呼应连接时空。
+- J-cut：下一场声音先入，制造期待或反讽；L-cut：上一场声音延续，保留情绪余波。
+- whip-pan / foreground wipe：只在速度、方向和遮挡物可匹配时使用。
+- dissolve / time-lapse / montage：表达时间、省略过程或记忆，不替代缺失的戏剧转折。
+- hard cut / smash cut：用强烈反差制造笑点、惊吓或观点碰撞。
+
+为每场结尾给出 `transition_out`，下一场给出 `transition_in`，二者须共享声音、动作、视线、色彩或图形中的至少一个桥接元素。""",
+        },
+        {
+            "id": "pro-v1-rhythm",
+            "name": "节奏、时长与蒙太奇",
+            "category": "rhythm",
+            "tasks": ["script", "shots"],
+            "tags": ["pacing", "montage", "duration", "contrast"],
+            "content": """# 节奏、时长与蒙太奇
+
+- 镜头时长由信息读取时间和情绪停留时间决定；建立镜头较长，动作节点可缩短，关键反应需留余量。
+- 用长短、动静、远近、明暗、响静形成节奏对比，避免所有镜头同速同长。
+- 蒙太奇必须有清楚的组织原则：时间推进、空间并行、动作升级、视觉押韵或因果链。
+- 高潮前减少解释并加速动作切分；高潮落点后保留一个反应或环境镜头让信息沉淀。
+- H3 分镜必须给出可执行的 `estSeconds`，总时长与场景预算一致。""",
+        },
+        {
+            "id": "pro-v1-sound-dialogue",
+            "name": "台词、表演与声音叙事",
+            "category": "performance_sound",
+            "tasks": ["script", "dialogue", "shots"],
+            "tags": ["dialogue", "performance", "soundscape", "j-cut", "l-cut"],
+            "content": """# 台词、表演与声音叙事
+
+- 台词要可表演、可呼吸、带潜台词；控制句长，避免角色说出已经看见的画面。
+- 每句台词附带动作或反应语境，但不把情绪写成空泛形容词。
+- 设计环境底噪、同步动作声、关键音效、画外声和非叙事音乐的层级。
+- 用声音先行、声音延续、突然静默和声画对位承担转场及悬念。
+- 对白场优先建立 master、双人、OTS、单人和反应镜头的覆盖关系，确保剪辑连续。""",
+        },
+    ]
+    for item in pack:
+        item["filmstrip"] = []
+        item["created_at"] = now
+        item["updated_at"] = now
+        skills[item["id"]] = item
+    save_director_skills(skills)
+
+
 def _migrate_director_skills_storage():
-    """将旧路径的导演技能数据迁移到专用子目录（一次性，保留旧文件作备份）。"""
+    """把旧 Skill/prompts 技能与素材非覆盖迁移到 eagle_suite/skills。"""
     try:
         migrated = False
-
-        # 迁移 skills.json
-        if LEGACY_DIRECTOR_SKILLS_FILE.exists() and not DIRECTOR_SKILLS_FILE.exists():
-            shutil.copy2(str(LEGACY_DIRECTOR_SKILLS_FILE), str(DIRECTOR_SKILLS_FILE))
+        current_skills = _load_skill_json(DIRECTOR_SKILLS_FILE)
+        sources = [current_skills] + [
+            _load_skill_json(path) for path in _legacy_director_skill_files() if path.is_file()
+        ]
+        merged_skills = _merge_director_skill_sources(sources)
+        if merged_skills != current_skills or (merged_skills and not DIRECTOR_SKILLS_FILE.exists()):
+            DIRECTOR_SKILLS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            DIRECTOR_SKILLS_FILE.write_text(
+                json.dumps(merged_skills, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             logger.info(
-                f"已迁移导演技能库: {LEGACY_DIRECTOR_SKILLS_FILE} -> {DIRECTOR_SKILLS_FILE}"
+                f"导演技能已统一迁移到 {DIRECTOR_SKILLS_FILE}，"
+                f"合并前 {sum(len(source) for source in sources)} 项，去重后 {len(merged_skills)} 项"
             )
             migrated = True
 
         # 迁移素材胶片图片
-        if LEGACY_FILMSTRIP_DIR.exists() and LEGACY_FILMSTRIP_DIR.is_dir():
+        for legacy_filmstrip_dir in LEGACY_FILMSTRIP_DIRS:
+            if not legacy_filmstrip_dir.exists() or not legacy_filmstrip_dir.is_dir():
+                continue
             moved_images = 0
-            for img in LEGACY_FILMSTRIP_DIR.iterdir():
+            for img in legacy_filmstrip_dir.iterdir():
                 if img.is_file():
                     target = FILMSTRIP_DIR / img.name
                     if not target.exists():
@@ -1007,14 +1363,16 @@ def _migrate_director_skills_storage():
                         moved_images += 1
             if moved_images:
                 logger.info(
-                    f"已迁移 {moved_images} 张素材胶片: {LEGACY_FILMSTRIP_DIR} -> {FILMSTRIP_DIR}"
+                    f"已迁移 {moved_images} 张素材胶片: {legacy_filmstrip_dir} -> {FILMSTRIP_DIR}"
                 )
                 migrated = True
 
-        # 新库为空时自动创建默认技能，保证首次加载有内容
+        # 新库为空时自动创建默认技能，保证首次加载有内容。
         if not resolve_director_skills_file().exists():
             _ensure_default_skill()
             migrated = True
+
+        _ensure_professional_director_pack()
 
         if migrated:
             logger.info("导演技能库初始化/迁移完成")
@@ -1031,10 +1389,14 @@ async def get_director_skills(request):
     """获取所有导演技能"""
     try:
         skills = load_director_skills()
+        config = load_config()
         return web.json_response({
             "success": True,
             "data": list(skills.values()),
-            "storage_path": str(resolve_director_skills_file())
+            "storage_path": str(_director_obsidian_file(config) or resolve_director_skills_file(config))
+                if _director_skill_source(config) == "obsidian"
+                else str(resolve_director_skills_file(config)),
+            "source": _director_skill_source(config)
         })
     except Exception as e:
         logger.error(f"get_director_skills 错误: {e}")
@@ -1053,6 +1415,11 @@ async def save_director_skill(request):
         
         if not skill.get("id"):
             skill["id"] = str(uuid.uuid4())
+
+        skill.setdefault("category", "custom")
+        skill.setdefault("tasks", ["script", "shots", "dialogue"])
+        skill.setdefault("tags", [])
+        skill.setdefault("filmstrip", [])
         
         skill["updated_at"] = datetime.now().isoformat()
         
@@ -1066,11 +1433,51 @@ async def save_director_skill(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@route("DELETE", "/eaglePromptPresets/director_skills")
+@route("POST", "/eaglePromptPresets/director_skills/sync_obsidian")
+async def sync_director_skills_obsidian(request):
+    """Bidirectionally synchronize the director library with one Markdown file."""
+    try:
+        config = load_config()
+        obsidian = config.get("obsidian") or {}
+        if not obsidian.get("enabled"):
+            return web.json_response({"success": False, "error": "请先在设置中启用 Obsidian 集成"}, status=400)
+        markdown_file = _director_obsidian_file(config)
+        if markdown_file is None:
+            return web.json_response({"success": False, "error": "Vault 路径无效或不可访问"}, status=400)
+
+        skills = load_director_skills()
+        imported = 0
+        if markdown_file.is_file():
+            incoming = _director_skills_from_markdown(markdown_file.read_text(encoding="utf-8"))
+            for skill_id, skill in incoming.items():
+                current = skills.get(skill_id) or {}
+                if current.get("filmstrip"):
+                    skill["filmstrip"] = list(current.get("filmstrip") or [])
+                skill.setdefault("created_at", current.get("created_at") or datetime.now().isoformat())
+                skills[skill_id] = skill
+                imported += 1
+
+        save_director_skills(skills)
+        markdown_file.parent.mkdir(parents=True, exist_ok=True)
+        markdown_file.write_text(_director_skills_to_markdown(skills), encoding="utf-8")
+        return web.json_response({
+            "success": True,
+            "count": len(skills),
+            "imported": imported,
+            "path": str(markdown_file),
+            "message": f"已同步 {len(skills)} 个导演技能",
+        })
+    except Exception as e:
+        logger.error(f"sync_director_skills_obsidian error: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("POST", "/eaglePromptPresets/director_skills/delete")
 async def delete_director_skill(request):
     """删除导演技能"""
     try:
-        skill_id = request.query.get("id")
+        body = await request.json()
+        skill_id = str(body.get("id") or "")
         skills = load_director_skills()
         
         if skill_id in skills:
@@ -1086,36 +1493,86 @@ async def delete_director_skill(request):
 
 @route("POST", "/eaglePromptPresets/upload_filmstrip")
 async def upload_filmstrip_image(request):
-    """上传素材胶片图片"""
+    """上传素材胶片，并按设置的最大百万像素等比缩小。"""
     try:
         reader = await request.multipart()
-        field = await reader.next()
-        
-        if field is None or field.name != "file":
-            return web.json_response({"success": False, "error": "缺少图片文件"}, status=400)
-        
-        content = await field.read(decode=False)
+        content = b""
+        try:
+            requested_megapixels = float((load_config().get("director_skills") or {}).get("filmstrip_megapixels") or 1.0)
+        except (TypeError, ValueError):
+            requested_megapixels = 1.0
+        while True:
+            field = await reader.next()
+            if field is None:
+                break
+            if field.name == "file":
+                content = await field.read(decode=False)
+            elif field.name == "megapixels":
+                try:
+                    requested_megapixels = float((await field.text()).strip())
+                except (TypeError, ValueError):
+                    requested_megapixels = 1.0
+
         if not content:
-            return web.json_response({"success": False, "error": "图片文件为空"}, status=400)
-        
+            return web.json_response({"success": False, "error": "缺少图片文件"}, status=400)
+
         if len(content) > 10 * 1024 * 1024:
             return web.json_response({"success": False, "error": "图片不能超过 10 MB"}, status=413)
-        
+
+        requested_megapixels = min(10.0, max(1.0, requested_megapixels))
         image = Image.open(io.BytesIO(content))
-        image.verify()
         image_format = str(image.format or "").upper()
+        image.load()
+        animated = bool(getattr(image, "is_animated", False))
+        if animated:
+            image.seek(0)
+            image_format = "PNG"
+            image = image.convert("RGBA")
+        image = ImageOps.exif_transpose(image)
         extensions = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".gif"}
         extension = extensions.get(image_format)
-        
+
         if not extension:
             return web.json_response({"success": False, "error": f"不支持的图片格式: {image_format}"}, status=415)
-        
+
+        original_width, original_height = image.size
+        target_pixels = requested_megapixels * 1_000_000.0
+        current_pixels = float(original_width * original_height)
+        resized = current_pixels > target_pixels
+        if resized:
+            scale = (target_pixels / current_pixels) ** 0.5
+            width = max(1, int(round(original_width * scale)))
+            height = max(1, int(round(original_height * scale)))
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+
         filename = f"film_{uuid.uuid4().hex}{extension}"
         destination = FILMSTRIP_DIR / filename
-        destination.write_bytes(content)
-        
-        relative_path = destination.relative_to(BASE_DIR).as_posix()
-        return web.json_response({"success": True, "path": relative_path})
+        save_options = {}
+        if image_format == "JPEG":
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            save_options = {"quality": 92, "optimize": True}
+        elif image_format == "WEBP":
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+            save_options = {"quality": 92, "method": 6}
+        elif image_format == "PNG":
+            save_options = {"optimize": True}
+        image.save(destination, format=image_format, **save_options)
+
+        width, height = image.size
+        relative_path = destination.relative_to(SKILL_DIR).as_posix()
+        return web.json_response({
+            "success": True,
+            "path": relative_path,
+            "width": width,
+            "height": height,
+            "megapixels": round((width * height) / 1_000_000.0, 4),
+            "requested_megapixels": requested_megapixels,
+            "resized": resized,
+            "original_width": original_width,
+            "original_height": original_height,
+        })
     except Exception as error:
         logger.error(f"upload_filmstrip_image 错误: {error}")
         return web.json_response({"success": False, "error": str(error)}, status=400)

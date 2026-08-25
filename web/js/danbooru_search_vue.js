@@ -80,12 +80,12 @@ const TAG_SUBGROUP_LABELS = {
 // 运行期显示设置由设置弹窗即时更新。界面本身固定中文，避免保留无效语言选项。
 const danbooruUiSettings = reactive({
   tagDisplayLanguage: "bilingual",
-  groupOutputTags: true,
+  groupOutputTags: false,
 });
 
 function applyDanbooruUiSettings(settings = {}) {
   danbooruUiSettings.tagDisplayLanguage = settings.tag_display_language || "bilingual";
-  danbooruUiSettings.groupOutputTags = settings.group_output_tags !== false;
+  danbooruUiSettings.groupOutputTags = false;
 }
 
 function inferTagTaxonomy(value) {
@@ -1285,7 +1285,9 @@ const TagEditor = {
     }
     return () => {
       const taxonomyGroups = buildTagTaxonomy(props.tags || []);
-      const grouped = danbooruUiSettings.groupOutputTags && taxonomyGroups.length > 0;
+      // The output strip always shows the complete ordered tag list. Category
+      // management lives in the dedicated manager under the gacha constraints.
+      const grouped = false;
       const currentMajor = taxonomyGroups.some(group => group.key === activeMajor.value) ? activeMajor.value : (taxonomyGroups[0]?.key || "");
       const majorGroup = taxonomyGroups.find(group => group.key === currentMajor);
       const currentSub = majorGroup?.subKeys.includes(activeSub.value) ? activeSub.value : (majorGroup?.subKeys[0] || "");
@@ -1419,6 +1421,63 @@ const TagEditor = {
   },
 };
 
+const TagCategoryManager = {
+  name: "TagCategoryManager",
+  props: { tags: Array, onChange: Function },
+  setup(props) {
+    const activeMajor = ref("all");
+    const selected = reactive(new Set());
+    const targetKind = ref("general");
+    const keyOf = (item, index) => String(item?.tag || "") + "\u0000" + String(item?.source || "") + "\u0000" + index;
+    const entries = computed(() => (props.tags || []).map((item, index) => ({ item, index, key: keyOf(item, index), ...inferTagTaxonomy(item) })));
+    const groups = computed(() => [
+      { key: "all", label: "全部", count: entries.value.length },
+      ...TAG_MAJOR_GROUPS.map(group => ({ ...group, count: entries.value.filter(entry => entry.major === group.key).length }))
+    ]);
+    const visible = computed(() => activeMajor.value === "all" ? entries.value : entries.value.filter(entry => entry.major === activeMajor.value));
+
+    function toggle(entry) {
+      if (selected.has(entry.key)) selected.delete(entry.key); else selected.add(entry.key);
+    }
+    function selectVisible() { visible.value.forEach(entry => selected.add(entry.key)); }
+    function applyCategory() {
+      if (!selected.size) return;
+      const next = (props.tags || []).map((item, index) => selected.has(keyOf(item, index)) ? { ...item, kind: targetKind.value } : item);
+      props.onChange && props.onChange(next);
+      selected.clear();
+    }
+
+    return () => h("div", { class: "dbcm" }, [
+      h("div", { class: "dbcm-head" }, [
+        h("strong", {}, "标签分类管理器"),
+        h("span", {}, "顶部始终显示完整标签；在这里单独整理用途分类")
+      ]),
+      h("div", { class: "dbcm-tabs" }, groups.value.map(group => h("button", {
+        class: activeMajor.value === group.key ? "active" : "", onClick: () => { activeMajor.value = group.key; }
+      }, [group.label, h("small", {}, String(group.count))]))),
+      h("div", { class: "dbcm-tools" }, [
+        h("button", { class: "dbs-btn small", onClick: selectVisible }, "选择当前分类"),
+        h("button", { class: "dbs-btn small", disabled: !selected.size, onClick: () => selected.clear() }, "取消选择"),
+        h("span", {}, "已选 " + selected.size),
+        h("select", { class: "dbs-select", value: targetKind.value, onChange: event => { targetKind.value = event.target.value; } },
+          ["appearance", "outfit", "action", "expression", "scene", "environment", "composition", "lighting", "quality", "general"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))),
+        h("button", { class: "dbs-btn primary", disabled: !selected.size, onClick: applyCategory }, "应用分类")
+      ]),
+      h("div", { class: "dbcm-tags" }, visible.value.length ? visible.value.map(entry => {
+        const cn = resolveTranslation(entry.item.tag, entry.item.translation);
+        const text = danbooruUiSettings.tagDisplayLanguage === "zh" && cn
+          ? cn
+          : entry.item.tag.replace(/_/g, " ") + (danbooruUiSettings.tagDisplayLanguage === "bilingual" && cn ? " · " + cn : "");
+        return h("button", {
+          class: ["dbcm-tag", selected.has(entry.key) ? "selected" : "", "major-" + entry.major],
+          title: (TAG_KIND_LABELS[entry.item.kind] || entry.item.kind || "通用") + " / " + (TAG_SUBGROUP_LABELS[entry.sub] || entry.sub),
+          onClick: () => toggle(entry)
+        }, text);
+      }) : [h("span", { class: "dbcm-empty" }, "当前分类没有标签")])
+    ]);
+  }
+};
+
 const SelectionBar = {
   name: "SelectionBar",
   props: {
@@ -1476,7 +1535,7 @@ const SettingsDialog = {
   setup(props) {
     const activeTab = ref("general");
     const tagDisplayLanguage = ref("bilingual");
-    const groupOutputTags = ref(true);
+    const groupOutputTags = ref(false);
     const includeSelectedImageTags = ref(true);
     const underscoreMode = ref("space");
     const normalizePunctuation = ref(true);
@@ -1525,7 +1584,7 @@ const SettingsDialog = {
 
     function applySettings(s) {
       tagDisplayLanguage.value = s.tag_display_language || "bilingual";
-      groupOutputTags.value = s.group_output_tags !== false;
+      groupOutputTags.value = false;
       includeSelectedImageTags.value = s.include_selected_image_tags !== false;
       applyDanbooruUiSettings(s);
       underscoreMode.value = s.underscore_mode || "space";
@@ -1565,7 +1624,7 @@ const SettingsDialog = {
     function collectSettings() {
       return {
         tag_display_language: tagDisplayLanguage.value,
-        group_output_tags: groupOutputTags.value,
+        group_output_tags: false,
         include_selected_image_tags: includeSelectedImageTags.value,
         underscore_mode: underscoreMode.value, normalize_punctuation: normalizePunctuation.value,
         default_gallery_collapsed: defaultGalleryCollapsed.value, model_path: modelPath.value,
@@ -1715,7 +1774,7 @@ const SettingsDialog = {
       if (activeTab.value === "general") panel = [
         section("基础显示", [
           row("标签显示", select(tagDisplayLanguage.value, v => { tagDisplayLanguage.value = v; }, [["bilingual", "英文 + 中文（两行）"], ["en", "仅英文"], ["zh", "仅中文"]])),
-          row("标签二级分组", h("input", { type: "checkbox", checked: groupOutputTags.value, onChange: e => { groupOutputTags.value = e.target.checked; } }), "按人物、服饰、动作表情、场景环境、构图画面二级整理；仅改变显示，不加载模型"),
+          row("顶部标签显示", h("span", { style: { color: "#9fc5f8" } }, "始终显示完整有序标签"), "分类与批量整理已移到“抽卡匹配约束”下方的标签分类管理器"),
           row("选图合并完整标签", h("input", { type: "checkbox", checked: includeSelectedImageTags.value, onChange: e => { includeSelectedImageTags.value = e.target.checked; } }), "选中图片后，执行时同时输出该图片的完整 Danbooru 标签；关闭后仅输出上方标签编辑区"),
           row("下划线输出", select(underscoreMode.value, v => { underscoreMode.value = v; }, [["space", "输出时转为空格"], ["keep", "保留下划线"]])),
           row("标点规范化", h("input", { type: "checkbox", checked: normalizePunctuation.value, onChange: e => { normalizePunctuation.value = e.target.checked; } }), "把中文逗号、分号和顿号统一识别为标签分隔符"),
@@ -2054,6 +2113,7 @@ const DanbooruSearchApp = {
               onInput: e => { gachaContext.value = e.target.value; },
               onChange: syncSelection,
             }),
+            h(TagCategoryManager, { tags: selectedOutputTags.value, onChange: updateOutputTags }),
             h("div", { class: "dbs-settings-note" }, "抽卡只生成角色固定特征以外的服装、动作、场景、构图与光照；双击标签可暂时屏蔽输出。"),
             gachaStatus.value ? h("div", { class: ["dbs-gacha-status", gachaStatus.value.startsWith("抽卡失败") ? "error" : ""] }, gachaStatus.value) : null,
           ]),
@@ -2838,6 +2898,27 @@ const CSS = `
 .dbs-gacha-counts label { display:flex; align-items:center; gap:6px; margin:0; color:#bbb; }
 .dbs-gacha-counts label span { flex:1; }
 .dbs-gacha-counts .dbs-input-line { width:54px; margin:0; }
+.dbcm { margin-top:10px; border:1px solid #3a3d46; border-radius:8px; background:#18191e; overflow:hidden; }
+.dbcm-head { display:flex; align-items:baseline; gap:10px; padding:9px 11px; border-bottom:1px solid #30323a; }
+.dbcm-head strong { color:#e4e8ef; }
+.dbcm-head span { color:#7f8796; font-size:11px; }
+.dbcm-tabs { display:flex; flex-wrap:wrap; gap:5px; padding:8px 10px; border-bottom:1px solid #2d2f36; }
+.dbcm-tabs button { display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border:1px solid #444955; border-radius:5px; background:#282a31; color:#c6cbd4; cursor:pointer; }
+.dbcm-tabs button.active { background:#315b91; border-color:#5791d3; color:#fff; }
+.dbcm-tabs small { min-width:17px; padding:0 4px; border-radius:9px; background:rgba(255,255,255,.1); text-align:center; }
+.dbcm-tools { display:flex; align-items:center; flex-wrap:wrap; gap:7px; padding:8px 10px; background:#1e2026; }
+.dbcm-tools > span { color:#8d95a3; font-size:11px; }
+.dbcm-tools .dbs-select { min-width:125px; }
+.dbcm-tags { display:flex; flex-wrap:wrap; gap:6px; max-height:190px; overflow:auto; padding:10px; }
+.dbcm-tag { padding:5px 8px; border:1px solid #444955; border-radius:5px; background:#292b32; color:#d7dbe3; cursor:pointer; text-align:left; }
+.dbcm-tag:hover { border-color:#668cc1; }
+.dbcm-tag.selected { border-color:#67a9ff; background:#24466f; box-shadow:inset 0 0 0 1px #67a9ff; }
+.dbcm-tag.major-character { border-left:3px solid #6fa8dc; }
+.dbcm-tag.major-styling { border-left:3px solid #b989c9; }
+.dbcm-tag.major-action { border-left:3px solid #d8a35c; }
+.dbcm-tag.major-world { border-left:3px solid #65aa82; }
+.dbcm-tag.major-visual { border-left:3px solid #65b7c2; }
+.dbcm-empty { color:#777f8e; padding:8px; }
 .dbs-profile-list { margin:10px 12px; border:1px solid #343742; border-radius:6px; overflow:hidden; }
 .dbs-profile-row { display:grid; grid-template-columns:160px 1fr 1.3fr; gap:8px; padding:7px 9px; border-top:1px solid #30323b; }
 .dbs-profile-row:first-child { border-top:0; }

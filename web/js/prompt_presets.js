@@ -204,6 +204,28 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-field { display: flex; flex-direction: column; gap: 4px; }
     .eagle-prompt-presets-root .pp-field > span { color: #9aa2b1; font-size: 12px; }
     .eagle-prompt-presets-root .pp-setting-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; color: #cfd6e4; font-size: 13px; }
+    .eagle-prompt-presets-root .ppui-settings-panel {
+      width:min(760px,96%)!important; max-height:calc(100% - 24px)!important; padding:0!important;
+      display:flex!important; flex-direction:column; overflow:auto!important;
+    }
+    .eagle-prompt-presets-root .pp-settings-title {
+      position:sticky; top:0; z-index:2; margin:0!important; padding:14px 18px;
+      border-bottom:1px solid #343844; background:#1c1e26;
+    }
+    .eagle-prompt-presets-root .ppui-settings-panel > .pp-setting-card { margin:12px 16px 0; }
+    .eagle-prompt-presets-root .pp-setting-card .ppui-search,
+    .eagle-prompt-presets-root .pp-setting-card input:not([type="checkbox"]),
+    .eagle-prompt-presets-root .pp-setting-card select {
+      width:100%!important; min-width:0!important; height:36px!important; min-height:36px!important;
+      flex:none!important; padding:6px 9px!important;
+    }
+    .eagle-prompt-presets-root .pp-setting-card input[type="checkbox"] { width:16px!important; height:16px!important; min-height:16px!important; }
+    .eagle-prompt-presets-root .pp-settings-footer {
+      position:sticky; bottom:0; z-index:2; justify-content:flex-end; margin:12px 0 0!important;
+      padding:11px 16px!important; border-top:1px solid #343844!important; background:#191b22;
+    }
+    .eagle-prompt-presets-root .pp-settings-message { margin:12px 16px 0; padding:8px 10px; border:1px solid #3c5c83; border-radius:6px; background:#1d2b3d; color:#9fc7fa; }
+    .eagle-prompt-presets-root .pp-settings-message.error { border-color:#81414a; background:#3b2227; color:#ff9eaa; }
     .eagle-prompt-presets-root .pp-test-row { display: flex; align-items: center; gap: 10px; }
     .eagle-prompt-presets-root .pp-test-result { padding: 8px 12px; border-radius: 6px; font-size: 12px; }
     .eagle-prompt-presets-root .pp-test-result.ok { background: rgba(76,175,80,.12); border: 1px solid #4caf50; color: #81c784; }
@@ -314,6 +336,7 @@ var TemplateEditor = {
   setup: function(props) {
     var coverInput = ref(null);
     var coverUploading = ref(false);
+    var formError = ref("");
     var form = reactive({
       id: '',
       Label: '',
@@ -344,15 +367,16 @@ var TemplateEditor = {
 
     function handleSave() {
       if (!form.Label || !form.Instruction) {
-        alert('请填写标签名称和指令模板');
+        formError.value = "请填写标签名称和指令模板";
         return;
       }
+      formError.value = "";
       props.onSave({ ...form });
     }
 
     async function uploadCover(file) {
       if (!file || !String(file.type || "").startsWith("image/")) {
-        alert("请拖入或选择图片文件");
+        formError.value = "请拖入或选择图片文件";
         return;
       }
       coverUploading.value = true;
@@ -363,8 +387,9 @@ var TemplateEditor = {
         var data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.error || "封面上传失败");
         form.cover = data.path;
+        formError.value = "";
       } catch (error) {
-        alert(error.message || String(error));
+        formError.value = error.message || String(error);
       } finally {
         coverUploading.value = false;
         if (coverInput.value) coverInput.value.value = "";
@@ -493,6 +518,8 @@ var TemplateEditor = {
             ])
           ]),
 
+          formError.value ? h("div", { class: "pp-settings-message error" }, formError.value) : null,
+
           // 底部按钮
           h("div", { class: "ppui-settings-row", style: { marginTop: "16px", paddingTop: "12px", borderTop: "1px solid var(--ppui-border)" } }, [
             h("button", { class: "ppui-btn", onClick: props.onClose }, "取消"),
@@ -515,6 +542,7 @@ var ImportDialog = {
   setup: function(props) {
     var fileInput = ref(null);
     var importing = ref(false);
+    var importStatus = reactive({ text: "", error: false });
 
     function handleImport() {
       if (!fileInput.value) return;
@@ -526,6 +554,7 @@ var ImportDialog = {
       if (!file) return;
 
       importing.value = true;
+      importStatus.text = "";
       var formData = new FormData();
       formData.append('file', file);
 
@@ -537,16 +566,18 @@ var ImportDialog = {
       .then(function(d) {
         importing.value = false;
         if (d.success) {
-          alert('✅ 成功导入 ' + d.imported_count + ' 个模板');
+          importStatus.text = '成功导入 ' + d.imported_count + ' 个模板';
+          importStatus.error = false;
           props.onImported();
-          props.onClose();
         } else {
-          alert('❌ 导入失败：' + d.error);
+          importStatus.text = '导入失败：' + d.error;
+          importStatus.error = true;
         }
       })
       .catch(function(e) {
         importing.value = false;
-        alert('❌ 导入出错：' + e.message);
+        importStatus.text = '导入出错：' + e.message;
+        importStatus.error = true;
       });
     }
 
@@ -582,6 +613,10 @@ var ImportDialog = {
               onClick: handleImport,
               disabled: importing.value
             }, importing.value ? "导入中..." : "选择文件")
+          ]),
+          importStatus.text ? h("div", { class: ["pp-settings-message", importStatus.error ? "error" : ""] }, importStatus.text) : null,
+          h("div", { class: "ppui-settings-row pp-settings-footer" }, [
+            h("button", { class: "ppui-btn", onClick: props.onClose }, "关闭")
           ])
         ])
       ]);
@@ -622,6 +657,7 @@ var SettingsDialog = {
     var saving = ref(false);
     var testing = ref(false);
     var testResult = ref(null);
+    var saveResult = reactive({ text: "", error: false });
     
     var config = reactive({
       obsidian: {
@@ -666,6 +702,7 @@ var SettingsDialog = {
 
     async function handleSave() {
       saving.value = true;
+      saveResult.text = "";
       try {
         var response = await fetch("/eaglePromptPresets/config", {
           method: "POST",
@@ -674,14 +711,16 @@ var SettingsDialog = {
         });
         var data = await response.json();
         if (data.success) {
-          alert("✅ 配置已保存");
+          saveResult.text = "设置已保存，模板列表已刷新";
+          saveResult.error = false;
           props.onSaved && props.onSaved();
-          props.onClose();
         } else {
-          alert("❌ 保存失败：" + data.error);
+          saveResult.text = "保存失败：" + data.error;
+          saveResult.error = true;
         }
       } catch (e) {
-        alert("❌ 保存出错：" + e.message);
+        saveResult.text = "保存出错：" + e.message;
+        saveResult.error = true;
       } finally {
         saving.value = false;
       }
@@ -711,10 +750,9 @@ var SettingsDialog = {
       return h("div", { class: "ppui-settings-backdrop show", onClick: props.onClose }, [
         h("div", {
           class: "ppui-settings-panel",
-          style: { width: "600px", maxHeight: "90vh", overflowY: "auto" },
           onClick: function(e) { e.stopPropagation(); }
         }, [
-          h("h3", {}, "⚙️ 设置"),
+          h("h3", { class: "pp-settings-title" }, "⚙️ 提示词预设设置"),
 
           loading.value ? h("div", { class: "ppui-loading" }, "加载中...") : [
             // Obsidian 集成
@@ -836,7 +874,8 @@ var SettingsDialog = {
             ])
           ],
 
-          h("div", { class: "ppui-settings-row", style: { marginTop: "16px", paddingTop: "12px", borderTop: "1px solid var(--ppui-border)" } }, [
+          saveResult.text ? h("div", { class: ["pp-settings-message", saveResult.error ? "error" : ""] }, saveResult.text) : null,
+          h("div", { class: "ppui-settings-row pp-settings-footer" }, [
             h("button", { class: "ppui-btn", onClick: props.onClose }, "取消"),
             h("button", {
               class: "ppui-btn primary",
@@ -895,8 +934,16 @@ var PromptPresetsApp = {
     var editingTemplate = ref(null);
     var showImport = ref(false);
     var showSettings = ref(false);
+    var deleteTarget = ref(null);
+    var notice = reactive({ text: "", error: false });
     var activeTab = ref("presets");
     var stateReady = false;
+
+    function showNotice(text, isError) {
+      notice.text = String(text || "");
+      notice.error = !!isError;
+      if (notice.text) setTimeout(function() { notice.text = ""; }, 3200);
+    }
 
     if (typeof restoredState.selectedCategory === "string") selectedCategory.value = restoredState.selectedCategory;
     if (typeof restoredState.selectedId === "string") selectedId.value = restoredState.selectedId;
@@ -1169,10 +1216,10 @@ var PromptPresetsApp = {
           showEditor.value = false;
           await loadTemplates();
         } else {
-          alert("❌ 保存失败：" + data.error);
+          showNotice("保存失败：" + data.error, true);
         }
       } catch (e) {
-        alert("❌ 保存出错：" + e.message);
+        showNotice("保存出错：" + e.message, true);
       }
     }
 
@@ -1195,11 +1242,17 @@ var PromptPresetsApp = {
 
     async function handleDelete(template) {
       if (isReadOnly(template)) {
-        alert("❌ 内置模板不能删除");
+        showNotice("内置、Obsidian 或本地只读模板不能直接删除", true);
         return;
       }
 
-      if (!confirm("确定要删除模板「" + template.Label + "」吗？")) return;
+      deleteTarget.value = template;
+    }
+
+    async function confirmDelete() {
+      var template = deleteTarget.value;
+      if (!template) return;
+      deleteTarget.value = null;
 
       try {
         var response = await fetch("/eaglePromptPresets/delete_template?id=" + encodeURIComponent(template.id), {
@@ -1210,11 +1263,12 @@ var PromptPresetsApp = {
         if (data.success) {
           selectedId.value = "";
           await loadTemplates();
+          showNotice("模板已删除", false);
         } else {
-          alert("❌ 删除失败：" + data.error);
+          showNotice("删除失败：" + data.error, true);
         }
       } catch (e) {
-        alert("❌ 删除出错：" + e.message);
+        showNotice("删除出错：" + e.message, true);
       }
     }
 
@@ -1463,7 +1517,23 @@ var PromptPresetsApp = {
           categories: categories.value,
           onClose: function() { showSettings.value = false; },
           onSaved: loadTemplates
-        })
+        }),
+
+        deleteTarget.value ? h("div", { class: "ppui-settings-backdrop show", onClick: function() { deleteTarget.value = null; } }, [
+          h("div", { class: "ppui-settings-panel", style: { width: "420px" }, onClick: function(e) { e.stopPropagation(); } }, [
+            h("h3", { class: "pp-settings-title" }, "删除模板"),
+            h("div", { class: "pp-setting-card" }, "确定删除模板「" + (deleteTarget.value.Label || "未命名") + "」吗？此操作不可撤销。"),
+            h("div", { class: "ppui-settings-row pp-settings-footer" }, [
+              h("button", { class: "ppui-btn", onClick: function() { deleteTarget.value = null; } }, "取消"),
+              h("button", { class: "ppui-btn ppui-danger", onClick: confirmDelete }, "删除")
+            ])
+          ])
+        ]) : null,
+
+        notice.text ? h("div", {
+          class: ["pp-settings-message", notice.error ? "error" : ""],
+          style: { position: "absolute", right: "16px", bottom: "16px", zIndex: 80, maxWidth: "420px" }
+        }, notice.text) : null
       ]);
     };
   }

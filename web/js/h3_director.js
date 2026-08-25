@@ -130,7 +130,11 @@ function createScene(id) {
     return { id: id, title: '', defaultSeconds: 10, defaultSteps: 8, shots: [], dialogues: [], preamble: '' };
 }
 function createShot(id) {
-    return { id: id, title: '', time: '00:00.000', framing: '', content: '', camera: '', action: '', sound: '', estSeconds: 2.5 };
+    return {
+        id: id, title: '', time: '00:00.000', framing: '', content: '',
+        camera: '', lens: '', intent: '', action: '', sound: '',
+        transitionIn: '', transitionOut: '', estSeconds: 2.5
+    };
 }
 function createDialogue(id) { return { id: id, role: '', text: '', time: '' }; }
 function createRef() { return { url: '', filename: '', name: '', kind: 'person', retention: 'fully_preserved' }; }
@@ -149,6 +153,8 @@ function defaultProject() {
             tasks: [],            // ['script','shots','dialogue'] 多选
             modelPref: 'local',   // 'local' 本地优先 | 'api'
             mergeMode: 'overwrite', // 'overwrite' 覆盖 | 'append' 追加
+            profile: 'balanced',
+            skillPolicy: 'merge',
             temperature: 0.7,
             hint: ''
         }
@@ -308,10 +314,14 @@ function compilePrompt(project, scene) {
         var p = [];
         if (s.time) p.push('At ' + s.time + ',');
         if (s.framing) p.push('[' + s.framing + ']');
+        if (s.transitionIn) p.push('Transition in: ' + s.transitionIn + '.');
         p.push(s.content || '(no content)');
+        if (s.intent) p.push('Narrative intent: ' + s.intent + '.');
         if (s.action) p.push('Action: ' + s.action + '.');
         if (s.camera) p.push('Camera: ' + s.camera + '.');
+        if (s.lens) p.push('Lens/focus: ' + s.lens + '.');
         if (s.sound) p.push('Sound: ' + s.sound + '.');
+        if (s.transitionOut) p.push('Transition out: ' + s.transitionOut + '.');
         return '[Shot ' + (i+1) + ': ' + (s.title||'untitled') + '] ' + p.join(' ');
     }).join('\n\n  ');
     var detailed = shots.length ? 'detailed_description:\n  ' + shotLines : '';
@@ -594,6 +604,8 @@ var H3DirectorApp = defineComponent({
                 tasks: tasks,
                 temperature: (sk.temperature != null ? sk.temperature : 0.7),
                 modelPref: sk.modelPref || 'local',
+                profile: sk.profile || 'balanced',
+                skillPolicy: sk.skillPolicy || 'merge',
                 hint: sk.hint || ''
             };
             w.value = JSON.stringify(req);
@@ -646,8 +658,12 @@ var H3DirectorApp = defineComponent({
                         framing: s.framing || '',
                         content: s.content || '',
                         camera: s.camera || '',
+                        lens: s.lens || '',
+                        intent: s.intent || '',
                         action: s.action || '',
                         sound: s.sound || '',
+                        transitionIn: s.transitionIn || '',
+                        transitionOut: s.transitionOut || '',
                         estSeconds: (s.estSeconds != null ? Number(s.estSeconds) : 2.5)
                     });
                 });
@@ -682,6 +698,22 @@ var H3DirectorApp = defineComponent({
     },
     template: `
 <div class="h3d-root">
+  <div style="display:flex;gap:8px;align-items:center;padding:5px 12px;background:var(--h3d-bg2);border-bottom:1px solid var(--h3d-bd);font-size:11px">
+    <span style="color:var(--h3d-muted)">导演风格</span>
+    <select class="h3d-sel" v-model="store.project.skill.profile" style="width:auto">
+      <option value="balanced">均衡覆盖</option>
+      <option value="cinematic">电影化调度</option>
+      <option value="dynamic">动态动作</option>
+      <option value="intimate">亲密表演</option>
+      <option value="commercial">商业 / 产品</option>
+    </select>
+    <span style="color:var(--h3d-muted);margin-left:auto">外接技能</span>
+    <select class="h3d-sel" v-model="store.project.skill.skillPolicy" style="width:auto">
+      <option value="merge">与内置合并</option>
+      <option value="external_only">仅外接技能</option>
+      <option value="internal_only">仅内置风格</option>
+    </select>
+  </div>
   <div class="h3d-topbar">
     <h1>🦅 H3 Director <span class="h3d-badge">v1</span></h1>
     <div class="h3d-field"><label>任务</label>
@@ -1222,4 +1254,3 @@ app.registerExtension({
         };
     }
 });
-
