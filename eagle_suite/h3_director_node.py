@@ -713,11 +713,15 @@ def _extract_json(text):
     return None
 
 
-def _build_skill_prompts(task, project, scene, hint):
+def _build_skill_prompts(task, project, scene, hint, director_skill=""):
     """返回 (system, user) 提示词。"""
     foundation = (project.get("foundation") or "").strip()
+    director_skill = (director_skill or project.get("director_skill") or "").strip()
     title = (scene.get("title") or "").strip() or "未命名场景"
     preamble = (scene.get("preamble") or "").strip()
+    director_ctx = ""
+    if director_skill:
+        director_ctx = "【导演技能库 / Director Skill】\n" + director_skill + "\n\n"
     if task == "script":
         user = (
             "【Shared prompt / 世界构建】\n" + (foundation or "(无，请自行设定统一风格)") + "\n\n"
@@ -730,7 +734,7 @@ def _build_skill_prompts(task, project, scene, hint):
             "3. 角色台词用内联标签：<d>[角色名] 中文台词（≤30 字）</d>；\n"
             "4. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
         )
-        return _SKILL_SYSTEM, user
+        return _SKILL_SYSTEM, director_ctx + user
     if task == "shots":
         user = (
             "【场景标题】" + title + "\n"
@@ -742,7 +746,7 @@ def _build_skill_prompts(task, project, scene, hint):
             "extreme_close_up / close_up / medium_shot / cowboy_shot / full_body / wide_shot "
             "之一或空；content 为英文镜头描述。"
         )
-        return _SKILL_SYSTEM, user
+        return _SKILL_SYSTEM, director_ctx + user
     if task == "dialogue":
         user = (
             "【场景标题】" + title + "\n"
@@ -751,11 +755,11 @@ def _build_skill_prompts(task, project, scene, hint):
             "{\"dialogues\":[{\"role\":\"角色名\",\"text\":\"中文台词（≤30 字）\",\"time\":\"00:00.000\"}]}\n"
             "要求：text 为简洁中文，≤30 字；time 为该句出现的大致时间码。"
         )
-        return _SKILL_SYSTEM, user
+        return _SKILL_SYSTEM, director_ctx + user
     return _SKILL_SYSTEM, ""
 
 
-def run_director_skill(project, scenes, request, api_config=None, local_model=None):
+def run_director_skill(project, scenes, request, api_config=None, local_model=None, director_skill=""):
     """运行导演 Skill，返回 {scene_id, preamble, dialogues, shots, transport, error}。"""
     out = {
         "scene_id": request.get("sceneId"),
@@ -795,7 +799,7 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         for task in tasks:
             if task not in ("script", "shots", "dialogue"):
                 continue
-            sys_p, user_p = _build_skill_prompts(task, project, cur, hint)
+            sys_p, user_p = _build_skill_prompts(task, project, cur, hint, director_skill)
             raw = _call_llm(kind, transport, sys_p, user_p, temperature)
             parsed = _extract_json(raw)
             if not parsed:
@@ -904,6 +908,10 @@ class EagleH3DirectorNode:
                     "multiline": True,
                     "tooltip": "导演 Skill 生成请求（由前端「生成」按钮写入，正常留空）。",
                 }),
+                "director_skill": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "接入「导演技能库」节点输出，作为生成台本/分镜/台词时的导演技能上下文。",
+                }),
             },
             "hidden": {
                 "node_id": "UNIQUE_ID",
@@ -920,6 +928,7 @@ class EagleH3DirectorNode:
 
     def execute(self, h3_state="{}", LLM_HINT="", foundation_input="", **kwargs):
         skill_request = kwargs.get("skill_request", "") or ""
+        director_skill = kwargs.get("director_skill", "") or ""
         api_config = kwargs.get("api_config", None)
         local_model = kwargs.get("local_model", None)
         node_id = kwargs.get("node_id", "")
@@ -942,13 +951,20 @@ class EagleH3DirectorNode:
                 project = {}
             project["foundation"] = foundation_input.strip()
 
+        # 导演技能库节点输出的技能内容，作为生成上下文（关联导演技能库）
+        if director_skill and director_skill.strip():
+            if not isinstance(project, dict):
+                project = {}
+            project["director_skill"] = director_skill.strip()
+
         # ── 导演 Skill 生成（手动「生成」按钮触发）──
         if skill_request and skill_request.strip():
             try:
                 req = json.loads(skill_request)
                 if req.get("run"):
                     result = run_director_skill(
-                        project, scenes, req, api_config=api_config, local_model=local_model
+                        project, scenes, req, api_config=api_config, local_model=local_model,
+                        director_skill=director_skill
                     )
                     result["node_id"] = node_id
                     try:

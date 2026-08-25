@@ -23,6 +23,7 @@ from .text_switch_node import EagleTextSwitchMulti
 from .unified_media_browser import UnifiedMediaBrowser
 from .video_preview_node import EagleVideoGifPreviewNode
 from .h3_director_node import EagleH3DirectorNode
+from .director_skill_node import EagleDirectorSkillNode
 
 # ── 工具节点 ─────────────────────────────────────────────
 from ..nodes.audio_browser import EagleAudioList
@@ -71,6 +72,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleLoraGalleryNode": EagleLoraGalleryNode,
     "UnifiedMediaBrowser": UnifiedMediaBrowser,
     "EagleH3DirectorNode": EagleH3DirectorNode,
+    "EagleDirectorSkillNode": EagleDirectorSkillNode,
 
     # Danbooru
     "DanbooruVueSearchNode": DanbooruVueSearchNode,
@@ -125,6 +127,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleLoraGalleryNode": "🦅 LoRA Gallery",
     "UnifiedMediaBrowser": "🦅 统一媒体浏览器",
     "EagleH3DirectorNode": "🦅 H3 导演台",
+    "EagleDirectorSkillNode": "🦅 导演技能库",
     # Danbooru
     "DanbooruVueSearchNode": "🦅 Danbooru 标签搜索",
 
@@ -195,6 +198,9 @@ _CATEGORY_GROUPS = {
     ),
     f"{MENU_ROOT}/H3 导演台": (
         EagleH3DirectorNode,
+    ),
+    f"{MENU_ROOT}/导演技能": (
+        EagleDirectorSkillNode,
     ),
 }
 

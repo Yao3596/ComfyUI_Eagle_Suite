@@ -1083,11 +1083,6 @@ class EaglePromptPresets:
                     "multiline": True,
                     "tooltip": "前端变量快照（JSON 格式）"
                 }),
-                "selected_director_skill": ("STRING", {
-                    "default": "",
-                    "multiline": True,
-                    "tooltip": "前端选中的导演技能内容"
-                }),
                 "ui_state": ("STRING", {
                     "default": "{\"version\": 1}",
                     "multiline": True,
@@ -1139,7 +1134,7 @@ class EaglePromptPresets:
 
     def process(self, prompt="", variables="", director_skills_input="",
                 api_config="", llm_config_secondary="",
-                template="", local_variables="", selected_director_skill="", ui_state="", **kwargs):
+                template="", local_variables="", ui_state="", **kwargs):
         final_template = (template or prompt or "").strip()
 
         template_vars = extract_template_variables(final_template)
@@ -1161,7 +1156,7 @@ class EaglePromptPresets:
             rendered = re.sub(pattern, value, rendered)
 
         missing = sorted(set(extract_template_variables(rendered)))
-        final_director_skills = director_skills_input or selected_director_skill
+        final_director_skills = director_skills_input or ""
 
         return (rendered, ", ".join(missing), final_director_skills, api_config or "", llm_config_secondary or "")
 

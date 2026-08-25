@@ -134,7 +134,9 @@ app.registerExtension({
         document.head.appendChild(style);
       }
 
-      setTimeout(() => updateVariableVisibility({ preserveSize: true }), 100);
+      // 立即隐藏多余 widget 并重算节点尺寸，避免初始加载时 20 个多行变量框全可见导致节点被异常拉长
+      updateVariableVisibility();
+      setTimeout(() => updateVariableVisibility(), 100);
       return result;
     };
 
@@ -142,7 +144,7 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function(info) {
       if (onConfigure) onConfigure.apply(this, arguments);
       setTimeout(() => {
-        if (this._ppUpdateVariableVisibility) this._ppUpdateVariableVisibility({ preserveSize: true });
+        if (this._ppUpdateVariableVisibility) this._ppUpdateVariableVisibility();
       }, 100);
     };
 

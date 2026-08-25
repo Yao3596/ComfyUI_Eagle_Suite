@@ -604,7 +604,6 @@ var SettingsDialog = {
 
     var stateWidget = nodeWidget("ui_state");
     var localVariablesWidget = nodeWidget("local_variables");
-    var directorSkillWidget = nodeWidget("selected_director_skill");
     var restoredState = parseObject(stateWidget && stateWidget.value, {});
     var restoredVariables = parseObject(localVariablesWidget && localVariablesWidget.value, {});
     var loading = ref(true);
@@ -851,7 +850,6 @@ var PromptPresetsApp = {
 
     var stateWidget = nodeWidget("ui_state");
     var localVariablesWidget = nodeWidget("local_variables");
-    var directorSkillWidget = nodeWidget("selected_director_skill");
     var restoredState = parseObject(stateWidget && stateWidget.value, {});
     var restoredVariables = parseObject(localVariablesWidget && localVariablesWidget.value, {});
 
@@ -872,24 +870,16 @@ var PromptPresetsApp = {
     var showImport = ref(false);
     var showSettings = ref(false);
     var activeTab = ref("presets");
-    var directorSkills = ref([]);
-    var selectedSkillId = ref("");
-    var skillContent = ref("");
-    var skillFilmstrip = ref([]);
-    var filmstripUploading = ref(false);
-    var directorSkillsValue = ref("");
     var stateReady = false;
 
     if (typeof restoredState.selectedCategory === "string") selectedCategory.value = restoredState.selectedCategory;
     if (typeof restoredState.selectedId === "string") selectedId.value = restoredState.selectedId;
     if (typeof restoredState.activeVariable === "string") activeVariable.value = restoredState.activeVariable;
     if (restoredState.previewMode === "source" || restoredState.previewMode === "markdown") previewMode.value = restoredState.previewMode;
-    if (restoredState.activeTab === "director" || restoredState.activeTab === "presets") activeTab.value = restoredState.activeTab;
-    if (typeof restoredState.selectedSkillId === "string") selectedSkillId.value = restoredState.selectedSkillId;
+    if (restoredState.activeTab === "presets") activeTab.value = restoredState.activeTab;
     if (restoredState.collapsedGroups && typeof restoredState.collapsedGroups === "object") Object.assign(collapsedGroups, restoredState.collapsedGroups);
     if (restoredState.variableValues && typeof restoredState.variableValues === "object") Object.assign(variableValues, restoredState.variableValues);
     Object.assign(variableValues, restoredVariables);
-    directorSkillsValue.value = String((directorSkillWidget && directorSkillWidget.value) || restoredState.directorSkillsValue || "");
 
     function persistUiState() {
       if (!stateReady) return;
@@ -900,8 +890,6 @@ var PromptPresetsApp = {
         activeVariable: activeVariable.value,
         previewMode: previewMode.value,
         activeTab: activeTab.value,
-        selectedSkillId: selectedSkillId.value,
-        directorSkillsValue: directorSkillsValue.value,
         collapsedGroups: Object.assign({}, collapsedGroups),
         variableValues: Object.assign({}, variableValues)
       };
@@ -940,6 +928,20 @@ var PromptPresetsApp = {
       return selectedTemplate.value ? extractVariables(selectedTemplate.value.Instruction) : [];
     });
 
+    // 外部「变量输入」节点提供的变量名（连接后自动出现，带「外」标记）
+    var externalVariableNames = computed(function() {
+      return Object.keys(externalVariableValues);
+    });
+
+    // 模板变量与外部变量合并后的完整可选项，供下拉/标签页/渲染使用
+    var displayedVariables = computed(function() {
+      var seen = {};
+      selectedVariables.value.concat(externalVariableNames.value).forEach(function(name) {
+        if (name) seen[name] = true;
+      });
+      return Object.keys(seen);
+    });
+
     var templateGroups = computed(function() {
       var groups = [];
       var byCategory = {};
@@ -957,7 +959,7 @@ var PromptPresetsApp = {
     var renderedPrompt = computed(function() {
       if (!selectedTemplate.value) return "";
       var text = String(selectedTemplate.value.Instruction || "");
-      selectedVariables.value.forEach(function(v) {
+      displayedVariables.value.forEach(function(v) {
         var value = effectiveVariableValue(v);
         var replacement = value === undefined || value === "" ? "{{" + v + "}}" : String(value);
         text = text.replace(new RegExp("\\{\\{\\s*" + escapeRegExp(v) + "\\s*\\}\\}", "g"), function() { return replacement; });
@@ -1048,130 +1050,11 @@ var PromptPresetsApp = {
       }
     }
 
-    async function loadDirectorSkills() {
-      try {
-        var response = await fetch("/eaglePromptPresets/director_skills");
-        var data = await response.json();
-        if (data.success) {
-          directorSkills.value = data.data || [];
-          if (directorSkills.value[0] && !selectedSkillId.value) {
-            selectSkill(directorSkills.value[0]);
-          }
-        }
-      } catch (e) {
-        console.error("加载导演技能失败:", e);
-        directorSkills.value = [];
-      }
-    }
-
-    function selectSkill(skill) {
-      if (!skill) return;
-      selectedSkillId.value = skill.id;
-      skillContent.value = skill.content || "";
-      skillFilmstrip.value = skill.filmstrip || [];
-    }
-
-    var selectedSkill = computed(function() {
-      return directorSkills.value.find(function(s) { return s.id === selectedSkillId.value; }) || null;
-    });
-
-    async function saveCurrentSkill() {
-      var skill = {
-        id: selectedSkillId.value || undefined,
-        name: prompt("请输入技能名称：", selectedSkill.value?.name || "新技能"),
-        content: skillContent.value,
-        filmstrip: skillFilmstrip.value
-      };
-      
-      if (!skill.name) return;
-      
-      try {
-        var response = await fetch("/eaglePromptPresets/director_skills", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ skill: skill })
-        });
-        var data = await response.json();
-        if (data.success) {
-          selectedSkillId.value = data.data.id;
-          await loadDirectorSkills();
-          alert("✅ 已保存导演技能");
-        } else {
-          alert("❌ 保存失败：" + data.error);
-        }
-      } catch (e) {
-        alert("❌ 保存出错：" + e.message);
-      }
-    }
-
-    async function deleteCurrentSkill() {
-      if (!selectedSkill.value) return;
-      if (!confirm("确定要删除技能「" + selectedSkill.value.name + "」吗？")) return;
-      
-      try {
-        var response = await fetch("/eaglePromptPresets/director_skills?id=" + encodeURIComponent(selectedSkill.value.id), {
-          method: "DELETE"
-        });
-        var data = await response.json();
-        if (data.success) {
-          selectedSkillId.value = "";
-          skillContent.value = "";
-          skillFilmstrip.value = [];
-          await loadDirectorSkills();
-        } else {
-          alert("❌ 删除失败：" + data.error);
-        }
-      } catch (e) {
-        alert("❌ 删除出错：" + e.message);
-      }
-    }
-
-    async function uploadFilmstripImage(file) {
-      if (!file || !String(file.type || "").startsWith("image/")) {
-        alert("请拖入或选择图片文件");
-        return;
-      }
-      
-      filmstripUploading.value = true;
-      try {
-        var body = new FormData();
-        body.append("file", file, file.name || "filmstrip.png");
-        var response = await fetch("/eaglePromptPresets/upload_filmstrip", { method: "POST", body: body });
-        var data = await response.json();
-        if (!response.ok || !data.success) throw new Error(data.error || "上传失败");
-        skillFilmstrip.value.push(data.path);
-      } catch (error) {
-        alert(error.message || String(error));
-      } finally {
-        filmstripUploading.value = false;
-      }
-    }
-
-    function removeFilmstripImage(index) {
-      skillFilmstrip.value.splice(index, 1);
-    }
-
-    function applySkillToNode() {
-      var widget = props.node.widgets.find(function(w) { 
-        return w.name === "selected_director_skill"; 
-      });
-      if (widget) {
-        widget.value = skillContent.value;
-        directorSkillsValue.value = skillContent.value;
-        props.node.setDirtyCanvas(true, true);
-        alert("✅ 已应用导演技能到节点");
-      } else {
-        console.error("未找到 selected_director_skill widget，当前 widgets:", props.node.widgets.map(function(w) { return w.name; }));
-        alert("❌ 未找到导演技能输出端口");
-      }
-    }
-
     onMounted(function() {
       loadTemplates().finally(function() {
         stateReady = true;
         persistUiState();
       });
-      loadDirectorSkills();
 
       // 延迟同步外部变量：左侧变量输入节点可能尚未完成 onConfigure / widgets 恢复，
       // 立即读取会得到空值。分阶段重试确保最终能拿到。
@@ -1213,8 +1096,6 @@ var PromptPresetsApp = {
         activeVariable: activeVariable.value,
         previewMode: previewMode.value,
         activeTab: activeTab.value,
-        selectedSkillId: selectedSkillId.value,
-        directorSkillsValue: directorSkillsValue.value,
         collapsedGroups: Object.assign({}, collapsedGroups),
         variableValues: Object.assign({}, variableValues)
       };
@@ -1226,8 +1107,7 @@ var PromptPresetsApp = {
       props.onApply(
         renderedPrompt.value,
         String(item.Instruction || ""),
-        JSON.stringify(variableValues),
-        directorSkillsValue.value  // ✅ 导演技能输出
+        JSON.stringify(variableValues)
       );
     }
 
@@ -1357,7 +1237,7 @@ var PromptPresetsApp = {
       var template = selectedTemplate.value;
       if (!template) return h("div", { class: "ppui-empty" }, "请选择一个模板");
       
-      var vars = selectedVariables.value;
+      var vars = displayedVariables.value;
       var cover = templateCoverUrl(template.cover);
       var readOnly = isReadOnly(template);
       var activeIsExternal = !!activeVariable.value && hasExternalVariable(activeVariable.value);
@@ -1379,18 +1259,6 @@ var PromptPresetsApp = {
             h("button", { class: "ppui-btn", onClick: function() { handleDuplicate(template); } }, "另存副本"),
             !readOnly ? h("button", { class: "ppui-btn", style: { background: "var(--ppui-danger)" }, onClick: function() { handleDelete(template); } }, "删除") : null
           ])
-        ]),
-
-        // 导演技能
-        h("div", { class: "pp-detail-section" }, [
-          h("div", { class: "pp-section-label" }, "导演 Skills (Markdown)"),
-          h("textarea", {
-            class: "ppui-search",
-            style: { width: "100%", minHeight: "120px", resize: "vertical", fontFamily: "monospace" },
-            value: directorSkillsValue.value,
-            placeholder: "输入导演技能提示词",
-            onInput: function(e) { directorSkillsValue.value = e.target.value; }
-          })
         ]),
 
         // 滚动区域
@@ -1481,112 +1349,6 @@ var PromptPresetsApp = {
       ]);
     }
 
-    function renderDirectorTab() {
-      return h("div", { class: "pp-director-layout" }, [
-        // 左侧：技能列表
-        h("aside", { class: "pp-director-sidebar" }, [
-          h("div", { class: "pp-sidebar-head" }, [
-            h("h3", {}, "🎬 导演技能库"),
-            h("button", { 
-              class: "ppui-btn ppui-btn-sm primary", 
-              onClick: function() { 
-                selectedSkillId.value = ""; 
-                skillContent.value = ""; 
-                skillFilmstrip.value = []; 
-              } 
-            }, "+ 新建")
-          ]),
-          h("div", { class: "pp-skills-list" }, 
-            directorSkills.value.map(function(skill) {
-              return h("button", {
-                type: "button",
-                class: ["pp-skill-item", selectedSkillId.value === skill.id ? "active" : ""],
-                onClick: function() { selectSkill(skill); }
-              }, [
-                h("div", { class: "pp-skill-name" }, skill.name || "未命名技能"),
-                h("div", { class: "pp-skill-meta" }, [
-                  (skill.filmstrip?.length || 0) + " 个素材",
-                  " · ",
-                  skill.updated_at ? new Date(skill.updated_at).toLocaleDateString() : ""
-                ])
-              ]);
-            })
-          )
-        ]),
-        
-        // 右侧：编辑区
-        h("div", { class: "pp-director-main" }, [
-          h("div", { class: "pp-director-toolbar" }, [
-            h("span", { class: "pp-section-label" }, selectedSkill.value?.name || "新技能"),
-            h("div", { class: "pp-director-tools" }, [
-              h("button", { class: "ppui-btn", onClick: saveCurrentSkill }, "💾 保存"),
-              selectedSkill.value && h("button", { 
-                class: "ppui-btn", 
-                style: { background: "var(--ppui-danger)" },
-                onClick: deleteCurrentSkill 
-              }, "删除"),
-              h("button", { class: "ppui-btn primary", onClick: applySkillToNode }, "应用到节点")
-            ])
-          ]),
-          
-          h("div", { class: "pp-director-content" }, [
-            // Markdown 编辑器
-            h("div", { class: "pp-director-section" }, [
-              h("label", { style: { display: "block", marginBottom: "6px", color: "#aaa", fontSize: "12px" } }, "📄 技能文档（Markdown）"),
-              h("textarea", {
-                class: "ppui-search pp-director-editor",
-                style: { width: "100%", minHeight: "300px", resize: "vertical", fontFamily: "monospace" },
-                value: skillContent.value,
-                placeholder: "输入导演技能说明，支持 Markdown 格式...",
-                onInput: function(e) { skillContent.value = e.target.value; }
-              })
-            ]),
-            
-            // 素材胶片
-            h("div", { class: "pp-director-section" }, [
-              h("label", { style: { display: "block", marginBottom: "6px", color: "#aaa", fontSize: "12px" } }, "🎞️ 素材胶片"),
-              h("div", { 
-                class: "pp-filmstrip-grid",
-                onDragover: function(e) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; },
-                onDrop: function(e) { 
-                  e.preventDefault(); 
-                  uploadFilmstripImage(e.dataTransfer.files && e.dataTransfer.files[0]); 
-                }
-              }, [
-                ...skillFilmstrip.value.map(function(path, index) {
-                  return h("div", { class: "pp-filmstrip-item" }, [
-                    h("img", { src: templateCoverUrl(path), loading: "lazy" }),
-                    h("button", { 
-                      class: "pp-filmstrip-remove", 
-                      onClick: function() { removeFilmstripImage(index); } 
-                    }, "×")
-                  ]);
-                }),
-                h("label", { class: "pp-filmstrip-add" }, [
-                  filmstripUploading.value ? "上传中..." : "+ 添加素材",
-                  h("input", { 
-                    type: "file", 
-                    accept: "image/*", 
-                    style: "display:none",
-                    onChange: function(e) { uploadFilmstripImage(e.target.files && e.target.files[0]); }
-                  })
-                ])
-              ])
-            ]),
-            
-            // 预览区
-            h("div", { class: "pp-director-section" }, [
-              h("label", { style: { display: "block", marginBottom: "6px", color: "#aaa", fontSize: "12px" } }, "👁️ Markdown 预览"),
-              h("div", { 
-                class: "pp-preview-markdown pp-director-preview", 
-                innerHTML: renderMarkdown(skillContent.value) 
-              })
-            ])
-          ])
-        ])
-      ]);
-    }
-
     return function() {
       // ✅ 使用统一样式类名
       return h("div", { class: "ppui-root eagle-prompt-presets-root", style: "height:100%;display:flex;flex-direction:column;overflow:hidden;" }, [
@@ -1597,19 +1359,7 @@ var PromptPresetsApp = {
             value: selectedCategory.value,
             onChange: function(e) { selectedCategory.value = e.target.value; }
           }, categories.value.map(function(cat) { return h("option", { value: cat }, cat); })),
-          
-          // Tab 切换
-          h("div", { class: "ppui-mode-toggle" }, [
-            h("span", {
-              class: activeTab.value === "presets" ? "active" : "",
-              onClick: function() { activeTab.value = "presets"; }
-            }, "📝 提示词预设"),
-            h("span", {
-              class: activeTab.value === "director" ? "active" : "",
-              onClick: function() { activeTab.value = "director"; }
-            }, "🎬 导演技能")
-          ]),
-          
+
           h("input", {
             class: "ppui-search",
             type: "text",
@@ -1631,16 +1381,12 @@ var PromptPresetsApp = {
           : errorMessage.value
             ? h("div", { class: "ppui-error" }, [errorMessage.value, h("button", { class: "ppui-btn", onClick: loadTemplates }, "重试")])
             : h("div", { class: "ppui-main", style: { flex: "1 1 auto", overflow: "hidden", minHeight: "0", height: "100%" } }, [
-                activeTab.value === "presets" 
-                  ? h("div", { style: { display: "grid", gridTemplateColumns: "minmax(250px, 34%) minmax(0, 1fr)", width: "100%", height: "100%", minWidth: "0", minHeight: "0", overflow: "hidden" } }, [
-                      h("aside", { class: "ppui-sidebar pp-master" }, filteredTemplates.value.length
-                        ? templateGroups.value.map(renderMasterGroup)
-                        : [h("div", { class: "ppui-empty" }, "没有匹配的模板")]),
-                      renderDetail()
-                    ])
-                  : h("div", { style: { width: "100%", height: "100%", minWidth: "0", minHeight: "0", overflow: "hidden", display: "flex", flexDirection: "column" } }, [
-                      renderDirectorTab()
-                    ])
+                h("div", { style: { display: "grid", gridTemplateColumns: "minmax(250px, 34%) minmax(0, 1fr)", width: "100%", height: "100%", minWidth: "0", minHeight: "0", overflow: "hidden" } }, [
+                  h("aside", { class: "ppui-sidebar pp-master" }, filteredTemplates.value.length
+                    ? templateGroups.value.map(renderMasterGroup)
+                    : [h("div", { class: "ppui-empty" }, "没有匹配的模板")]),
+                  renderDetail()
+                ])
               ]),
 
         // 对话框
@@ -1675,7 +1421,7 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "EaglePromptPresets") return;
 
-    var HIDDEN_WIDGETS = ["prompt", "template", "local_variables", "selected_director_skill", "ui_state"];
+    var HIDDEN_WIDGETS = ["prompt", "template", "local_variables", "ui_state"];
 
     var hideWidgets = function(node) {
       if (!node.widgets || !node.widgets.length) return false;
@@ -1728,16 +1474,14 @@ app.registerExtension({
         render: function() {
           return h(PromptPresetsApp, {
             node: node,
-            onApply: function(prompt, template, localVariables, directorSkill) {
+            onApply: function(prompt, template, localVariables) {
               var promptWidget = node.widgets.find(function(w) { return w.name === "prompt"; });
               var templateWidget = node.widgets.find(function(w) { return w.name === "template"; });
               var variablesWidget = node.widgets.find(function(w) { return w.name === "local_variables"; });
-              var directorSkillWidget = node.widgets.find(function(w) { return w.name === "selected_director_skill"; });
 
               if (promptWidget) promptWidget.value = prompt;
               if (templateWidget) templateWidget.value = template;
               if (variablesWidget) variablesWidget.value = localVariables;
-              if (directorSkillWidget) directorSkillWidget.value = directorSkill || "";
 
               node.setDirtyCanvas(true, true);
             }
