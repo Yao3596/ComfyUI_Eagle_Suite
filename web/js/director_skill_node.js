@@ -1,6 +1,8 @@
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, reactive, computed, onMounted, watch } from "../lib/vue.esm-browser.js";
 
+console.log("[Eagle Suite] director_skill_node.js module loaded", new Date().toISOString());
+
 // ──────────────────────────────────────────────────────────────
 // 导演技能库节点：从提示词预设剥离出的独立节点。
 // 复用 /eaglePromptPresets/director_skills 后端存储（共享同一技能库）。
@@ -474,6 +476,7 @@ app.registerExtension({
 
     var originalOnNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
+      console.log("[Eagle Suite] DirectorSkill onNodeCreated", this.id, this.type);
       if (originalOnNodeCreated) originalOnNodeCreated.apply(this, arguments);
       if (this._dsInit || this._dsMounting) return;
       this._dsMounting = true;
@@ -569,7 +572,9 @@ app.registerExtension({
         this._dsInit = false;
         this._dsMounting = false;
         hideWidgets(this);
-        console.error("[Eagle Suite] Director Skill Vue mount failed:", error);
+        var errText = "[Eagle Suite] Director Skill Vue mount failed: " + (error && error.stack ? error.stack : String(error));
+        console.error(errText);
+        try { window.alert(errText); } catch (_) {}
         if (container) {
           container.className = "eagle-director-skill-root";
           container.style.cssText = "height:100%;padding:16px;overflow:auto;";
