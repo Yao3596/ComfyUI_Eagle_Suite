@@ -193,10 +193,21 @@ function loadStyles() {
       background: rgba(7, 8, 12, .72);
     }
     .eagle-prompt-presets-root .ppui-settings-panel {
-      width: min(600px, 100%) !important; max-height: calc(100% - 12px) !important;
-      padding: 16px !important; overflow: auto !important; border: 1px solid #3a3e4c;
+      width: min(640px, 100%) !important; max-height: calc(100% - 12px) !important;
+      padding: 18px !important; overflow: auto !important; border: 1px solid #3a3e4c;
       border-radius: 10px; background: #1c1e26 !important; box-shadow: 0 18px 48px rgba(0,0,0,.5);
     }
+    .eagle-prompt-presets-root .pp-setting-card { margin-bottom: 16px; padding: 14px; border: 1px solid #2f3340; border-radius: 10px; background: #181a21; }
+    .eagle-prompt-presets-root .pp-setting-card > h4 { margin: 0 0 12px; font-size: 14px; color: #e6ecf7; display: flex; align-items: center; gap: 8px; }
+    .eagle-prompt-presets-root .pp-setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+    .eagle-prompt-presets-root .pp-setting-grid .pp-full { grid-column: 1 / -1; }
+    .eagle-prompt-presets-root .pp-field { display: flex; flex-direction: column; gap: 4px; }
+    .eagle-prompt-presets-root .pp-field > span { color: #9aa2b1; font-size: 12px; }
+    .eagle-prompt-presets-root .pp-setting-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; color: #cfd6e4; font-size: 13px; }
+    .eagle-prompt-presets-root .pp-test-row { display: flex; align-items: center; gap: 10px; }
+    .eagle-prompt-presets-root .pp-test-result { padding: 8px 12px; border-radius: 6px; font-size: 12px; }
+    .eagle-prompt-presets-root .pp-test-result.ok { background: rgba(76,175,80,.12); border: 1px solid #4caf50; color: #81c784; }
+    .eagle-prompt-presets-root .pp-test-result.fail { background: rgba(244,67,54,.12); border: 1px solid #f44336; color: #e57373; }
     .eagle-prompt-presets-root .pp-cover-editor { display: flex; gap: 10px; padding: 10px; border: 1px dashed #4b5266; border-radius: 8px; background: #15161c; }
     .eagle-prompt-presets-root .pp-cover-fallback { width: 80px; height: 80px; display: grid; place-items: center; border-radius: 6px; background: #334461; color: #dbeaff; font-size: 24px; font-weight: 700; }
     /* ── 导演技能面板 ────────────────────────────── */
@@ -419,8 +430,8 @@ var TemplateEditor = {
                 onDrop: function(e) { e.preventDefault(); uploadCover(e.dataTransfer.files && e.dataTransfer.files[0]); }
               }, [
                 form.cover
-                  ? h("img", { src: templateCoverUrl(form.cover), style: { width: "80px", height: "80px", objectFit: "cover", borderRadius: "4px" } })
-                  : h("span", { class: "pp-cover-fallback" }, (form.Label || "P").slice(0, 1)),
+                  ? h("img", { src: templateCoverUrl(form.cover), style: { width: "54px", height: "54px", objectFit: "cover", borderRadius: "6px", flex: "0 0 auto" } })
+                  : h("span", { class: "pp-cover-fallback", style: { width: "54px", height: "54px" } }, (form.Label || "P").slice(0, 1)),
                 h("div", { style: { flex: 1, display: "flex", flexDirection: "column", gap: "8px" } }, [
                   h("input", {
                     class: "ppui-search",
@@ -584,6 +595,7 @@ var SettingsDialog = {
   props: {
     node: Object,
     visible: Boolean,
+    categories: Array,
     onClose: Function,
     onSaved: Function
   },
@@ -706,8 +718,13 @@ var SettingsDialog = {
 
           loading.value ? h("div", { class: "ppui-loading" }, "加载中...") : [
             // Obsidian 集成
-            h("div", { style: { marginBottom: "20px" } }, [
-              h("h4", { style: { margin: "0 0 12px", fontSize: "14px", color: "#eee" } }, "Obsidian 集成"),
+            h("div", { class: "pp-setting-card" }, [
+              h("h4", {}, [
+                h("span", {}, "📓 Obsidian 集成"),
+                config.obsidian.enabled
+                  ? h("span", { style: { fontSize: "11px", color: "#81c784" } }, "已启用")
+                  : h("span", { style: { fontSize: "11px", color: "#9aa2b1" } }, "未启用")
+              ]),
               
               h("label", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px", cursor: "pointer" } }, [
                 h("input", {
@@ -786,26 +803,35 @@ var SettingsDialog = {
             ]),
 
             // 其他设置
-            h("div", {}, [
-              h("h4", { style: { margin: "0 0 12px", fontSize: "14px", color: "#eee" } }, "其他设置"),
-              
-              h("div", { style: { marginBottom: "12px" } }, [
-                h("label", { class: "ppui-settings-hint" }, "默认分类"),
-                h("input", {
-                  class: "ppui-search",
-                  type: "text",
-                  value: config.default_category,
-                  onInput: function(e) { config.default_category = e.target.value; }
-                })
-              ]),
+            h("div", { class: "pp-setting-card" }, [
+              h("h4", {}, "⚙️ 其他设置"),
 
-              h("label", { style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" } }, [
-                h("input", {
-                  type: "checkbox",
-                  checked: config.auto_sync,
-                  onChange: function(e) { config.auto_sync = e.target.checked; }
-                }),
-                h("span", { style: { color: "#aaa", fontSize: "12px" } }, "自动同步模板")
+              h("div", { class: "pp-setting-grid" }, [
+                h("div", { class: "pp-field" }, [
+                  h("span", {}, "默认分类"),
+                  h("select", { class: "ppui-search", value: config.default_category, onChange: function(e) { config.default_category = e.target.value; } }, [
+                    h("option", { value: "" }, "（无）"),
+                    ...(props.categories || []).filter(function(c) { return c && c !== "全部"; }).map(function(c) { return h("option", { value: c }, c); }),
+                    (config.default_category && (props.categories || []).indexOf(config.default_category) < 0) ? h("option", { value: config.default_category }, config.default_category) : null
+                  ])
+                ]),
+                h("label", { class: "pp-setting-toggle", style: { alignSelf: "end" } }, [
+                  h("input", {
+                    type: "checkbox",
+                    checked: config.auto_sync,
+                    onChange: function(e) { config.auto_sync = e.target.checked; }
+                  }),
+                  h("span", { style: { color: "#9aa2b1", fontSize: "12px" } }, "自动同步模板")
+                ])
+              ])
+            ]),
+
+            // 数据存储路径
+            h("div", { class: "pp-setting-card" }, [
+              h("h4", {}, "💾 数据存储路径"),
+              h("div", { class: "pp-field" }, [
+                h("span", {}, "技能/模板额外目录（逗号分隔，留空用插件默认路径）"),
+                h("input", { class: "ppui-search", type: "text", value: (config.local_paths || []).join(", "), placeholder: "例：D:/ComfyUI-Data/EagleSuite", onInput: function(e) { config.local_paths = e.target.value.split(",").map(function(s) { return s.trim(); }).filter(Boolean); } })
               ])
             ])
           ],
@@ -1150,6 +1176,23 @@ var PromptPresetsApp = {
       }
     }
 
+    async function saveTemplateField(patch) {
+      var t = selectedTemplate.value;
+      if (!t || isReadOnly(t)) return;
+      var merged = Object.assign({}, t, patch);
+      try {
+        var response = await fetch("/eaglePromptPresets/save_template", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ template: merged, format: "json" })
+        });
+        var data = await response.json();
+        if (!data.success) console.warn("[EagleSuite] 字段保存失败:", data.error);
+      } catch (e) {
+        console.warn("[EagleSuite] 字段保存出错:", e);
+      }
+    }
+
     async function handleDelete(template) {
       if (isReadOnly(template)) {
         alert("❌ 内置模板不能删除");
@@ -1263,10 +1306,21 @@ var PromptPresetsApp = {
 
         // 滚动区域
         h("div", { class: "pp-detail-scroll" }, [
-          // 指令模板
+          // 指令模板（可直接编辑，失焦自动保存；只读来源以纯文本展示）
           h("div", { class: "pp-detail-section" }, [
-            h("div", { class: "pp-section-label" }, "指令模板"),
-            h("pre", { class: "pp-template-source" }, String(template.Instruction || "")),
+            h("div", { class: "pp-section-label" }, [
+              "指令模板",
+              !readOnly ? h("span", { style: { marginLeft: "8px", fontSize: "11px", color: "#75c4ff" } }, "（可直接编辑，失焦保存）") : null
+            ]),
+            readOnly
+              ? h("pre", { class: "pp-template-source" }, String(template.Instruction || ""))
+              : h("textarea", {
+                  class: "ppui-search pp-instruction-edit",
+                  style: { width: "100%", minHeight: "110px", resize: "vertical", fontFamily: "Consolas, monospace", lineHeight: "1.5" },
+                  value: template.Instruction || "",
+                  onInput: function(e) { template.Instruction = e.target.value; applySelected(); },
+                  onBlur: function(e) { saveTemplateField({ Instruction: e.target.value }); }
+                }),
             template.example ? h("div", { class: "pp-example-line" }, [h("b", {}, "示例："), String(template.example)]) : null
           ]),
 
@@ -1406,6 +1460,7 @@ var PromptPresetsApp = {
         h(SettingsDialog, {
           node: props.node,
           visible: showSettings.value,
+          categories: categories.value,
           onClose: function() { showSettings.value = false; },
           onSaved: loadTemplates
         })

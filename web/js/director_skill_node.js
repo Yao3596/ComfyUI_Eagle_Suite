@@ -117,6 +117,54 @@ var DirectorSkillApp = {
     var filmstripUploading = ref(false);
     var errorMsg = ref("");
     var infoMsg = ref("");
+    var storagePath = ref("");
+    var exportInput = ref(null);
+
+    function exportSkills() {
+      try {
+        var blob = new Blob([JSON.stringify(skills.value, null, 2)], { type: "application/json" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "eagle_director_skills.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        window.alert("❌ 导出失败：" + e.message);
+      }
+    }
+
+    function importSkills(file) {
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = async function () {
+        try {
+          var list = JSON.parse(reader.result);
+          if (!Array.isArray(list)) throw new Error("文件格式应为技能数组 JSON");
+          var last = null;
+          for (var i = 0; i < list.length; i++) {
+            var s = list[i];
+            if (!s.id) s.id = undefined;
+            var skill = { id: s.id, name: s.name || "导入的技能", content: s.content || "", filmstrip: s.filmstrip || [] };
+            var resp = await fetch("/eaglePromptPresets/director_skills", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ skill: skill })
+            });
+            var data = await resp.json();
+            if (data.success) last = data.data.id;
+          }
+          await loadSkills();
+          if (last) selectSkill(skills.value.find(function (x) { return x.id === last; }) || skills.value[0]);
+          window.alert("✅ 已导入 " + list.length + " 个技能");
+        } catch (e) {
+          window.alert("❌ 导入失败：" + e.message);
+        }
+      };
+      reader.readAsText(file);
+    }
 
     var selectedSkill = computed(function () {
       return skills.value.find(function (s) { return s.id === selectedSkillId.value; }) || null;
@@ -142,6 +190,7 @@ var DirectorSkillApp = {
         var data = await resp.json();
         if (!data.success) throw new Error(data.error || "加载失败");
         skills.value = data.data || [];
+        storagePath.value = data.storage_path || storagePath.value;
         errorMsg.value = "";
 
         if (!skills.value.length) {
@@ -305,7 +354,14 @@ var DirectorSkillApp = {
             style: { background: "#e06c5a", color: "#fff", border: "1px solid #e06c5a" },
             onClick: deleteSkill
           }, "删除"),
-          h("button", { class: "ppui-btn primary", onClick: applyToOutput }, "输出到端口")
+          h("button", { class: "ppui-btn primary", onClick: applyToOutput }, "输出到端口"),
+          h("span", { style: { flex: "1 1 auto" } }),
+          h("button", { class: "ppui-btn", onClick: exportSkills }, "⬇ 导出"),
+          h("button", { class: "ppui-btn", onClick: function () { if (exportInput.value) exportInput.value.click(); } }, "⬆ 导入"),
+          h("input", {
+            ref: exportInput, type: "file", accept: "application/json,.json", style: "display:none",
+            onChange: function (e) { importSkills(e.target.files && e.target.files[0]); }
+          })
         ]),
 
         errorMsg.value
@@ -381,8 +437,12 @@ var DirectorSkillApp = {
                   })
                 ])
               ])
-            ])
-          ])
+            ]),
+        h("div", {
+          class: "ppui-statusbar",
+          style: { padding: "6px 10px", borderTop: "1px solid #2f455a", color: "#8a8a8a", fontSize: "11px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: "0 0 auto" },
+          title: storagePath.value
+        }, "📁 存储路径：" + (storagePath.value || "（未知）"))
       ]);
     };
   }

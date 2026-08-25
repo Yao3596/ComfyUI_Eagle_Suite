@@ -909,24 +909,42 @@ async def export_templates(request):
 # 导演技能管理
 # ─────────────────────────────────────────────────────────
 
-# 导演技能库统一存放到专用子目录，避免与提示词模板、封面图混杂
-DIRECTOR_SKILLS_DIR = BASE_DIR / "director_skills"
-DIRECTOR_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-DIRECTOR_SKILLS_FILE = DIRECTOR_SKILLS_DIR / "skills.json"
-FILMSTRIP_DIR = DIRECTOR_SKILLS_DIR / "filmstrip"
+# 导演技能库默认存放目录（插件内）
+DIRECTOR_SKILLS_DEFAULT_DIR = BASE_DIR / "director_skills"
+DIRECTOR_SKILLS_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
+DIRECTOR_SKILLS_FILE = DIRECTOR_SKILLS_DEFAULT_DIR / "skills.json"
+FILMSTRIP_DIR = DIRECTOR_SKILLS_DEFAULT_DIR / "filmstrip"
 FILMSTRIP_DIR.mkdir(exist_ok=True)
 
-# 旧路径（用于一次性迁移）
+#  (用于一次性迁移)
 LEGACY_DIRECTOR_SKILLS_FILE = BASE_DIR / "director_skills.json"
 LEGACY_FILMSTRIP_DIR = BASE_DIR / "filmstrip"
 
 
+def resolve_director_skills_file():
+    """技能库存储路径：优先使用配置中的用户本地目录，否则用插件默认目录。
+
+    配置项 config.local_paths 中第一个真实存在的目录会被采用，并在其下创建
+    EagleSuite/director_skills.json。这样用户可以把数据放在 NAS、网盘同步目录等位置。
+    """
+    cfg = load_config()
+    for raw in (cfg.get("local_paths") or []):
+        p = Path(str(raw).strip())
+        if p and p.is_dir():
+            target = p / "EagleSuite" / "director_skills.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            return target
+    DIRECTOR_SKILLS_DEFAULT_DIR.mkdir(parents=True, exist_ok=True)
+    return DIRECTOR_SKILLS_FILE
+
+
 def load_director_skills() -> Dict:
     """加载所有导演技能"""
-    if not DIRECTOR_SKILLS_FILE.exists():
+    path = resolve_director_skills_file()
+    if not path.exists():
         return {}
     try:
-        with open(DIRECTOR_SKILLS_FILE, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         logger.error(f"加载导演技能失败: {e}")
@@ -935,8 +953,10 @@ def load_director_skills() -> Dict:
 
 def save_director_skills(skills: Dict):
     """保存导演技能"""
+    path = resolve_director_skills_file()
     try:
-        with open(DIRECTOR_SKILLS_FILE, 'w', encoding='utf-8') as f:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
             json.dump(skills, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"保存导演技能失败: {e}")
@@ -992,7 +1012,7 @@ def _migrate_director_skills_storage():
                 migrated = True
 
         # 新库为空时自动创建默认技能，保证首次加载有内容
-        if not DIRECTOR_SKILLS_FILE.exists():
+        if not resolve_director_skills_file().exists():
             _ensure_default_skill()
             migrated = True
 
@@ -1011,7 +1031,11 @@ async def get_director_skills(request):
     """获取所有导演技能"""
     try:
         skills = load_director_skills()
-        return web.json_response({"success": True, "data": list(skills.values())})
+        return web.json_response({
+            "success": True,
+            "data": list(skills.values()),
+            "storage_path": str(resolve_director_skills_file())
+        })
     except Exception as e:
         logger.error(f"get_director_skills 错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
