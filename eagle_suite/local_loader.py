@@ -7,11 +7,79 @@ from PIL import Image, ImageOps
 import random
 import torch
 import folder_paths
+import hashlib
+import threading
+from .logger import logger
 
 
 class LocalImageLoader:
 
     SUPPORTED_EXT = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tiff', '.tif'}
+
+    # 按 unique_id 维护递增/递减/随机状态，解决 ComfyUI 批次运行时前端 index 来不及更新的问题
+    _state = {}
+    _state_lock = threading.RLock()
+
+    @classmethod
+    def _state_key(cls, unique_id, index):
+        """生成状态键；没有 unique_id 时使用全局回退键。"""
+        if unique_id is not None:
+            return f"local_loader:{unique_id}"
+        return f"local_loader:__global__:{index}"
+
+    @classmethod
+    def _get_effective_index(cls, control_mode, index, total, unique_id):
+        """根据控制模式计算实际索引，并在后端维护递增/递减/随机状态。"""
+        if total <= 0:
+            return 0
+
+        key = cls._state_key(unique_id, index)
+
+        if len(cls._state) > 512:
+            with cls._state_lock:
+                cls._state.pop(next(iter(cls._state)), None)
+
+        if control_mode not in ("增加", "减少", "随机"):
+            # 固定 / 指定索引：直接使用控件值，并清理旧状态避免意外。
+            cls._state.pop(key, None)
+            return index % total
+
+        state = cls._state.get(key)
+        if (
+            not isinstance(state, dict)
+            or state.get("mode") != control_mode
+            or state.get("anchor") != index
+        ):
+            state = {
+                "mode": control_mode,
+                "anchor": index,
+                "current": None,
+                "counter": 0,
+            }
+            cls._state[key] = state
+
+        if control_mode == "随机":
+            # index 是随机序列的锚点，counter 保证同一批队列内每次执行都变化。
+            current = random.Random(f"{index}:{state['counter']}").randint(0, total - 1)
+            state["current"] = current
+            state["counter"] += 1
+            return current
+
+        if control_mode == "增加":
+            cur = state["current"] if state["current"] is not None else index - 1
+            cur = (cur + 1) % total
+            state["current"] = cur
+            state["counter"] += 1
+            return cur
+
+        if control_mode == "减少":
+            cur = state["current"] if state["current"] is not None else index + 1
+            cur = (cur - 1) % total
+            state["current"] = cur
+            state["counter"] += 1
+            return cur
+
+        return index % total
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -52,9 +120,38 @@ class LocalImageLoader:
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         mode = kwargs.get("control_mode", "固定")
+        index = kwargs.get("index", 0)
+        unique_id = kwargs.get("unique_id")
+        key = cls._state_key(unique_id, index)
+
         if mode in ("增加", "减少", "随机"):
-            return float("nan")
-        return kwargs.get("index", 0)
+            # 首次执行或用户改变起始 index 时强制刷新；之后用后端计数器绕过缓存。
+            state = cls._state.get(key)
+            if (
+                not isinstance(state, dict)
+                or state.get("mode") != mode
+                or state.get("anchor") != index
+            ):
+                return float("nan")
+            return f"{mode}:{index}:{state.get('counter', 0)}:{state.get('current')}"
+
+        # 固定 / 指定索引：清理状态并返回控件值
+        cls._state.pop(key, None)
+        folder = str(kwargs.get("folder_path") or "").strip()
+        try:
+            entries = []
+            recursive = bool(kwargs.get("include_subfolders", False))
+            iterator = os.walk(folder) if recursive else [(folder, [], os.listdir(folder))]
+            for root, _, names in iterator:
+                for name in names:
+                    path = os.path.join(root, name)
+                    if os.path.isfile(path):
+                        stat = os.stat(path)
+                        entries.append((os.path.relpath(path, folder), stat.st_mtime_ns, stat.st_size))
+            digest = hashlib.sha256(repr(sorted(entries)).encode("utf-8", "surrogatepass")).hexdigest()
+        except OSError:
+            digest = "missing"
+        return f"{index}:{digest}"
 
     def scan_images(self, folder_path, include_sub, allowed_ext):
         images = []
@@ -104,9 +201,7 @@ class LocalImageLoader:
                    file_filter="", aspect_filter="全部",
                    include_subfolders=False, unique_id=None):
 
-        print("\n" + "=" * 60)
-        print("🖼️ 本地图片加载器")
-        print("=" * 60)
+        logger.debug("本地图片加载器开始执行")
 
         folder_path = folder_path.strip()
         if not folder_path:
@@ -114,8 +209,7 @@ class LocalImageLoader:
         if not os.path.isdir(folder_path):
             raise Exception(f"❌ 路径无效: {folder_path}")
 
-        print(f"📂 {folder_path}")
-        print(f"🔄 子文件夹: {'包含' if include_subfolders else '不包含'}")
+        logger.debug(f"本地图片目录: {folder_path}; 子文件夹: {include_subfolders}")
 
         # 扩展名
         if file_filter.strip():
@@ -131,7 +225,7 @@ class LocalImageLoader:
         # 扫描
         paths = self.scan_images(folder_path, include_subfolders, allowed)
         total_on_disk = len(paths)
-        print(f"📊 磁盘共 {total_on_disk} 张图片")
+        logger.debug(f"磁盘共 {total_on_disk} 张图片")
 
         if not paths:
             raise Exception(f"❌ 没有找到图片: {folder_path}")
@@ -139,7 +233,7 @@ class LocalImageLoader:
         # 宽高比
         if aspect_filter != "全部":
             paths = self.filter_aspect(paths, aspect_filter)
-            print(f"📐 过滤后: {len(paths)} 张")
+            logger.debug(f"比例过滤后: {len(paths)} 张")
             if not paths:
                 raise Exception("❌ 没有符合条件的图片")
 
@@ -149,17 +243,13 @@ class LocalImageLoader:
             paths = paths[:max_count]
 
         total = len(paths)
-        print(f"📊 加载: {total} 张 | 排序: {sort_by} ({sort_order})")
+        logger.debug(f"加载: {total} 张 | 排序: {sort_by} ({sort_order})")
 
-        # 选图
-        if control_mode == "随机":
-            idx = random.Random(index).randint(0, total - 1)
-        else:
-            idx = index % total
-
+        # 选图（后端维护递增/递减/随机状态，兼容批次运行）
+        idx = self._get_effective_index(control_mode, index, total, unique_id)
         selected = paths[idx]
         name = os.path.splitext(os.path.basename(selected))[0]
-        print(f"🎯 {name} [{idx + 1}/{total}]")
+        logger.debug(f"选中 {name} [{idx + 1}/{total}]")
 
         # 加载
         img = Image.open(selected)
@@ -167,8 +257,7 @@ class LocalImageLoader:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         w, h = img.size
-        print(f"✅ {w}x{h}")
-        print("=" * 60)
+        logger.debug(f"已加载尺寸 {w}x{h}")
 
         # 预览
         ui_images = []
@@ -185,7 +274,7 @@ class LocalImageLoader:
 
         mode_text = {
             "固定": "固定索引", "增加": "递增索引",
-            "减少": "递减索引", "随机": "随机种子", "指定索引": "指定索引",
+            "减少": "递减索引", "随机": "随机索引", "指定索引": "指定索引",
         }
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
         detail = (
@@ -205,9 +294,13 @@ class LocalImageLoader:
             "width": w, "height": h,
             "mtime": int(stat.st_mtime * 1000),
             "path": selected,
+            "index": idx,
         }, ensure_ascii=False)
 
-        return {"ui": {"images": ui_images}, "result": (tensor, selected, detail, total, index, meta)}
+        return {
+            "ui": {"images": ui_images, "current_index": [idx], "total": [total]},
+            "result": (tensor, selected, detail, total, idx, meta),
+        }
 
 
 __all__ = ["LocalImageLoader"]

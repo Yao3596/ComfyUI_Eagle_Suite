@@ -16,6 +16,7 @@ import math
 import time
 import threading
 import urllib.parse
+import tempfile
 
 import requests
 import torch
@@ -57,10 +58,12 @@ PAGE_SIZE = 100  # 每页加载数量
 
 # ── 选中数据缓存（内存级，按节点 ID）──────────────────────────────────────────
 _selection_cache: dict = {}
+_selection_cache_lock = threading.RLock()
 
 def _get_cached_selection(node_id: str) -> dict:
     """供其他模块调用，安全获取缓存的选中数据。"""
-    return _selection_cache.get(node_id, {})
+    with _selection_cache_lock:
+        return dict(_selection_cache.get(node_id, {}))
 
 
 # ── 连通性探测结果缓存 ─────────────────────────────────────────────────────────
@@ -70,6 +73,7 @@ def _get_cached_selection(node_id: str) -> dict:
 # 现在改为 60 秒内复用上一次探测结果，避免热路径反复做同步网络请求。
 _conn_check_cache = {"url": None, "ok": None, "ts": 0.0}
 _conn_check_lock = threading.Lock()
+_settings_write_lock = threading.RLock()
 _CONN_CHECK_TTL = 60.0
 
 
@@ -152,13 +156,24 @@ def _save_settings(settings: dict) -> bool:
             logger.error("[EagleGallery] 拒绝保存包含掩码的 URL 到磁盘")
             return False
 
-        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        parent = os.path.dirname(SETTINGS_FILE)
+        os.makedirs(parent, exist_ok=True)
         # 移除可能存在的旧字段
         if "token" in settings:
             del settings["token"]
             
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
+        with _settings_write_lock:
+            fd, temp_path = tempfile.mkstemp(prefix=".eagle_gallery.", suffix=".tmp", dir=parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(settings, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, SETTINGS_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
         return True
     except Exception as e:
         logger.error(f"[EagleGallery] 保存设置失败: {e}")
@@ -854,11 +869,14 @@ async def cache_selection_post_route(request):
                     except:
                         selections = []
             
-            _selection_cache[node_id] = {
-                "selections": selections if selections is not None else [],
-                "output_mode": body.get("output_mode", "rgb"),
-                "sequence_index": body.get("sequence_index", 0),
-            }
+            with _selection_cache_lock:
+                _selection_cache[node_id] = {
+                    "selections": selections if selections is not None else [],
+                    "output_mode": body.get("output_mode", "rgb"),
+                    "sequence_index": body.get("sequence_index", 0),
+                }
+                if len(_selection_cache) > 512:
+                    _selection_cache.pop(next(iter(_selection_cache)), None)
         return web.json_response({"success": True})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -869,7 +887,7 @@ async def cache_selection_get_route(request):
     """获取节点缓存的选中数据。"""
     try:
         node_id = str(request.query.get("node_id", ""))
-        cache = _selection_cache.get(node_id, {})
+        cache = _get_cached_selection(node_id)
         if isinstance(cache, list):
             # 兼容旧格式（纯列表）
             cache = {"selections": cache, "output_mode": "rgb", "sequence_index": 0}
@@ -914,7 +932,7 @@ class EagleGalleryNode:
     def load_images(self, trigger="", selection_data="{}", **kwargs):
         """从缓存或备份数据读取选中项。"""
         node_id = str(kwargs.get("node_id", "default"))
-        cache = _selection_cache.get(node_id, {})
+        cache = _get_cached_selection(node_id)
 
         selections = cache.get("selections", [])
         output_mode = cache.get("output_mode", "rgb")
@@ -925,13 +943,15 @@ class EagleGalleryNode:
             try:
                 data = json.loads(selection_data)
                 selections = data.get("selections", [])
-                _selection_cache[node_id] = {
-                    "selections": selections,
-                    "output_mode": data.get("output_mode", "rgb"),
-                    "sequence_index": data.get("sequence_index", 0),
-                }
+                with _selection_cache_lock:
+                    _selection_cache[node_id] = {
+                        "selections": selections,
+                        "output_mode": data.get("output_mode", "rgb"),
+                        "sequence_index": data.get("sequence_index", 0),
+                    }
                 logger.info(f"[EagleGallery] 内存缓存丢失，从节点属性恢复了 {len(selections)} 个选中项")
-            except: pass
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
 
         return_rgba = (output_mode == "rgba")
 
@@ -1005,8 +1025,12 @@ class EagleGalleryNode:
                 dummy_shape = (1, 64, 64, 4) if return_rgba else (1, 64, 64, 3)
                 images.append(torch.zeros(dummy_shape))
 
-        next_idx = sequence_index
-        raw_data = json.dumps({"selections": selections}, ensure_ascii=False)
+        next_idx = (idx + 1) % len(selections)
+        raw_data = json.dumps({
+            "selections": selections,
+            "output_mode": output_mode,
+            "sequence_index": next_idx,
+        }, ensure_ascii=False)
 
         return (images, tags_list, raw_data, next_idx)
 

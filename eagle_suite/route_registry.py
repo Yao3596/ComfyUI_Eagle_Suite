@@ -8,6 +8,8 @@ Eagle Suite - 延迟路由注册表
 """
 
 _route_handlers = []
+_route_keys = set()
+_registered_keys = set()
 
 
 def route(method: str, path: str):
@@ -18,7 +20,10 @@ def route(method: str, path: str):
         async def get_settings(request): ...
     """
     def decorator(handler):
-        _route_handlers.append((method.upper(), path, handler))
+        key = (method.upper(), path)
+        if key not in _route_keys:
+            _route_keys.add(key)
+            _route_handlers.append((key[0], key[1], handler))
         return handler
     return decorator
 
@@ -29,8 +34,12 @@ def register_all_routes(server) -> None:
         return
     routes = server.routes
     for method, path, handler in _route_handlers:
+        key = (id(server), method, path)
+        if key in _registered_keys:
+            continue
         try:
             getattr(routes, method.lower())(path)(handler)
+            _registered_keys.add(key)
         except Exception as e:
             import logging
             logging.warning(f"[EagleRouteRegistry] 注册路由 {method} {path} 失败: {e}")
@@ -39,6 +48,8 @@ def register_all_routes(server) -> None:
 def clear_routes() -> None:
     """清空已登记的路由（主要用于测试或热重载场景）。"""
     _route_handlers.clear()
+    _route_keys.clear()
+    _registered_keys.clear()
 
 
 __all__ = ["route", "register_all_routes", "clear_routes"]

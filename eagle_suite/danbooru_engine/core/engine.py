@@ -16,6 +16,7 @@ import math
 import os
 import re
 import time
+import logging
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,8 @@ from safetensors.torch import load_file as st_load, save_file as st_save
 from sentence_transformers import SentenceTransformer
 
 from .models import SearchRequest, SearchResponse, TagResult
+
+log = logging.getLogger("EagleSuite.DanbooruEngine")
 
 
 # ──────────────────────────────────────────────
@@ -186,10 +189,10 @@ class DanbooruTagger:
         if model_path:
             self.model_path = model_path
         elif os.path.exists(LOCAL_MODEL_PATH):
-            print(f'[Engine] local model found at "{LOCAL_MODEL_PATH}"')
+            log.info('local model found at "%s"', LOCAL_MODEL_PATH)
             self.model_path = LOCAL_MODEL_PATH
         else:
-            print(f'[Engine] local model not found, will use HF id "{HF_MODEL_ID}"')
+            log.info('local model not found, will use HF id "%s"', HF_MODEL_ID)
             self.model_path = HF_MODEL_ID
 
         self.csv_path  = csv_file
@@ -229,14 +232,14 @@ class DanbooruTagger:
         t0 = time.time()
 
         if not self.paths.exists():
-            print('[Engine] no cache found, building from scratch (may take 1-3 min)...')
+            log.info('no cache found, building from scratch (may take 1-3 min)')
             self._load_model()
             self._build_full()
         else:
-            print(f'[Engine] loading cache from {self.paths.dir}')
+            log.info('loading cache from %s', self.paths.dir)
             self._load_from_cache()
             if self._cached_schema_version() != SCHEMA_VERSION:
-                print('[Engine] cache schema mismatch, rebuilding...')
+                log.info('cache schema mismatch, rebuilding')
                 self._load_model()
                 self._build_full()
             elif os.path.exists(self.csv_path):
@@ -253,7 +256,7 @@ class DanbooruTagger:
         self._rebuild_arrays_from_df()
         self._normalize_embeddings()
         self.is_loaded = True
-        print(f'[Engine] ready in {time.time() - t0:.2f}s')
+        log.info('ready in %.2fs', time.time() - t0)
 
     def _normalize_embeddings(self) -> None:
         """L2 归一化四路 embedding，使 search 阶段可直接用矩阵乘得 cosine similarity。"""
@@ -434,20 +437,20 @@ class DanbooruTagger:
         return response
 
     def _build_full(self) -> None:
-        print(f'[Engine] reading {self.csv_path}')
+        log.info('reading %s', self.csv_path)
         raw_df             = self._read_csv_robust(self.csv_path)
         self.df            = self._preprocess_raw_df(raw_df)
         self.max_log_count = float(np.log1p(self.df['post_count'].max()))
         self._encode_all_and_save()
 
     def _encode_all_and_save(self) -> None:
-        print('[Engine] encoding all rows...')
+        log.info('encoding all rows')
         for _, attr, col in _LAYER_SPEC:
             setattr(self, attr, self._encode_texts(self.df[col].tolist()))
         self._save_cache()
 
     def _smart_update(self) -> None:
-        print('[Engine] checking for incremental changes...')
+        log.info('checking for incremental changes')
         t0 = time.time()
 
         raw_df = self._read_csv_robust(self.csv_path)
@@ -470,10 +473,10 @@ class DanbooruTagger:
         ]
 
         if not added_names and not deleted_names and not changed_names:
-            print('[Engine] data is up to date, skipping update')
+            log.info('data is up to date, skipping update')
             return
 
-        print(f'[Engine] changes: +{len(added_names)} ~{len(changed_names)} -{len(deleted_names)}')
+        log.info('changes: +%s ~%s -%s', len(added_names), len(changed_names), len(deleted_names))
 
         if deleted_names:
             keep_mask = ~self.df['name'].isin(set(deleted_names))
@@ -506,7 +509,7 @@ class DanbooruTagger:
         self._rebuild_arrays_from_df()
         self._normalize_embeddings()
         self._save_cache()
-        print(f'[Engine] incremental update done in {time.time() - t0:.2f}s ({len(self.df)} rows)')
+        log.info('incremental update done in %.2fs (%s rows)', time.time() - t0, len(self.df))
 
     def _save_cache(self) -> None:
         self.paths.ensure_dir()
@@ -522,7 +525,7 @@ class DanbooruTagger:
                 'schema_version': SCHEMA_VERSION,
                 'updated_at':     current_time,
             }, f, ensure_ascii=False, indent=4)
-        print(f'[Engine] cache saved ({len(self.df)} rows) at {current_time}')
+        log.info('cache saved (%s rows) at %s', len(self.df), current_time)
 
     def _load_from_cache(self) -> None:
         tensors          = st_load(str(self.paths.embeddings), device=self.device)
@@ -546,13 +549,13 @@ class DanbooruTagger:
     def _load_model(self) -> None:
         if self.model is not None:
             return
-        print(f'[Engine] loading model (path={self.model_path}, device={self.device})')
+        log.info('loading model (path=%s, device=%s)', self.model_path, self.device)
         try:
             self.model = SentenceTransformer(self.model_path, device=self.device)
         except Exception as e:
             if self.model_path == HF_MODEL_ID:
                 raise RuntimeError(f'BGE-M3 model load failed: {e}') from e
-            print(f'[Engine] model load failed, falling back to HF: {e}')
+            log.warning('model load failed, falling back to HF: %s', e)
             self.model = SentenceTransformer(HF_MODEL_ID, device=self.device)
 
     def _read_csv_robust(self, path: str) -> pd.DataFrame:
@@ -839,10 +842,10 @@ class DanbooruTagger:
             read_path  = csv_path
             is_parquet = False
         else:
-            print(f'[Engine] co-occurrence table not found ({self.cooc_file}), related tags disabled')
+            log.info('co-occurrence table not found (%s), related tags disabled', self.cooc_file)
             return
 
-        print(f'[Engine] loading co-occurrence table ({read_path.name})...')
+        log.info('loading co-occurrence table (%s)', read_path.name)
         t0 = time.time()
         try:
             if is_parquet:
@@ -851,7 +854,7 @@ class DanbooruTagger:
                 df = self._read_csv_robust(str(read_path))
                 df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0).astype(int)
                 df.to_parquet(str(parquet_path), index=False)
-                print(f'[Engine] co-occurrence table cached as {parquet_path.name}')
+                log.info('co-occurrence table cached as %s', parquet_path.name)
 
             tag_a  = df['tag_a'].astype(str).to_numpy()
             tag_b  = df['tag_b'].astype(str).to_numpy()
@@ -874,9 +877,9 @@ class DanbooruTagger:
                 cooc[s] = list(zip(dst[start:end].tolist(), cnt[start:end].tolist()))
 
             self.cooc = cooc
-            print(
+            log.info(
                 f'[Engine] co-occurrence table loaded: {len(cooc):,} tags, '
                 f'{time.time() - t0:.2f}s'
             )
         except Exception as e:
-            print(f'[Engine] failed to load co-occurrence table: {e}')
+            log.warning('failed to load co-occurrence table: %s', e)

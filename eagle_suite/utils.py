@@ -30,6 +30,9 @@ ENCODE_ARGS = ("utf-8", 'backslashreplace')
 
 def generate_unique_filename(prefix="ComfyUI", extension="png"):
     """生成带时间戳和随机位的唯一文件名"""
+    prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(prefix or "ComfyUI"))
+    prefix = prefix.strip(" .") or "ComfyUI"
+    extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or ""))
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     short_id = uuid.uuid4().hex[:6]
     suffix = f".{extension}" if extension else ""
@@ -124,12 +127,10 @@ def get_cached_ffmpeg():
 
 def is_safe_path(path, strict=False):
     """检查路径是否安全（在工作目录内）"""
-    if "EAGLE_STRICT_PATHS" not in os.environ and not strict:
-        return True
-    
-    basedir = os.path.abspath('.')
+    basedir = os.path.normcase(os.path.realpath(os.path.abspath('.')))
     try:
-        common = os.path.commonpath([basedir, path])
+        candidate = os.path.normcase(os.path.realpath(os.path.abspath(strip_path(path))))
+        common = os.path.commonpath([basedir, candidate])
     except (ValueError, TypeError):
         # Windows 不同盘符
         return False

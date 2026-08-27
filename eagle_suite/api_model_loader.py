@@ -18,6 +18,9 @@ import requests
 import torch
 import numpy as np
 import urllib.request
+import urllib.parse
+import ipaddress
+import socket
 from PIL import Image, ImageOps
 
 # ── API Key 解码与配置管理（统一使用 api_config_manager）───────────────
@@ -115,7 +118,7 @@ def _deserialize_history(history_str: str) -> list:
             and isinstance(m.get("content", ""), str)
         ]
     except Exception as e:
-        print(f"[EagleAPI] 历史解析失败: {e}")
+        logger.debug(f"[EagleAPI] 历史解析失败: {e}")
         return []
 
 # ── 工具函数 ──────────────────────────────────────────────────
@@ -152,10 +155,10 @@ def _tensor_to_base64(img_tensor, max_size=2048, quality=90, batch_mode="first")
                 pil_image.save(buf, format="JPEG", quality=quality, optimize=True)
                 results.append(base64.b64encode(buf.getvalue()).decode("utf-8"))
             except Exception as e:
-                print(f"[EagleAPI] 帧 {idx} 编码失败: {e}")
+                logger.debug(f"[EagleAPI] 帧 {idx} 编码失败: {e}")
         return results
     except Exception as e:
-        print(f"[EagleAPI] 图像编码失败: {e}")
+        logger.warning(f"[EagleAPI] 图像编码失败: {e}")
         return []
 
 def _normalize_url_local(url: str) -> str:
@@ -169,6 +172,46 @@ _IMAGE_URL_PATTERNS = [
     re.compile(r'\b(https?://[^\s\)]+\.(?:png|jpg|jpeg|gif|webp|bmp))\b', re.IGNORECASE),
     re.compile(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', re.IGNORECASE),
 ]
+_MAX_REMOTE_IMAGE_BYTES = 64 * 1024 * 1024
+_MAX_REMOTE_IMAGE_PIXELS = 80_000_000
+
+
+def _validate_public_image_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("图片 URL 无效")
+    for info in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)):
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global:
+            raise ValueError("图片 URL 指向本机或私有网络")
+
+
+def _open_limited_image(data: bytes) -> Image.Image:
+    if len(data) > _MAX_REMOTE_IMAGE_BYTES:
+        raise ValueError("图片响应超过 64 MiB")
+    image = Image.open(io.BytesIO(data))
+    if image.width * image.height > _MAX_REMOTE_IMAGE_PIXELS:
+        raise ValueError("图片像素数量超过安全上限")
+    image.load()
+    return image.convert("RGB")
+
+
+def _requests_download_image(url: str, timeout: int) -> Image.Image:
+    _validate_public_image_url(url)
+    with requests.get(url, timeout=timeout, stream=True) as response:
+        response.raise_for_status()
+        _validate_public_image_url(str(response.url))
+        if not (response.headers.get("Content-Type") or "").lower().startswith("image/"):
+            raise ValueError("远端响应不是图片")
+        chunks, total = [], 0
+        for chunk in response.iter_content(256 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_REMOTE_IMAGE_BYTES:
+                raise ValueError("图片响应超过 64 MiB")
+            chunks.append(chunk)
+    return _open_limited_image(b"".join(chunks))
 
 
 def _extract_image_urls(text: str) -> list:
@@ -186,23 +229,14 @@ def _extract_image_urls(text: str) -> list:
 
 def _download_image(url: str, timeout: int = 30) -> Image.Image:
     """下载网络图片为 PIL RGB 图像。"""
-    headers = {"User-Agent": "ComfyUI-EagleSuite/1.0"}
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
-    img = Image.open(io.BytesIO(data))
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    return img
+    return _requests_download_image(url, timeout)
 
 
 def _decode_base64_image(b64_text: str) -> Image.Image:
     """解码 base64 图片字符串为 PIL RGB 图像。"""
-    data = base64.b64decode(b64_text)
-    img = Image.open(io.BytesIO(data))
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    return img
+    if len(b64_text) > (_MAX_REMOTE_IMAGE_BYTES * 4 // 3 + 8):
+        raise ValueError("Base64 图片超过 64 MiB")
+    return _open_limited_image(base64.b64decode(b64_text, validate=True))
 
 
 def _extract_images_from_text(text: str) -> list:
@@ -243,12 +277,12 @@ class _BaseAPI:
 
     def _request(self, url: str, headers: dict, payload: dict) -> tuple:
         try:
-            print(f"[EagleAPI] 请求 URL: {url}")
-            print(f"[EagleAPI] 模型: {payload.get('model', 'unknown')}")
+            logger.debug(f"[EagleAPI] 请求 URL: {url}")
+            logger.debug(f"[EagleAPI] 模型: {payload.get('model', 'unknown')}")
             start_time = time.time()
             resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
             elapsed = time.time() - start_time
-            print(f"[EagleAPI] 响应状态: {resp.status_code} | 耗时: {elapsed:.2f}s")
+            logger.debug(f"[EagleAPI] 响应状态: {resp.status_code} | 耗时: {elapsed:.2f}s")
             if resp.status_code == 200:
                 is_stream = payload.get('stream', False)
                 if is_stream:
@@ -635,16 +669,12 @@ class EagleAPIImageNode:
     def _decode_response_image(item, timeout: int) -> Image.Image:
         if isinstance(item, str):
             if item.startswith(("http://", "https://")):
-                response = requests.get(item, timeout=timeout)
-                response.raise_for_status()
-                return Image.open(io.BytesIO(response.content)).convert("RGB")
+                return _requests_download_image(item, timeout)
             payload = item
         elif isinstance(item, dict):
             url = item.get("url") or item.get("image_url")
             if url:
-                response = requests.get(url, timeout=timeout)
-                response.raise_for_status()
-                return Image.open(io.BytesIO(response.content)).convert("RGB")
+                return _requests_download_image(url, timeout)
             payload = (
                 item.get("b64_json")
                 or item.get("base64")
@@ -659,8 +689,7 @@ class EagleAPIImageNode:
             payload = payload.split(",", 1)[-1]
         if not payload:
             raise ValueError("响应项不包含 b64_json 或 url")
-        image_bytes = base64.b64decode(payload)
-        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        return _decode_base64_image(payload)
 
     @classmethod
     def _parse_images(cls, data: dict, timeout: int, target_size=None) -> tuple:

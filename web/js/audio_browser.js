@@ -206,8 +206,7 @@ class AudioBrowser {
       return function() {
         self.attachEvents();
         if (self.state.directory) {
-          self.loadFolders();
-          self.loadItems();
+          self.authorizeAndLoadDirectory();
         }
       };
     }(this), 100);
@@ -282,8 +281,7 @@ class AudioBrowser {
       self.state.offset = 0;
       self.state.items = [];
       self.syncBrowserSettings();
-      self.loadFolders();
-      self.loadItems();
+      self.authorizeAndLoadDirectory();
     };
     root.querySelector('[data-action="load-dir"]')?.addEventListener("click", applyDirectory);
     directoryInput?.addEventListener("keydown", function(event) {
@@ -353,6 +351,30 @@ class AudioBrowser {
           self.loadItems(true);
         }
       }, 200));
+    }
+  }
+
+  async authorizeAndLoadDirectory() {
+    if (!this.state.directory) return false;
+    var grid = this.container.querySelector('[data-container="grid"]');
+    if (grid) grid.innerHTML = '<div class="umb-loading">正在验证音频目录...</div>';
+    try {
+      var response = await fetch(this.apiPrefix + "/authorize_root", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directory: this.state.directory }),
+      });
+      var data = await response.json();
+      if (!response.ok || !data.success) {
+        if (grid) grid.innerHTML = '<div class="umb-empty">错误: ' + escapeHtml(data.error || "目录授权失败") + '</div>';
+        return false;
+      }
+      await Promise.all([this.loadFolders(), this.loadItems()]);
+      return true;
+    } catch (error) {
+      console.error("[AudioBrowser] 目录授权失败:", error);
+      if (grid) grid.innerHTML = '<div class="umb-empty">目录授权失败</div>';
+      return false;
     }
   }
 
@@ -749,7 +771,11 @@ app.registerExtension({
         this._abApp = new AudioBrowser(el, this);
       } catch (e) {
         console.error("[AudioBrowser] 初始化失败:", e);
-        el.innerHTML = '<div style="padding:30px;color:#e55">错误: ' + e.message + "</div>";
+        el.replaceChildren();
+        var errorBox = document.createElement("div");
+        errorBox.style.cssText = "padding:30px;color:#e55";
+        errorBox.textContent = "错误: " + (e && e.message ? e.message : "初始化失败");
+        el.appendChild(errorBox);
       }
 
       var onResize = this.onResize;

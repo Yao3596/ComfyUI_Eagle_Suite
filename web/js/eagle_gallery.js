@@ -970,7 +970,11 @@ app.registerExtension({
         this._vueApp = appInstance;
       } catch (e) {
         console.error("[EagleGallery] mount failed:", e);
-        el.innerHTML = '<div style="padding:30px;color:#e55">Error: ' + e.message + '</div>';
+        el.replaceChildren();
+        var errorBox = document.createElement("div");
+        errorBox.style.cssText = "padding:30px;color:#e55";
+        errorBox.textContent = "Error: " + (e && e.message ? e.message : "mount failed");
+        el.appendChild(errorBox);
       }
 
       var onResize = this.onResize;

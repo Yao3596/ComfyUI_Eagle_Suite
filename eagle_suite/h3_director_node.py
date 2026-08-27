@@ -19,6 +19,7 @@ import json
 import time
 import math
 import hashlib
+import uuid
 
 from aiohttp import web
 
@@ -130,36 +131,80 @@ def _safe_get(d, key, default=""):
     return v if v is not None else default
 
 
+_MEDIA_TAG_NAMES = {"image": "Picture", "video": "Video", "audio": "Audio"}
+
+
+def _project_media(project):
+    """Return normalized multimodal references, migrating legacy image slots in memory."""
+    media = _safe_get(project, "mediaRefs", []) or []
+    if isinstance(media, list) and any(isinstance(item, dict) and item.get("filename") for item in media):
+        return [item for item in media if isinstance(item, dict) and item.get("filename")]
+
+    legacy = _safe_get(project, "refs", []) or []
+    migrated = []
+    for index, item in enumerate(legacy):
+        if not isinstance(item, dict) or not item.get("filename"):
+            continue
+        migrated.append({
+            "id": item.get("id") or f"legacy-image-{index + 1}",
+            "type": "image",
+            "filename": item.get("filename", ""),
+            "originalName": item.get("name") or item.get("filename", ""),
+            "name": item.get("name", ""),
+            "kind": item.get("kind", "person"),
+            "retention": item.get("retention", "fully_preserved"),
+            "duration": 0.0,
+            "trimStart": 0.0,
+            "trimEnd": 0.0,
+        })
+    return migrated
+
+
+def _numbered_media(project):
+    counters = {"image": 0, "video": 0, "audio": 0}
+    result = []
+    for item in _project_media(project):
+        media_type = item.get("type", "image")
+        if media_type not in counters:
+            continue
+        counters[media_type] += 1
+        result.append((item, counters[media_type], _MEDIA_TAG_NAMES[media_type]))
+    return result
+
+
 def _used_ref_indices(project):
     """返回有 filename 的参考槽下标列表（0-based）。"""
-    refs = _safe_get(project, "refs", []) or []
-    return [i for i, r in enumerate(refs) if isinstance(r, dict) and r.get("filename")]
+    images = [item for item in _project_media(project) if item.get("type", "image") == "image"]
+    return list(range(len(images)))
 
 
 def build_subject_definitions(project):
-    refs = _safe_get(project, "refs", []) or []
     lines = []
-    for i, r in enumerate(refs):
-        if not isinstance(r, dict) or not r.get("filename"):
-            continue
+    for r, number, tag_name in _numbered_media(project):
         kind = r.get("kind", "person")
-        noun = _KIND_NOUN.get(kind, "a reference")
+        if r.get("type", "image") == "image":
+            noun = _KIND_NOUN.get(kind, "an image")
+        elif r.get("type") == "video":
+            noun = "a video"
+        else:
+            noun = "an audio"
         name = (r.get("name") or "").strip()
         of_name = f" of {name}" if name else ""
-        lines.append(f"  <Picture {i + 1}> is {noun}{of_name} reference used as @ref{i + 1}.")
+        lines.append(f"  <{tag_name} {number}> is {noun}{of_name} reference.")
     return "\n".join(lines)
 
 
 def build_retention(project):
-    refs = _safe_get(project, "refs", []) or []
     lines = []
-    for i, r in enumerate(refs):
-        if not isinstance(r, dict) or not r.get("filename"):
+    image_number = 0
+    for r in _project_media(project):
+        if r.get("type", "image") != "image":
             continue
+        image_number += 1
         ret = r.get("retention", "fully_preserved") or "fully_preserved"
         name = (r.get("name") or "").strip()
         name_tag = f" ({name})" if name else ""
-        line = f"  @ref{i + 1}{name_tag}: {ret}."
+        line = f"  <Picture {image_number}>{name_tag}: {ret}."
         if r.get("kind") == "person":
             line += " Do not copy the background of the reference image; keep only the character design."
         lines.append(line)
@@ -239,12 +284,12 @@ def _build_alignment(project):
         if mode == "fl2v":
             return (
                 "alignment:\n"
-                f"  For the target video, the first and last frames must match @ref{n} composition and subject.\n"
+                f"  For the target video, the first and last frames must match <Picture {n}> composition and subject.\n"
                 "  How the reference pictures align with the described shots: keep subject identity and key framing."
             )
         return (
             "alignment:\n"
-            f"  The first frame must match @ref{n} as the starting image.\n"
+            f"  The first frame must match <Picture {n}> as the starting image.\n"
             "  How the reference pictures align with the described shots: maintain subject and style continuity."
         )
     if mode in ("r2v", "rv2v"):
@@ -583,9 +628,22 @@ def compile_h3_params(project, scenes, llm_hint=""):
         "compatibility": compatibility,
         "segment_crf": segment_crf,
         "total_delivered_frames": stitched_frames,
+        "reference_media": [
+            {
+                "id": item.get("id", ""),
+                "type": item.get("type", "image"),
+                "filename": item.get("filename", ""),
+                "name": item.get("name", ""),
+                "duration": float(item.get("duration", 0.0) or 0.0),
+                "trim_start": float(item.get("trimStart", 0.0) or 0.0),
+                "trim_end": float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0),
+            }
+            for item in _project_media(project)
+        ],
     }
     plan["plan_hash"] = _fingerprint({
         "compatibility": compatibility,
+        "reference_media": plan["reference_media"],
         "shots": [{k: v for k, v in shot.items()
                    if k not in ("prompt", "scene_prompt")}
                   for shot in shots_list],
@@ -595,11 +653,16 @@ def compile_h3_params(project, scenes, llm_hint=""):
         resolved_continuation_modes[0]
         if len(set(resolved_continuation_modes)) == 1 else "mixed"
     )
+    media_counts = {
+        media_type: sum(1 for item in plan["reference_media"] if item.get("type") == media_type)
+        for media_type in ("image", "video", "audio")
+    }
     plan["summary"] = (
         f"{len(shots_list)} clips; {stitched_frames} delivered frames "
         f"({stitched_frames / float(fps):.3f}s) at {width}x{height}; "
         f"context={context_length}/{continuation_summary}; "
-        f"blend={video_blend_frames}; audio={audio_mode}; run={run_name}"
+        f"blend={video_blend_frames}; audio={audio_mode}; "
+        f"refs={media_counts['image']}/{media_counts['video']}/{media_counts['audio']}; run={run_name}"
     )
 
     return plan
@@ -943,6 +1006,111 @@ def _load_ref_tensor(filename, max_megapixels=1.5):
         return None
 
 
+def _media_path(filename):
+    """Resolve a saved director media filename without allowing directory traversal."""
+    if not filename:
+        return ""
+    path = os.path.join(REF_DIR, os.path.basename(str(filename)))
+    return path if os.path.isfile(path) else ""
+
+
+def _probe_media_duration(path, media_type):
+    try:
+        if media_type == "video":
+            import cv2
+            cap = cv2.VideoCapture(path)
+            try:
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+                return frames / fps if fps > 0 else 0.0
+            finally:
+                cap.release()
+        if media_type == "audio":
+            try:
+                import soundfile as sf
+                return float(sf.info(path).duration)
+            except Exception:
+                import torchaudio
+                info = torchaudio.info(path)
+                return float(info.num_frames) / float(info.sample_rate) if info.sample_rate else 0.0
+    except Exception as e:
+        logger.warning(f"[EagleH3Director] 无法读取媒体时长 {path}: {e}")
+    return 0.0
+
+
+def _load_video_tensor(filename, trim_start=0.0, trim_end=0.0, target_fps=24):
+    path = _media_path(filename)
+    if not path:
+        return None
+    cap = None
+    try:
+        import cv2
+        import numpy as np
+        import torch
+
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return None
+        source_fps = float(cap.get(cv2.CAP_PROP_FPS) or target_fps or 24)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration = total_frames / source_fps if source_fps > 0 else 0.0
+        start = max(0.0, float(trim_start or 0.0))
+        end = float(trim_end or 0.0)
+        if end <= start or (duration > 0 and end > duration):
+            end = duration
+        start_frame = max(0, int(round(start * source_fps)))
+        end_frame = total_frames if end <= 0 else min(total_frames, int(round(end * source_fps)))
+        step = max(1, int(round(source_fps / max(1, int(target_fps or 24)))))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        frames = []
+        frame_index = start_frame
+        max_frames = H3_MAX_FRAMES
+        while frame_index < end_frame and len(frames) < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if (frame_index - start_frame) % step == 0:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(torch.from_numpy(np.ascontiguousarray(rgb)).float() / 255.0)
+            frame_index += 1
+        return torch.stack(frames) if frames else None
+    except Exception as e:
+        logger.warning(f"[EagleH3Director] 参考视频加载失败 {filename}: {e}")
+        return None
+    finally:
+        if cap is not None:
+            cap.release()
+
+
+def _load_audio_clip(filename, trim_start=0.0, trim_end=0.0):
+    path = _media_path(filename)
+    if not path:
+        return None
+    try:
+        import torch
+        try:
+            # ComfyUI 自带的 PyAV 解码器同时支持音频文件和视频容器中的音轨。
+            from comfy_extras.nodes_audio import load as comfy_load_audio
+            waveform, sample_rate = comfy_load_audio(path)
+        except Exception:
+            try:
+                import torchaudio
+                waveform, sample_rate = torchaudio.load(path)
+            except Exception:
+                import soundfile as sf
+                data, sample_rate = sf.read(path, always_2d=True, dtype="float32")
+                waveform = torch.from_numpy(data.T.copy())
+        start = max(0, int(round(float(trim_start or 0.0) * sample_rate)))
+        end_seconds = float(trim_end or 0.0)
+        end = int(round(end_seconds * sample_rate)) if end_seconds > 0 else waveform.shape[-1]
+        end = min(waveform.shape[-1], max(start + 1, end))
+        waveform = waveform[:, start:end].unsqueeze(0)
+        return {"waveform": waveform, "sample_rate": int(sample_rate), "path": path}
+    except Exception as e:
+        logger.warning(f"[EagleH3Director] 参考音频加载失败 {filename}: {e}")
+        return None
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 节点类
 # ────────────────────────────────────────────────────────────────────────────
@@ -995,10 +1163,21 @@ class EagleH3DirectorNode:
         }
 
     # 与 ethanfel MiniMaxH3ChainPlan 对齐：plan 为 H3_CHAIN_PLAN 自定义类型
-    RETURN_TYPES = (H3_PLAN_TYPE, "IMAGE", "INT", "INT", "INT", "INT", "STRING")
+    # MiniMax H3 的 Autogrow 参考输入每个插槽接收一个普通 IMAGE/AUDIO，
+    # 不能接 ComfyUI 的 list-output。因此视频与音频按目标插槽逐路输出。
+    # 前 10 个输出的位置保持不变，减少旧工作流迁移成本。
+    RETURN_TYPES = (H3_PLAN_TYPE, "IMAGE", "INT", "INT", "INT", "INT", "STRING",
+                    "IMAGE", "AUDIO", "STRING",
+                    "AUDIO", "IMAGE", "AUDIO", "IMAGE", "AUDIO", "AUDIO", "AUDIO")
     RETURN_NAMES = ("plan", "REF_IMAGES", "width", "height", "clip_count",
-                    "video_blend_frames", "summary")
-    OUTPUT_IS_LIST = (False, True, False, False, False, False, False)
+                    "video_blend_frames", "summary",
+                    "ref_videos.ref_video_0", "ref_audios.ref_audio_0", "media_mapping",
+                    "ref_video_audios.ref_video_audio_0",
+                    "ref_videos.ref_video_1", "ref_video_audios.ref_video_audio_1",
+                    "ref_videos.ref_video_2", "ref_video_audios.ref_video_audio_2",
+                    "ref_audios.ref_audio_1", "ref_audios.ref_audio_2")
+    OUTPUT_IS_LIST = (False, True, False, False, False, False, False,
+                      False, False, False, False, False, False, False, False, False, False)
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
 
@@ -1059,7 +1238,8 @@ class EagleH3DirectorNode:
         # 参考图：按槽位占位，确保 REF_IMAGES[i] 严格对应 @ref(i+1)
         import torch
         ref_images = []
-        refs = project.get("refs", []) or []
+        media_refs = _project_media(project)
+        refs = [item for item in media_refs if item.get("type", "image") == "image"]
         max_mp = float(project.get("refMaxMegapixels", 1.5) or 1.5)
         for i in range(len(refs)):
             r = refs[i] if i < len(refs) else {}
@@ -1072,6 +1252,41 @@ class EagleH3DirectorNode:
         if not ref_images:
             ref_images = [torch.zeros((1, 64, 64, 3))]
 
+        ref_videos = []
+        ref_video_audios = []
+        for item in media_refs:
+            if item.get("type") != "video":
+                continue
+            trim_start = float(item.get("trimStart", 0.0) or 0.0)
+            trim_end = float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0)
+            tensor = _load_video_tensor(
+                item.get("filename", ""),
+                trim_start,
+                trim_end,
+                target_fps=int(project.get("fps", 24) or 24),
+            )
+            # 即使某个文件加载失败也保留槽位，确保 <Video N> 编号不串位。
+            ref_videos.append(tensor)
+            # MiniMax H3 把参考视频画面和其原声放在两个同编号插槽中。
+            # 无音轨或当前音频后端不支持该容器时返回 None，仍可只使用画面。
+            ref_video_audios.append(_load_audio_clip(
+                item.get("filename", ""), trim_start, trim_end
+            ))
+
+        ref_audios = []
+        for item in media_refs:
+            if item.get("type") != "audio":
+                continue
+            audio = _load_audio_clip(
+                item.get("filename", ""),
+                float(item.get("trimStart", 0.0) or 0.0),
+                float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0),
+            )
+            # 保留空槽，避免后一个音频错误顶替 <Audio N> 的编号。
+            ref_audios.append(audio)
+
+        media_mapping = json.dumps(plan_data.get("reference_media", []), ensure_ascii=False)
+
         # 独立输出端口值
         cfg = plan_data.get("compatibility", {})
         width_val = int(cfg.get("width", 1080))
@@ -1080,13 +1295,139 @@ class EagleH3DirectorNode:
         video_blend_frames_val = int(cfg.get("video_blend_frames", 0))
         summary = plan_data.get("summary", "")
 
+        video_slots = (ref_videos + [None, None, None])[:3]
+        video_audio_slots = (ref_video_audios + [None, None, None])[:3]
+        audio_slots = (ref_audios + [None, None, None])[:3]
+
         return (plan_data, ref_images, width_val, height_val,
-                clip_count, video_blend_frames_val, summary)
+                clip_count, video_blend_frames_val, summary,
+                video_slots[0], audio_slots[0], media_mapping,
+                video_audio_slots[0],
+                video_slots[1], video_audio_slots[1],
+                video_slots[2], video_audio_slots[2],
+                audio_slots[1], audio_slots[2])
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 路由：参考图上传 / 预览
+# 路由：多模态参考素材上传 / 预览
 # ────────────────────────────────────────────────────────────────────────────
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
+_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
+
+
+@route("POST", "/h3_director/upload_media")
+async def upload_media(request):
+    """Save one director-owned image/video/audio reference and return normalized metadata."""
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        if field is None:
+            return web.json_response({"success": False, "error": "no file"}, status=400)
+        original_name = os.path.basename(field.filename or "media")
+        ext = os.path.splitext(original_name)[1].lower()
+        if ext in _IMAGE_EXTENSIONS:
+            media_type = "image"
+        elif ext in _VIDEO_EXTENSIONS:
+            media_type = "video"
+        elif ext in _AUDIO_EXTENSIONS:
+            media_type = "audio"
+        else:
+            return web.json_response({"success": False, "error": "unsupported type"}, status=400)
+
+        filename = f"media_{time.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:10]}{ext}"
+        out_path = os.path.join(REF_DIR, filename)
+        total = 0
+        max_bytes = {
+            "image": 64 * 1024 * 1024,
+            "video": 1024 * 1024 * 1024,
+            "audio": 256 * 1024 * 1024,
+        }[media_type]
+        with open(out_path, "wb") as stream:
+            while True:
+                chunk = await field.read_chunk(size=1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    stream.close()
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                    return web.json_response({"success": False, "error": "file too large"}, status=413)
+                stream.write(chunk)
+        if total <= 0:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return web.json_response({"success": False, "error": "empty"}, status=400)
+
+        duration = _probe_media_duration(out_path, media_type)
+        try:
+            if media_type == "image":
+                with Image.open(out_path) as uploaded:
+                    if uploaded.width * uploaded.height > 80_000_000:
+                        raise ValueError("image pixel count too large")
+                    uploaded.verify()
+            elif duration <= 0:
+                raise ValueError("media stream could not be validated")
+        except Exception as validation_error:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return web.json_response({"success": False, "error": str(validation_error)}, status=400)
+        return web.json_response({
+            "success": True,
+            "item": {
+                "id": f"media-{uuid.uuid4().hex}",
+                "type": media_type,
+                "filename": filename,
+                "originalName": original_name,
+                "name": "",
+                "kind": "person" if media_type == "image" else "reference",
+                "retention": "fully_preserved",
+                "duration": round(duration, 4),
+                "trimStart": 0.0,
+                "trimEnd": round(duration, 4),
+                "url": "/h3_director/media?filename=" + filename,
+            },
+        })
+    except Exception as e:
+        logger.warning(f"[EagleH3Director] upload_media 失败: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@route("GET", "/h3_director/media")
+async def media_proxy(request):
+    try:
+        filename = request.query.get("filename", "")
+        path = _media_path(filename)
+        if not path:
+            return web.Response(status=404)
+        return web.FileResponse(path)
+    except Exception as e:
+        logger.warning(f"[EagleH3Director] media_proxy 失败: {e}")
+        return web.Response(status=500)
+
+
+@route("DELETE", "/h3_director/media")
+async def delete_media(request):
+    """Delete only files created inside the director reference directory."""
+    filename = os.path.basename(request.query.get("filename", ""))
+    if not filename.startswith(("media_", "ref_")):
+        return web.json_response({"success": False, "error": "invalid filename"}, status=400)
+    path = _media_path(filename)
+    if not path:
+        return web.json_response({"success": True, "deleted": False})
+    try:
+        os.remove(path)
+        return web.json_response({"success": True, "deleted": True})
+    except OSError as error:
+        return web.json_response({"success": False, "error": str(error)}, status=500)
 
 @route("POST", "/h3_director/upload_ref")
 async def upload_ref(request):
@@ -1101,14 +1442,45 @@ async def upload_ref(request):
         ext = os.path.splitext(disp)[1].lower()
         if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
             return web.json_response({"success": False, "error": "unsupported type"}, status=400)
-        data = await field.read()
-        if not data:
-            return web.json_response({"success": False, "error": "empty"}, status=400)
         stamp = time.strftime("%Y%m%d%H%M%S")
         safe_name = f"ref_{stamp}_{abs(hash(disp)) & 0xffffffff}{ext}"
         out_path = os.path.join(REF_DIR, safe_name)
+        total = 0
+        max_bytes = 25 * 1024 * 1024
         with open(out_path, "wb") as f:
-            f.write(data)
+            while True:
+                chunk = await field.read_chunk(size=1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    f.close()
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                    return web.json_response(
+                        {"success": False, "error": "file too large (max 25 MiB)"},
+                        status=413,
+                    )
+                f.write(chunk)
+        if total <= 0:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return web.json_response({"success": False, "error": "empty"}, status=400)
+        try:
+            with Image.open(out_path) as uploaded:
+                if uploaded.width * uploaded.height > 80_000_000:
+                    raise ValueError("image pixel count too large")
+                uploaded.verify()
+        except Exception as validation_error:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return web.json_response({"success": False, "error": str(validation_error)}, status=400)
         return web.json_response({"success": True, "filename": safe_name})
     except Exception as e:
         logger.warning(f"[EagleH3Director] upload_ref 失败: {e}")

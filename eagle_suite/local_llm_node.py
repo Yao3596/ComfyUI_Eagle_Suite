@@ -21,6 +21,9 @@ import glob
 import tempfile
 import subprocess
 import requests
+import ipaddress
+import socket
+from urllib.parse import urlparse
 import torch
 import numpy as np
 from PIL import Image
@@ -527,10 +530,10 @@ def _load_local_model(model_path: str, device: str, dtype_str: str):
     start = time.time()
 
     try:
-        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=False, local_files_only=True)
     except Exception as processor_error:
         try:
-            processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, local_files_only=True)
+            processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False, local_files_only=True)
         except Exception as tokenizer_error:
             raise RuntimeError(f"加载 Processor/Tokenizer 失败: {processor_error}; {tokenizer_error}")
 
@@ -1231,7 +1234,10 @@ class _BaseAPI:
     def _request(self, url: str, headers: dict, payload: dict) -> tuple:
         try:
             start_time = time.time()
-            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
+            resp = requests.post(
+                url, json=payload, headers=headers, timeout=self.timeout,
+                allow_redirects=False,
+            )
             elapsed = time.time() - start_time
 
             if resp.status_code == 200:
@@ -1292,6 +1298,21 @@ def _normalize_url(url: str) -> str:
     url = url.strip().rstrip("/")
     if not url:
         return ""
+    parsed = urlparse(url)
+    allowed_hosts = {"localhost", "127.0.0.1", "::1"}
+    allowed_hosts.update(filter(None, os.environ.get("EAGLE_LOCAL_LLM_HOSTS", "").lower().split(",")))
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return ""
+    if parsed.hostname.lower() not in allowed_hosts:
+        try:
+            addresses = {
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(parsed.hostname, parsed.port or 80)
+            }
+        except OSError:
+            return ""
+        if not addresses or not all(address.is_loopback for address in addresses):
+            return ""
     if "/deployments/" in url or "/openai/deployments/" in url:
         return url
     if url.endswith("/chat/completions"):

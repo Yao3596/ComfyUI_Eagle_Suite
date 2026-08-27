@@ -25,7 +25,37 @@ BASE_URL = "https://wallhaven.cc/api/v1"""
 WALLHAVEN_HEADERS = {
     "User-Agent": "WallhavenGallery-ComfyUI/1.0 (ComfyUI custom node; image browser only)"""
 }
+_ALLOWED_IMAGE_HOSTS = ("wallhaven.cc", "w.wallhaven.cc", "th.wallhaven.cc")
+_MAX_IMAGE_BYTES = 64 * 1024 * 1024
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "..", "wallhaven_settings.json")
+
+
+def _is_allowed_wallhaven_image_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+        host = (parsed.hostname or "").lower()
+        return parsed.scheme in ("http", "https") and any(
+            host == allowed or host.endswith("." + allowed)
+            for allowed in _ALLOWED_IMAGE_HOSTS
+        )
+    except Exception:
+        return False
+
+
+def _read_limited_response(response, max_bytes=_MAX_IMAGE_BYTES) -> bytes:
+    declared = int(response.headers.get("Content-Length") or 0)
+    if declared > max_bytes:
+        raise ValueError("image response is too large")
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=512 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("image response is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
 # ── 速率限制─────────────────────────────────────────────────────────────────
 class _RateLimiter:
     def __init__(self, min_interval_sec: float):
@@ -46,8 +76,9 @@ def _wh_request(method: str, url: str, **kwargs):
     headers = dict(kwargs.pop("headers", None) or {})
     for k, v in WALLHAVEN_HEADERS.items():
         headers.setdefault(k, v)
-    # 如果传入headers 中没API Key，则settings 读取
-    if not headers.get("X-API-Key"):
+    use_api_key = kwargs.pop("use_api_key", True)
+    # 图片 CDN 请求不携带 API Key，避免把凭据转发到非 API 主机。
+    if use_api_key and not headers.get("X-API-Key"):
         settings = _load_settings()
         api_key = settings.get("api_key", "").strip()
         if api_key:
@@ -294,25 +325,33 @@ async def image_proxy_route(request):
     url = request.query.get("url", "")
     if not url:
         return web.Response(status=400, text="missing url")
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        return web.Response(status=400, text="invalid url")
-    if parsed.scheme not in ("http", "https"):
-        return web.Response(status=400, text="invalid scheme")
-    host = (parsed.hostname or "").lower()
-    allowed_hosts = ("wallhaven.cc", "w.wallhaven.cc", "th.wallhaven.cc")
-    if not any(host == h or host.endswith("." + h) for h in allowed_hosts):
+    if not _is_allowed_wallhaven_image_url(url):
         return web.Response(status=403, text="host not allowed")
     async with _get_image_proxy_sem():
-        ok, resp = await asyncio.to_thread(_wh_request, "GET", url, timeout=20)
+        ok, resp = await asyncio.to_thread(
+            _wh_request, "GET", url, timeout=20, stream=True, use_api_key=False
+        )
         if not ok:
             logger.warning(f"[Wallhaven Proxy] 上游请求失败 {url}: {resp}")
             return web.Response(status=502, text="upstream error")
     if resp.status_code != 200:
         return web.Response(status=resp.status_code)
+    if not _is_allowed_wallhaven_image_url(str(resp.url)):
+        resp.close()
+        return web.Response(status=403, text="redirect target is not allowed")
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if not content_type.startswith("image/"):
+        resp.close()
+        return web.Response(status=415, text="upstream response is not an image")
+    try:
+        body = await asyncio.to_thread(_read_limited_response, resp)
+    except ValueError as error:
+        resp.close()
+        return web.Response(status=413, text=str(error))
+    finally:
+        resp.close()
     return web.Response(
-        body=resp.content,
+        body=body,
         headers={
             "Content-Type": resp.headers.get("Content-Type", "application/octet-stream"),
             "Cache-Control": "public, max-age=86400",
@@ -405,16 +444,28 @@ class WallhavenGalleryNode:
                         logger.warning(f"[Wallhaven] 获取 tags 失败 {wallpaper_id}: {e}")
                 tags_list.append(tags_str)
                 if image_url:
+                    resp = None
                     try:
+                        if not _is_allowed_wallhaven_image_url(image_url):
+                            raise ValueError("图片地址不在 Wallhaven 允许域名内")
                         logger.info(f"[Wallhaven] 开始下载图 {image_url[:100]}...")
-                        ok, resp = _wh_request("GET", image_url, timeout=60)
+                        ok, resp = _wh_request(
+                            "GET", image_url, timeout=60, stream=True, use_api_key=False
+                        )
                         if not ok:
                             logger.error(f"[Wallhaven] 下载请求失败: {resp}")
+                            resp = None
                             images.append(torch.zeros(1, 512, 512, 3))
                             continue
-                        logger.info(f"[Wallhaven] 下载响应: status={resp.status_code}, size={len(resp.content)} bytes")
                         resp.raise_for_status()
-                        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                        if not _is_allowed_wallhaven_image_url(str(resp.url)):
+                            raise ValueError("图片重定向目标不在允许域名内")
+                        image_bytes = _read_limited_response(resp)
+                        logger.info(f"[Wallhaven] 下载响应: status={resp.status_code}, size={len(image_bytes)} bytes")
+                        img = Image.open(io.BytesIO(image_bytes))
+                        if img.width * img.height > 80_000_000:
+                            raise ValueError("图片像素尺寸过大")
+                        img = img.convert("RGB")
                         # 解析分辨率用于调整
                         if resolution:
                             logger.info(f"[Wallhaven] 下载图片 {wallpaper_id}: {resolution}")
@@ -424,7 +475,10 @@ class WallhavenGalleryNode:
                         logger.info(f"[Wallhaven] 图片处理成功: {wallpaper_id}")
                     except Exception as e:
                         logger.error(f"[Wallhaven] 下载图片失败 {image_url}: {e}")
-                        # 返回占位                        images.append(torch.zeros(1, 512, 512, 3))
+                        images.append(torch.zeros(1, 512, 512, 3))
+                    finally:
+                        if hasattr(resp, "close"):
+                            resp.close()
                 else:
                     logger.warning(f"[Wallhaven] 缺少图片 URL: {wallpaper_id}")
                     images.append(torch.zeros(1, 512, 512, 3))

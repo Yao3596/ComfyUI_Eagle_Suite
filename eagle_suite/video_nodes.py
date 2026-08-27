@@ -173,7 +173,8 @@ def _prepare_alpha(mask, images):
             mode='bilinear',
             align_corners=False
         ).permute(0, 2, 3, 1)
-    return alpha.to(images.device)
+    # Match ComfyUI LoadImage semantics: MASK=1 means transparent/masked.
+    return (1.0 - alpha.clamp(0.0, 1.0)).to(images.device)
 def _apply_mask(images, mask):
     """仅用于不支持 alpha 的格式：将背景乘以蒙版"""
     alpha = _prepare_alpha(mask, images)
@@ -213,6 +214,11 @@ def _write_audio(audio, out_dir):
         return None
 def _generate_unique_filename(prefix):
     """生成唯一文件名"""
+    prefix = str(prefix or "video").strip()
+    prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", prefix)
+    prefix = prefix.strip(" .") or "video"
+    if prefix in {".", ".."}:
+        prefix = "video"
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     short_id = uuid.uuid4().hex[:6]
     return f"{prefix}_{date_str}_{short_id}"
@@ -395,6 +401,7 @@ class EagleImagesToVideo:
             images = images[indices]
             if images.shape[0] == 0:
                 return ("", "抽帧后图像序列为空", "", images, input_video)
+            fps = fps / (frame_skip + 1)
         # 帧数上限
         if frame_limit > 0 and len(images) > frame_limit:
             indices = np.linspace(0, len(images) - 1, frame_limit, dtype=int)
@@ -534,11 +541,20 @@ class EagleImagesToVideo:
                 else:
                     args += ["-an"]
             args.append(out_path)
-            proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-            for frame in frame_data:
-                proc.stdin.write(_tensor_to_np_uint8(frame).tobytes())
-            proc.stdin.close()
-            _, stderr = proc.communicate(timeout=600)
+            with tempfile.TemporaryFile() as stderr_file:
+                proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=stderr_file)
+                try:
+                    for frame in frame_data:
+                        proc.stdin.write(_tensor_to_np_uint8(frame).tobytes())
+                    proc.stdin.close()
+                    proc.stdin = None
+                    proc.wait(timeout=600)
+                except Exception:
+                    proc.kill()
+                    proc.wait()
+                    raise
+                stderr_file.seek(0)
+                stderr = stderr_file.read()
             if proc.returncode != 0:
                 raise RuntimeError(
                     f"FFmpeg 错误: {stderr.decode('utf-8', errors='replace')[-300:]}"
@@ -839,7 +855,8 @@ class EagleVideoConverter:
                 )
         if vf_parts:
             args += ["-vf", ",".join(vf_parts)]
-        args.append(os.path.join(out_dir, f"{filename_prefix}_%05d.{ext}"))
+        safe_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_prefix or "frame")).strip(" .") or "frame"
+        args.append(os.path.join(out_dir, f"{safe_prefix}_%05d.{ext}"))
         result = subprocess.run(args, capture_output=True, timeout=600)
         if result.returncode != 0:
             return (
@@ -848,7 +865,7 @@ class EagleVideoConverter:
                 ""
             )
         eagle_result = ""
-        first_frame  = os.path.join(out_dir, f"{filename_prefix}_00001.{ext}")
+        first_frame  = os.path.join(out_dir, f"{safe_prefix}_00001.{ext}")
         if eagle_folder.strip() and os.path.exists(first_frame):
             val, itype = _parse_folder_input(eagle_folder)
             if val and itype != "local_path":
@@ -891,11 +908,20 @@ class EagleVideoConverter:
             args  = [ffmpeg, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                      "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0",
                      "-c:v", "libx264", "-crf", "23", "-pix_fmt", "yuv420p", temp_path]
-            proc  = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-            for frame in images:
-                proc.stdin.write(_tensor_to_np_uint8(frame).tobytes())
-            proc.stdin.close()
-            _, stderr = proc.communicate(timeout=600)
+            with tempfile.TemporaryFile() as stderr_file:
+                proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=stderr_file)
+                try:
+                    for frame in images:
+                        proc.stdin.write(_tensor_to_np_uint8(frame).tobytes())
+                    proc.stdin.close()
+                    proc.stdin = None
+                    proc.wait(timeout=600)
+                except Exception:
+                    proc.kill()
+                    proc.wait()
+                    raise
+                stderr_file.seek(0)
+                stderr = stderr_file.read()
             if proc.returncode != 0:
                 logger.error(
                     f"临时视频创建失败: {stderr.decode('utf-8', errors='replace')[-200:]}"

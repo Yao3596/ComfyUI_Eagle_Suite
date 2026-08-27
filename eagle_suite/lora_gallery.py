@@ -48,6 +48,16 @@ _CIVITAI_BASE = "https://civitai.red"
 _THUMBNAIL_SIZE = 320
 _THUMBNAIL_CACHE_MAX = 192
 _PREVIEW_MAX_BYTES = 32 * 1024 * 1024
+_LORA_MODEL_MAX_BYTES = 8 * 1024 * 1024 * 1024
+
+
+def _path_is_within(path, root):
+    try:
+        return os.path.commonpath([
+            os.path.realpath(path), os.path.realpath(root)
+        ]) == os.path.realpath(root)
+    except (ValueError, TypeError):
+        return False
 
 # ── 全局缓存 ──────────────────────────────────────────────────────────────────
 _lora_scan_cache = {"data": None, "ts": 0.0, "lock": threading.Lock()}
@@ -1015,6 +1025,7 @@ async def _download_url(url, dest_path, api_key=""):
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    temp_path = str(dest_path) + ".part"
     try:
         timeout = aiohttp.ClientTimeout(total=600)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1022,13 +1033,27 @@ async def _download_url(url, dest_path, api_key=""):
                 if resp.status >= 400:
                     text = await resp.text()
                     return False, f"HTTP {resp.status}: {text[:200]}"
-                with open(dest_path, "wb") as f:
+                declared = int(resp.headers.get("Content-Length") or 0)
+                if declared > _LORA_MODEL_MAX_BYTES:
+                    return False, "model file is too large"
+                total = 0
+                with open(temp_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(1024 * 1024):
                         if chunk:
+                            total += len(chunk)
+                            if total > _LORA_MODEL_MAX_BYTES:
+                                raise ValueError("model file is too large")
                             f.write(chunk)
+                os.replace(temp_path, dest_path)
                 return True, ""
     except Exception as e:
         return False, str(e)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 
 def _is_civitai_image_url(url):
@@ -1246,13 +1271,18 @@ async def lora_download_model_route(request):
 
         data = _scan_loras()
         # 查找目标文件夹路径
-        target_dir = _get_lora_dirs()[0]
+        lora_roots = _get_lora_dirs()
+        if not lora_roots:
+            return web.json_response({"success": False, "error": "no LoRA directory"}, status=500)
+        target_root = os.path.realpath(lora_roots[0])
+        target_dir = target_root
         if folder_id and folder_id != "_all":
             # folder_id 形如 loras/Noob/Artist Style，取后半部分
             rel = folder_id.split("/", 1)[1] if "/" in folder_id else folder_id
-            cand = os.path.join(target_dir, rel)
-            if os.path.isdir(cand):
-                target_dir = cand
+            cand = os.path.realpath(os.path.join(target_root, rel))
+            if not _path_is_within(cand, target_root) or not os.path.isdir(cand):
+                return web.json_response({"success": False, "error": "invalid target folder"}, status=400)
+            target_dir = cand
 
         # 从 Civitai API 获取版本详情
         if aiohttp is None:
@@ -1285,10 +1315,14 @@ async def lora_download_model_route(request):
         if not download_url:
             return web.json_response({"success": False, "error": "no download url"})
 
-        name = file_info.get("name", f"{model_id}_{version_id}.safetensors")
+        name = os.path.basename(str(file_info.get("name") or f"{model_id}_{version_id}.safetensors")).strip()
+        if not name or name in (".", ".."):
+            return web.json_response({"success": False, "error": "invalid model filename"}, status=400)
         if not name.lower().endswith(_LORA_EXT):
             name += ".safetensors"
-        dest = os.path.join(target_dir, name)
+        dest = os.path.realpath(os.path.join(target_dir, name))
+        if not _path_is_within(dest, target_root):
+            return web.json_response({"success": False, "error": "invalid model destination"}, status=400)
 
         ok, err = await _download_url(download_url, dest, api_key)
         if not ok:

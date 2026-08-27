@@ -179,21 +179,36 @@ class EagleBatchVideoLoader:
             video_files = selected if selected else video_files[:max_load]
         elif load_mode == "限制数量":
             effective_start = start_index % total if total > 0 else 0
-            end = effective_start + max_load
-            indices = list(range(effective_start, min(end, total)))
-            if end > total:
-                indices += list(range(0, end - total))
+            # 允许请求数量超过目录总数，并按目录顺序循环取样；旧实现只
+            # 能跨越一次末尾，max_load > total * 2 时会产生越界索引。
+            indices = [
+                (effective_start + offset) % total
+                for offset in range(max(0, int(max_load)))
+            ]
             video_files = [video_files[i] for i in indices]
         else:
             if total > 0:
                 effective_start = start_index % total
                 video_files = (video_files[effective_start:]
                                + video_files[:effective_start])
+        # IMAGE batches are fully resident tensors.  Keep a hard global budget
+        # even when max_frames_per_video=0 ("all") so long videos cannot exhaust
+        # the ComfyUI process.  The environment override is intentionally capped.
+        configured_frames = max(1, min(8192, int(os.environ.get("EAGLE_MAX_BATCH_VIDEO_FRAMES", "2048"))))
+        memory_budget_mb = max(128, min(4096, int(os.environ.get("EAGLE_MAX_BATCH_VIDEO_MB", "1024"))))
+        bytes_per_frame = max(1, resize_width * resize_height * 3 * 4)
+        memory_frame_limit = max(1, (memory_budget_mb * 1024 * 1024) // bytes_per_frame)
+        frame_budget = min(configured_frames, memory_frame_limit)
         all_frames, total_frame_count, video_details, preview_frames = [], 0, [], []
         for idx, vpath in enumerate(video_files):
+            remaining = frame_budget - total_frame_count
+            if remaining <= 0:
+                video_details.append(f"已达到全局帧预算 {frame_budget}，其余视频未解码")
+                break
             try:
+                effective_max = remaining if max_frames_per_video <= 0 else min(max_frames_per_video, remaining)
                 frames, info, preview = self._process_video(
-                    vpath, frame_skip, max_frames_per_video,
+                    vpath, frame_skip, effective_max,
                     resize_width, resize_height,
                     preview_first_frame and idx == 0
                 )

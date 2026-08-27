@@ -7,6 +7,9 @@ import os
 import tempfile
 import threading
 import urllib.parse
+import ctypes
+from ctypes import wintypes
+import hashlib
 
 from .logger import logger
 
@@ -20,6 +23,35 @@ MODEL_TYPE_IMAGE = "image"
 MODEL_TYPES = (MODEL_TYPE_LLM, MODEL_TYPE_IMAGE)
 
 _ENC_PREFIX = "ENC:"
+_DPAPI_PREFIX = "DPAPI:"
+_KEYRING_PREFIX = "KEYRING:"
+_FERNET_PREFIX = "FERNET:"
+_KEYRING_SERVICE = "ComfyUI Eagle Suite"
+
+
+def _fernet_key_path() -> str:
+    base = os.environ.get("EAGLE_CREDENTIAL_DIR") or os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "ComfyUI-Eagle-Suite", "credential.key")
+
+
+def _get_fernet():
+    from cryptography.fernet import Fernet
+    path = _fernet_key_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.isfile(path):
+        key = Fernet.generate_key()
+        fd, temp_path = tempfile.mkstemp(prefix=".credential.", suffix=".tmp", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(key)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    with open(path, "rb") as handle:
+        return Fernet(handle.read().strip())
 _FILE_LOCK = threading.RLock()
 _COMMENT = (
     "Eagle Suite API 配置文件。每个非下划线开头的根键都是一组模型配置，"
@@ -35,13 +67,76 @@ _IMAGE_MODEL_HINTS = (
 )
 
 
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _dpapi_protect(value: str) -> str:
+    payload = value.encode("utf-8")
+    buffer = ctypes.create_string_buffer(payload)
+    source = _DATA_BLOB(len(payload), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+    output = _DATA_BLOB()
+    crypt_protect = ctypes.windll.crypt32.CryptProtectData
+    crypt_protect.argtypes = [
+        ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB),
+    ]
+    crypt_protect.restype = wintypes.BOOL
+    if not crypt_protect(
+        ctypes.byref(source), "Eagle Suite API key", None, None, None, 0x1, ctypes.byref(output)
+    ):
+        raise ctypes.WinError()
+    try:
+        encrypted = ctypes.string_at(output.pbData, output.cbData)
+        return _DPAPI_PREFIX + base64.b64encode(encrypted).decode("ascii")
+    finally:
+        ctypes.windll.kernel32.LocalFree(output.pbData)
+
+
+def _dpapi_unprotect(value: str) -> str:
+    payload = base64.b64decode(value[len(_DPAPI_PREFIX):], validate=True)
+    buffer = ctypes.create_string_buffer(payload)
+    source = _DATA_BLOB(len(payload), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+    output = _DATA_BLOB()
+    crypt_unprotect = ctypes.windll.crypt32.CryptUnprotectData
+    crypt_unprotect.argtypes = [
+        ctypes.POINTER(_DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(_DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(_DATA_BLOB),
+    ]
+    crypt_unprotect.restype = wintypes.BOOL
+    if not crypt_unprotect(
+        ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(output)
+    ):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(output.pbData, output.cbData).decode("utf-8")
+    finally:
+        ctypes.windll.kernel32.LocalFree(output.pbData)
+
+
 def encode_api_key(raw: str) -> str:
-    """将明文 API Key 编码为 ENC:Base64；已编码时保持原样。"""
+    """Store API keys in the OS credential vault and serialize only a reference."""
     if not raw or not isinstance(raw, str):
         return ""
     text = raw.strip()
-    if text.startswith(_ENC_PREFIX):
+    if text.startswith((_DPAPI_PREFIX, _KEYRING_PREFIX, _FERNET_PREFIX)):
         return text
+    if text.startswith(_ENC_PREFIX):
+        text = decode_api_key(text)
+    if os.name == "nt":
+        try:
+            import keyring
+            reference = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            keyring.set_password(_KEYRING_SERVICE, reference, text)
+            return _KEYRING_PREFIX + reference
+        except Exception as error:
+            logger.warning(f"[APIConfigManager] 系统凭据库不可用，回退 DPAPI: {error}")
+        try:
+            return _dpapi_protect(text)
+        except Exception as error:
+            logger.warning(f"[APIConfigManager] DPAPI 不可用，使用用户级加密密钥: {error}")
+            return _FERNET_PREFIX + _get_fernet().encrypt(text.encode("utf-8")).decode("ascii")
     try:
         quoted = urllib.parse.quote(text, safe="")
         payload = base64.b64encode(quoted.encode("utf-8")).decode("utf-8")
@@ -55,6 +150,25 @@ def decode_api_key(raw: str) -> str:
     if not raw or not isinstance(raw, str):
         return ""
     text = raw.strip()
+    if text.startswith(_KEYRING_PREFIX):
+        try:
+            import keyring
+            return keyring.get_password(_KEYRING_SERVICE, text[len(_KEYRING_PREFIX):]) or ""
+        except Exception as error:
+            logger.error(f"[APIConfigManager] 系统凭据库读取失败: {error}")
+            return ""
+    if text.startswith(_FERNET_PREFIX):
+        try:
+            return _get_fernet().decrypt(text[len(_FERNET_PREFIX):].encode("ascii")).decode("utf-8")
+        except Exception as error:
+            logger.error(f"[APIConfigManager] 用户级密钥解密失败: {error}")
+            return ""
+    if text.startswith(_DPAPI_PREFIX):
+        try:
+            return _dpapi_unprotect(text)
+        except Exception as error:
+            logger.error(f"[APIConfigManager] DPAPI 解密失败: {error}")
+            return ""
     if not text.startswith(_ENC_PREFIX):
         return text
     try:
@@ -322,7 +436,7 @@ def update_profile(
         return False
 
     profile = dict(profiles[clean_name])
-    if api_key is not None:
+    if api_key not in (None, ""):
         profile["api_key"] = api_key
     if base_url is not None:
         profile["base_url"] = str(base_url or "").strip()
@@ -369,7 +483,8 @@ def get_profile_for_frontend(name: str) -> dict:
         return {}
     return {
         "name": str(name or "").strip(),
-        "api_key": profile.get("api_key", ""),
+        "api_key": "",
+        "api_key_set": bool(profile.get("api_key")),
         "base_url": profile.get("base_url", ""),
         "model": profile.get("model", ""),
         "model_type": normalize_model_type(

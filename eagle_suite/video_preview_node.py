@@ -14,6 +14,8 @@ UI 数据走当前 ComfyUI 的原生媒体约定：视频使用 ``video``，GIF/
 
 import os
 import time
+import re
+import glob
 
 import numpy as np
 import torch
@@ -34,6 +36,7 @@ class EagleVideoGifPreviewNode:
                 "fps": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 120.0, "step": 0.1}),
                 "format": (["gif", "webp", "mp4"], {"default": "gif"}),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     RETURN_TYPES = ("VIDEO", "IMAGE")
@@ -86,10 +89,17 @@ class EagleVideoGifPreviewNode:
             logger.warning(f"[EagleVideoGifPreview] 从 VIDEO 对象提取帧失败: {e}")
             return []
 
-    def preview(self, video=None, images=None, fps=8.0, format="gif"):
+    def preview(self, video=None, images=None, fps=8.0, format="gif", unique_id=None):
         output_dir = folder_paths.get_temp_directory()
         os.makedirs(output_dir, exist_ok=True)
-        prefix = f"eagle_preview_{int(time.time() * 1000)}"
+        node_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(unique_id or "default"))[:80]
+        prefix = f"eagle_preview_{node_key}"
+        # One preview file per node: repeated queues overwrite rather than grow temp forever.
+        for stale in glob.glob(os.path.join(output_dir, prefix + ".*")):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
 
         # ── 端口穿透：video/images 都可接 VIDEO 对象或 IMAGE 张量 ──
         video_is_obj = self._is_video_object(video)

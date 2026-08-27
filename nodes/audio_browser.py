@@ -13,6 +13,8 @@ import asyncio
 import hashlib
 import shutil
 import atexit
+import subprocess
+import threading
 from datetime import datetime
 from urllib.parse import quote
 
@@ -20,13 +22,21 @@ import folder_paths
 from aiohttp import web
 from PIL import Image, ImageDraw, ImageFont
 
-from ..tools_utils import AUDIO_EXTENSIONS, find_files, get_setting
+from ..tools_utils import (
+    AUDIO_EXTENSIONS,
+    authorize_media_root,
+    find_files,
+    get_setting,
+    is_trusted_browser_request,
+    resolve_allowed_media_path,
+)
 from ..eagle_suite.logger import logger
 from ..eagle_suite.route_registry import route
 
 # ── 缓存 ─────────────────────────────────────────────────────
 _directory_cache = {}
-_cache_lock = {}
+_cache_timestamps = {}
+_directory_cache_lock = threading.RLock()
 _thumbnail_cache = {}
 _thumbnail_cache_lock = asyncio.Lock() if hasattr(asyncio, "Lock") else None
 _THUMB_CACHE_DIR = os.path.join(
@@ -108,9 +118,11 @@ def _try_get_audio_duration(path):
             pass
 
         try:
-            result = os.popen(
-                f'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "{path}"'
-            ).read().strip()
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", path],
+                capture_output=True, text=True, timeout=15, check=False,
+            ).stdout.strip()
             return float(result) if result else 0
         except Exception:
             pass
@@ -143,10 +155,10 @@ def _get_audio_files(directory, recursive=True):
 
     directory = os.path.abspath(directory)
     cache_key = f"{directory}:{int(bool(recursive))}"
-    cache_time = _cache_lock.get(cache_key, 0)
-
-    if cache_key in _directory_cache and (time.time() - cache_time) < 60:
-        return _directory_cache[cache_key]
+    with _directory_cache_lock:
+        cache_time = _cache_timestamps.get(cache_key, 0)
+        if cache_key in _directory_cache and (time.time() - cache_time) < 60:
+            return list(_directory_cache[cache_key])
 
     files = _scan_audio_files(directory, recursive)
 
@@ -166,12 +178,20 @@ def _get_audio_files(directory, recursive=True):
             logger.warning(f"[EagleAudioList] 无法读取文件 {f}: {e}")
             continue
 
-    _directory_cache[cache_key] = items
-    _cache_lock[cache_key] = time.time()
+    with _directory_cache_lock:
+        _directory_cache[cache_key] = items
+        _cache_timestamps[cache_key] = time.time()
     return items
 
 
-def _build_folder_tree(directory):
+def _build_folder_tree(directory, _visited=None, _depth=0):
+    if _depth > 32:
+        return []
+    _visited = _visited if _visited is not None else set()
+    canonical = os.path.normcase(os.path.realpath(directory))
+    if canonical in _visited:
+        return []
+    _visited.add(canonical)
     if not os.path.isdir(directory):
         return []
     tree = []
@@ -184,7 +204,7 @@ def _build_folder_tree(directory):
                     "id": item_path,
                     "name": item,
                     "path": item_path,
-                    "children": _build_folder_tree(item_path)
+                    "children": _build_folder_tree(item_path, _visited, _depth + 1)
                 })
     except PermissionError:
         logger.warning(f"[EagleAudioList] 无权限访问 {directory}")
@@ -268,12 +288,29 @@ def _build_audio_thumbnail(path, size):
 
 # ── 路由 ─────────────────────────────────────────────────────
 
+@route("POST", "/EagleAudioList/authorize_root")
+async def authorize_root(request):
+    """Authorize a user-entered audio directory for this UI session."""
+    if not is_trusted_browser_request(request):
+        return web.json_response({"success": False, "error": "仅允许同源界面授权音频目录"}, status=403)
+    try:
+        data = await request.json()
+        root_dir = authorize_media_root(data.get("directory", ""), "audio")
+        if not root_dir:
+            return web.json_response({"success": False, "error": "目录不存在、不可访问或不是绝对路径"}, status=400)
+        return web.json_response({"success": True, "root": root_dir})
+    except Exception as error:
+        logger.warning(f"[EagleAudioList] 授权目录失败: {error}")
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+
+
 @route("GET", "/EagleAudioList/folders")
 async def get_folders(request):
     try:
         root_dir = request.query.get("directory", "").strip()
-        if not root_dir or not os.path.isdir(root_dir):
-            return web.json_response({"success": False, "error": "目录不存在或未指定"}, status=400)
+        root_dir = resolve_allowed_media_path(root_dir, "audio", "directory")
+        if not root_dir:
+            return web.json_response({"success": False, "error": "目录未配置为允许的音频根目录"}, status=403)
         tree = await asyncio.to_thread(_build_folder_tree, root_dir)
         return web.json_response({"success": True, "folders": tree, "root": root_dir})
     except Exception as e:
@@ -293,8 +330,9 @@ async def list_audio(request):
         offset = int(body.get("offset", 0))
         limit = max(1, min(200, int(body.get("limit", 50))))
 
-        if not directory or not os.path.isdir(directory):
-            return web.json_response({"success": False, "error": "目录不存在或未指定"}, status=400)
+        directory = resolve_allowed_media_path(directory, "audio", "directory")
+        if not directory:
+            return web.json_response({"success": False, "error": "目录未配置为允许的音频根目录"}, status=403)
 
         files = await asyncio.to_thread(_get_audio_files, directory, recursive)
 
@@ -347,7 +385,8 @@ async def list_audio(request):
 async def get_thumbnail(request):
     try:
         path = request.query.get("path", "").strip()
-        if not path or not os.path.isfile(path):
+        path = resolve_allowed_media_path(path, "audio", "file")
+        if not path:
             return web.Response(status=404, text="文件不存在")
         size = max(96, min(512, int(request.query.get("size", 256))))
         data, content_type = await asyncio.to_thread(_build_audio_thumbnail, path, size)
@@ -368,7 +407,8 @@ async def stream_audio(request):
     """直接返回音频文件流，用于前端预览播放。"""
     try:
         path = request.query.get("path", "").strip()
-        if not path or not os.path.isfile(path):
+        path = resolve_allowed_media_path(path, "audio", "file")
+        if not path:
             return web.Response(status=404, text="文件不存在")
 
         ext = os.path.splitext(path)[1].lower()
@@ -396,14 +436,18 @@ async def stream_audio(request):
 async def rename_audio(request):
     try:
         data = await request.json()
-        path = data.get("path", "")
-        new_name = data.get("new_name", "")
+        path = resolve_allowed_media_path(data.get("path", ""), "audio", "file")
+        new_name = str(data.get("new_name", "")).strip()
         if not path or not new_name:
             return web.json_response({"success": False, "error": "参数不足"})
+        if new_name != os.path.basename(new_name) or new_name in (".", ".."):
+            return web.json_response({"success": False, "error": "新名称只能是文件名"}, status=400)
         ext = os.path.splitext(path)[1]
-        if not new_name.endswith(ext):
+        if not new_name.lower().endswith(ext.lower()):
             new_name += ext
-        new_path = os.path.join(os.path.dirname(path), new_name)
+        new_path = os.path.realpath(os.path.join(os.path.dirname(path), new_name))
+        if os.path.dirname(new_path) != os.path.dirname(path):
+            return web.json_response({"success": False, "error": "目标路径越界"}, status=400)
         if os.path.exists(new_path) and path != new_path:
             return web.json_response({"success": False, "error": "同名文件已存在"})
         os.rename(path, new_path)
@@ -411,8 +455,9 @@ async def rename_audio(request):
         if os.path.isfile(npy_old):
             os.rename(npy_old, os.path.splitext(new_path)[0] + ".npy")
         # 清除缓存，避免旧路径残留
-        _directory_cache.clear()
-        _cache_lock.clear()
+        with _directory_cache_lock:
+            _directory_cache.clear()
+            _cache_timestamps.clear()
         return web.json_response({"success": True, "path": new_path})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -420,8 +465,9 @@ async def rename_audio(request):
 
 @route("POST", "/EagleAudioList/clear_cache")
 async def clear_cache(request):
-    _directory_cache.clear()
-    _cache_lock.clear()
+    with _directory_cache_lock:
+        _directory_cache.clear()
+        _cache_timestamps.clear()
     await asyncio.to_thread(_clear_thumbnail_disk_cache)
     return web.json_response({"success": True})
 
@@ -448,8 +494,9 @@ class EagleAudioList:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("audio_path",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("audio_path", "audio_paths")
+    OUTPUT_IS_LIST = (False, True)
     FUNCTION = "process"
     CATEGORY = "🦅 Eagle/音频"
 
@@ -467,21 +514,25 @@ class EagleAudioList:
         if not selections:
             legacy_path = str(kwargs.get("audio_path") or "").strip()
             if legacy_path and os.path.isfile(legacy_path):
-                return (legacy_path,)
+                return (legacy_path, [legacy_path])
 
         # 没有选择时按当前目录顺序返回第一个音频文件
         if not selections and directory and os.path.isdir(directory):
             files = _get_audio_files(directory, recursive)
             if files:
                 files.sort(key=lambda item: os.path.relpath(item["path"], directory).replace("\\", "/").lower())
-                selections = [{"path": files[0]["path"], "name": files[0]["name"]}]
+                selections = [{"path": item["path"], "name": item["name"]} for item in files]
 
         if selections:
-            path = selections[0].get("path", "")
-            if path and os.path.isfile(path):
-                return (path,)
+            paths = []
+            for item in selections:
+                path = resolve_allowed_media_path(item.get("path", ""), "audio", "file")
+                if path and os.path.splitext(path)[1].lower() in AUDIO_EXTENSIONS:
+                    paths.append(path)
+            if paths:
+                return (paths[0], paths)
 
-        return ("",)
+        return ("", [])
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):

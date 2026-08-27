@@ -41,8 +41,6 @@ cd ComfyUI_Eagle_Suite
 pip install -r requirements.txt
 ```
 
-4. **一键全节点工作流**：仓库根目录下附带 `all_eagle_suite_nodes_workflow.json`，直接拖入 ComfyUI 界面即可一键导入全量 39 个 Eagle Suite 节点！
-
 ---
 
 ## ✨ 功能概览与节点指南
@@ -131,6 +129,16 @@ pip install -r requirements.txt
 
 ---
 
+## 🔒 本地媒体与凭据安全配置
+
+- 媒体浏览 HTTP 接口默认只允许 ComfyUI 的 `input`、`output`、`temp`，以及设置中的 `EagleFileTools.image_path` / `EagleFileTools.audio_path`。额外媒体根目录可通过环境变量 `EAGLE_MEDIA_ROOTS` 添加；Windows 下用分号分隔多个目录。
+- 提示词预设额外扫描根目录使用 `EAGLE_PROMPT_ROOTS`；Obsidian API 默认只允许本机地址，额外可信主机使用 `EAGLE_OBSIDIAN_HOSTS`（逗号分隔）。
+- 本地 LLM 服务默认只允许环回地址；额外可信主机使用 `EAGLE_LOCAL_LLM_HOSTS`（逗号分隔）。
+- API 密钥不会返回浏览器或写入工作流/localStorage。Windows 优先保存到系统凭据库；不可用时使用当前用户目录中的独立随机密钥加密。旧 `ENC:` 配置在下次保存时自动迁移。
+- 批量视频帧默认同时受 `2048` 帧和约 `1024 MiB` 内存预算限制；可用 `EAGLE_MAX_BATCH_VIDEO_FRAMES`、`EAGLE_MAX_BATCH_VIDEO_MB` 调整。
+
+---
+
 ## 📁 项目结构
 
 ```
@@ -167,7 +175,6 @@ ComfyUI_Eagle_Suite/
 ├── web/                      # 前端 Vue 3 资源
 │   ├── js/                   # 各节点的 Vue 3 前端渲染与交互脚本
 │   └── lib/                  # Vue 3 等内置第三方前端库
-├── all_eagle_suite_nodes_workflow.json # 包含全量 39 个节点的样例工作流 JSON
 ├── api_config.example.json   # 可提交的空白 API 配置示例
 ├── api_config.json           # 本地 API 配置（自动生成，Git 忽略）
 ├── requirements.txt          # Python 依赖
@@ -182,7 +189,6 @@ ComfyUI_Eagle_Suite/
 - ✨ **新增 H3 导演台 & 导演技能库**：MiniMax H3 / 海螺 AI 专属控制台，支持场景分镜动作分解、提示词编译与 ethanfel Plan 格式导出；导演技能库支持 Markdown 编辑、胶片拖拽、多路径管理及 JSON 导入/导出。
 - ✨ **Danbooru 标签搜索升级**：集成 BGE-M3 语义向量搜索，支持 `models/text_encoders/bge-m3` 或 `models/LLM/bge-m3` 本地路径离线部署与全自动下载。
 - ✨ **提示词预设 UI 重构**：三卡片设置面板（Obsidian/存储路径/分类）、详情页指令模板 `<textarea>` 内联编辑失焦自存、54px 紧凑封面排版。
-- 📦 **提供全节点标准工作流 JSON**：根目录下生成 `all_eagle_suite_nodes_workflow.json`，一键导入全部 39 个节点。
 
 ### v1.3.0-stable (2026-08-14)
 - ✨ 新增 **统一媒体浏览器**：合并图片/视频浏览，支持递归目录、视频封面、比例筛选及顺序/随机批次输出。

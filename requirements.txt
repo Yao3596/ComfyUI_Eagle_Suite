@@ -5,6 +5,14 @@ requests>=2.31.0
 Pillow>=10.0.0
 numpy>=1.24.0
 aiohttp>=3.8.0
+av>=10.0.0
+
+# 音频元数据、读写和重采样
+soundfile>=0.12.0
+mutagen>=1.47.0
+scipy>=1.10.0
+keyring>=24.0.0
+cryptography>=41.0.0
 
 # Danbooru 标签语义搜索
 jieba>=0.42.1

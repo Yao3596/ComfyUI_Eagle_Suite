@@ -636,13 +636,14 @@ async function _fetchModelsFromApi(node) {
 
         // 使用 Vue 风格弹窗选择模型，支持分类过滤
         const result = await _showModelPickerDialog(data.models, {
-            api_key: profile.api_key,
+            api_key: '',
             base_url: profile.base_url,
             model_type: data.model_type || profile.model_type || 'llm',
         });
 
         if (!result || !result.model) return;
 
+        result.source_profile = profileName;
         try {
             const saveRes = await _callApi('/api_loader/save_profile', result);
             if (!saveRes.success) {
@@ -701,7 +702,8 @@ app.registerExtension({
           if (data.widgets_values && originalWidget) {
             const idx = node.widgets.indexOf(originalWidget)
             if (idx >= 0) {
-              data.widgets_values[idx] = _encodeKey(originalWidget.value || '')
+              // Credentials are runtime-only and must never enter exported workflows.
+              data.widgets_values[idx] = ''
             }
           }
           return data
@@ -730,34 +732,9 @@ app.registerExtension({
         container.appendChild(ip)
         node._eagleKeyInput = ip
 
-        const STORAGE_KEY = 'eagle_api_key'
-        const nodeId = String(node.id)
-        try {
-          const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-          if (saved[nodeId]) {
-            const plain = _decodeKey(saved[nodeId])
-            ip.value = plain
-            if (originalWidget) originalWidget.value = plain
-          }
-          if (!ip.value) {
-            const fixed = localStorage.getItem('eagle_api_key_fixed')
-            if (fixed) {
-              const plain = _decodeKey(fixed)
-              ip.value = plain
-              if (originalWidget) originalWidget.value = plain
-            }
-          }
-        } catch (e) {}
-
         ip.addEventListener('input', () => {
           const val = ip.value
           if (originalWidget) originalWidget.value = val
-          try {
-            const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-            data[nodeId] = _encodeKey(val)
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-            localStorage.setItem('eagle_api_key_fixed', _encodeKey(val))
-          } catch (e) {}
         })
 
         const posWidget = {

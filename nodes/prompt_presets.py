@@ -12,6 +12,8 @@ import copy
 import io
 import shutil
 import mimetypes
+import tempfile
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -42,6 +44,27 @@ USER_TEMPLATES_DIR = SKILL_DIR / "user_templates"
 USER_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 COVERS_DIR = BASE_DIR / "covers"
 COVERS_DIR.mkdir(exist_ok=True)
+_WRITE_LOCK = threading.RLock()
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path = Path(path)
+    temp_name = ""
+    with _WRITE_LOCK:
+        try:
+            fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+        finally:
+            if temp_name and os.path.exists(temp_name):
+                os.remove(temp_name)
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 # 默认配置
 DEFAULT_CONFIG = {
@@ -169,8 +192,7 @@ def save_config(config: dict):
             )
         except (TypeError, ValueError):
             director_settings["filmstrip_megapixels"] = 1.0
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(CONFIG_FILE, config)
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
 
@@ -328,6 +350,9 @@ def load_local_templates(paths: List[str]) -> List[Dict]:
     scanned_paths = set()
     for path_str in list(paths or []) + [str(USER_TEMPLATES_DIR)]:
         path = Path(path_str)
+        if not _is_allowed_prompt_path(path):
+            logger.warning(f"已拒绝未登记的提示词目录: {path}")
+            continue
         if not path.exists():
             logger.warning(f"路径不存在: {path}")
             continue
@@ -375,17 +400,39 @@ def load_local_templates(paths: List[str]) -> List[Dict]:
     return templates
 
 
+def _prompt_roots() -> List[Path]:
+    values = [str(USER_TEMPLATES_DIR)]
+    values.extend(filter(None, os.environ.get("EAGLE_PROMPT_ROOTS", "").split(os.pathsep)))
+    roots = []
+    for value in values:
+        try:
+            root = Path(value).expanduser().resolve()
+            if root.is_dir():
+                roots.append(root)
+        except OSError:
+            pass
+    return roots
+
+
+def _is_allowed_prompt_path(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve()
+        return any(resolved == root or root in resolved.parents for root in _prompt_roots())
+    except OSError:
+        return False
+
+
 def _resolve_obsidian_local_dir(obsidian: dict) -> Optional[Path]:
     """兼容"Vault 根目录 + 相对目录"以及直接填写 Windows 提示词目录。"""
     folder_raw = str(obsidian.get("prompts_folder") or "").strip()
     vault_raw = str(obsidian.get("vault_path") or "").strip()
     if folder_raw:
         folder_path = Path(folder_raw).expanduser()
-        if folder_path.is_absolute() and folder_path.is_dir():
+        if folder_path.is_absolute() and folder_path.is_dir() and _is_allowed_prompt_path(folder_path):
             return folder_path.resolve()
     if vault_raw:
         vault_path = Path(vault_raw).expanduser()
-        if vault_path.is_dir():
+        if vault_path.is_dir() and _is_allowed_prompt_path(vault_path):
             if folder_raw and not Path(folder_raw).is_absolute():
                 candidate = vault_path / Path(folder_raw.replace("/", os.sep))
                 if candidate.is_dir():
@@ -430,6 +477,10 @@ def _obsidian_api_candidates(api_url: str) -> List[str]:
     if not raw:
         return []
     parsed = urlparse(raw if "://" in raw else "https://" + raw)
+    allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+    allowed_hosts.update(filter(None, os.environ.get("EAGLE_OBSIDIAN_HOSTS", "").lower().split(",")))
+    if (parsed.hostname or "").lower() not in allowed_hosts or parsed.username or parsed.password:
+        return []
     candidates = [urlunparse(parsed).rstrip("/")]
     if (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}:
         alternate = parsed._replace(scheme="https" if parsed.scheme == "http" else "http")
@@ -462,7 +513,7 @@ async def load_obsidian_templates(config: dict) -> List[Dict]:
 
     try:
         timeout = aiohttp.ClientTimeout(total=6)
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
+        async with aiohttp.ClientSession() as session:
             for api_url in _obsidian_api_candidates(obsidian.get('api_url', '')):
                 try:
                     async with session.get(
@@ -606,11 +657,17 @@ async def save_template(request):
         template["updated_at"] = datetime.now().isoformat()
 
         if save_format == "markdown":
-            filename = f"{template['Label'].replace(' ', '_')}_{template['id'][:8]}.md"
-            file_path = USER_TEMPLATES_DIR / filename
+            label = str(template.get("Label") or "template").strip()
+            safe_label = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', label)
+            safe_label = safe_label.strip(" ._")[:80] or "template"
+            filename = f"{safe_label.replace(' ', '_')}_{template['id'][:8]}.md"
+            file_path = (USER_TEMPLATES_DIR / filename).resolve()
+            if USER_TEMPLATES_DIR.resolve() not in file_path.parents:
+                return web.json_response(
+                    {"success": False, "error": "模板文件名无效"}, status=400
+                )
 
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(template_to_markdown(template))
+            _atomic_write_text(file_path, template_to_markdown(template))
 
             template['file_path'] = str(file_path)
 
@@ -630,8 +687,7 @@ async def save_template(request):
             if not found:
                 templates.append(template)
 
-            with open(USER_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
-                json.dump(templates, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(USER_TEMPLATES_FILE, templates)
 
         return web.json_response({"success": True, "data": template})
 
@@ -655,8 +711,7 @@ async def delete_template(request):
             templates = [t for t in templates if t.get("id") != template_id]
 
             if len(templates) < original_count:
-                with open(USER_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(templates, f, ensure_ascii=False, indent=2)
+                _atomic_write_json(USER_TEMPLATES_FILE, templates)
                 deleted = True
 
         if deleted:
@@ -679,7 +734,9 @@ async def import_file(request):
         if not field:
             return web.json_response({"success": False, "error": "没有文件"}, status=400)
 
-        content = await field.read()
+        content = await field.read(decode=False)
+        if len(content) > 4 * 1024 * 1024:
+            return web.json_response({"success": False, "error": "导入文件不能超过 4 MiB"}, status=413)
         file_ext = field.filename.split('.')[-1].lower()
 
         templates = []
@@ -722,8 +779,7 @@ async def import_file(request):
 
         existing.extend(templates)
 
-        with open(USER_TEMPLATES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(existing, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(USER_TEMPLATES_FILE, existing)
 
         return web.json_response({"success": True, "imported_count": len(templates)})
 
@@ -796,7 +852,7 @@ async def test_obsidian(request):
 
         attempts = []
         timeout = aiohttp.ClientTimeout(total=4)
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
+        async with aiohttp.ClientSession() as session:
             for api_url in _obsidian_api_candidates(obsidian["api_url"]):
                 try:
                     async with session.get(f"{api_url}/", headers=headers, timeout=timeout) as resp:
@@ -1106,8 +1162,7 @@ def save_director_skills(skills: Dict):
                 return
         path = resolve_director_skills_file(config)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(skills, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(Path(path), skills)
     except Exception as e:
         logger.error(f"保存导演技能失败: {e}")
 

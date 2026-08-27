@@ -190,6 +190,8 @@ def save_settings(new_settings):
     settings = load_settings()
     allowed = set(DEFAULT_SETTINGS)
     clean = {key: value for key, value in (new_settings or {}).items() if key in allowed}
+    if clean.get("danbooru_api_key") == "":
+        clean.pop("danbooru_api_key", None)
     settings.update(clean)
     temp_path = SETTINGS_PATH + ".tmp"
     with open(temp_path, "w", encoding="utf-8") as f:
@@ -447,7 +449,7 @@ def _load_model():
     source = _resolve_model_source(model_path) if model_path else "BAAI/bge-m3"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[DanbooruSearch] 加载 BGE-M3 模型: {source} (device={device})")
+    logger.info(f"[DanbooruSearch] 加载 BGE-M3 模型: {source} (device={device})")
     _model = SentenceTransformer(source, device=device)
     return _model
 
@@ -485,7 +487,7 @@ def _load_tag_database():
         texts.append(f"{cn} {tag.replace('_', ' ')}".strip())
 
     model = _load_model()
-    print(f"[DanbooruSearch] 编码 {len(texts)} 个标签向量…")
+    logger.info(f"[DanbooruSearch] 编码 {len(texts)} 个标签向量…")
     embeddings = model.encode(
         texts,
         batch_size=256,
@@ -496,7 +498,7 @@ def _load_tag_database():
 
     _tag_rows = rows
     _tag_embeddings = embeddings
-    print("[DanbooruSearch] 标签向量库就绪")
+    logger.info("[DanbooruSearch] 标签向量库就绪")
     return _tag_rows, _tag_embeddings
 
 
@@ -1021,6 +1023,7 @@ async def route_image_proxy(request):
                 url,
                 proxies=get_proxies(),
                 timeout=25,
+                stream=True,
                 headers={
                     "User-Agent": "Danbooru-Gallery/1.0",
                     "Referer": DANBOORU_BASE,
@@ -1029,10 +1032,24 @@ async def route_image_proxy(request):
         )
         resp.raise_for_status()
         if not _is_allowed_image_url(str(resp.url)):
+            resp.close()
             return web.Response(status=403, text="redirect target is not allowed")
         content_type = resp.headers.get("Content-Type", "image/jpeg").split(";", 1)[0]
+        if not content_type.lower().startswith("image/"):
+            resp.close()
+            return web.Response(status=415, text="not an image")
+        chunks, total = [], 0
+        for chunk in resp.iter_content(256 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > 64 * 1024 * 1024:
+                resp.close()
+                return web.Response(status=413, text="image too large")
+            chunks.append(chunk)
+        resp.close()
         return web.Response(
-            body=resp.content,
+            body=b"".join(chunks),
             content_type=content_type,
             headers={"Cache-Control": "public, max-age=86400"},
         )
@@ -1043,8 +1060,9 @@ async def route_image_proxy(request):
 @route("GET", "/danbooru_search/settings")
 async def route_get_settings(request):
     try:
-        settings = load_settings()
-        # 不回传明文 api_key 的话可在此打码；这里按前端需要原样返回
+        settings = dict(load_settings())
+        settings["api_key_set"] = bool(settings.get("danbooru_api_key"))
+        settings["danbooru_api_key"] = ""
         return web.json_response({"success": True, "settings": settings})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)})
@@ -1059,7 +1077,10 @@ async def route_post_settings(request):
         # 改了模型路径 → 下次搜索重新加载
         if settings.get("model_path") != previous.get("model_path"):
             _unload_semantic_models()
-        return web.json_response({"success": True, "settings": settings})
+        public_settings = dict(settings)
+        public_settings["api_key_set"] = bool(public_settings.get("danbooru_api_key"))
+        public_settings["danbooru_api_key"] = ""
+        return web.json_response({"success": True, "settings": public_settings})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)})
 
@@ -1812,6 +1833,8 @@ async def route_post_cache(request):
 def _download_image_as_tensor(url):
     """下载单张图片 → torch tensor (H, W, C)，值域 0-1。"""
     import requests
+    if not _is_allowed_image_url(url):
+        raise ValueError("image url is not allowed")
     resp = _get_danbooru_session().get(
         url,
         proxies=get_proxies(),
@@ -1820,11 +1843,35 @@ def _download_image_as_tensor(url):
             "User-Agent": "Danbooru-Gallery/1.0",
             "Referer": DANBOORU_BASE,
         },
+        stream=True,
     )
-    resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content))
-
-    img = img.convert("RGB")
+    try:
+        resp.raise_for_status()
+        if not _is_allowed_image_url(str(resp.url)):
+            raise ValueError("redirect target is not allowed")
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if not content_type.startswith("image/"):
+            raise ValueError("response is not an image")
+        max_bytes = 64 * 1024 * 1024
+        declared = int(resp.headers.get("Content-Length") or 0)
+        if declared > max_bytes:
+            raise ValueError("image response is too large")
+        chunks = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=512 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError("image response is too large")
+            chunks.append(chunk)
+        img = Image.open(io.BytesIO(b"".join(chunks)))
+        if img.width * img.height > 80_000_000:
+            raise ValueError("image dimensions are too large")
+        img = img.convert("RGB")
+        img.load()
+    finally:
+        resp.close()
 
     arr = np.array(img).astype(np.float32) / 255.0
     return torch.from_numpy(arr)
@@ -2022,7 +2069,7 @@ class DanbooruVueSearchNode:
             try:
                 t = _download_image_as_tensor(url)
             except Exception as e:
-                print(f"[DanbooruSearch] 下载失败 {url}: {e}")
+                logger.warning(f"[DanbooruSearch] 下载失败 {url}: {e}")
                 continue
 
             # 统一尺寸到第一张图，方便 batch

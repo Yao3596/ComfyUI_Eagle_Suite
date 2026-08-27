@@ -219,8 +219,7 @@ class UnifiedMediaBrowser {
       // ✅ 如果工作流中有保存的目录，自动加载
       if (this.state.directory) {
         console.log("[UnifiedMediaBrowser] 自动加载目录:", this.state.directory);
-        this.loadFolders();
-        this.loadItems();
+        this.authorizeAndLoadDirectory();
       }
     }, 100);
   }
@@ -308,8 +307,7 @@ class UnifiedMediaBrowser {
       this.state.offset = 0;
       this.state.items = [];
       this.syncBrowserSettings();
-      this.loadFolders();
-      this.loadItems();
+      this.authorizeAndLoadDirectory();
     };
     root.querySelector('[data-action="load-dir"]')?.addEventListener("click", applyDirectory);
     directoryInput?.addEventListener("keydown", event => {
@@ -420,6 +418,30 @@ class UnifiedMediaBrowser {
       this.syncBrowserSettings();
       this.loadItems();
     });
+  }
+
+  async authorizeAndLoadDirectory() {
+    if (!this.state.directory) return false;
+    const grid = this.container.querySelector('[data-container="grid"]');
+    if (grid) grid.innerHTML = '<div class="umb-loading">正在验证媒体目录...</div>';
+    try {
+      const res = await fetch("/unified_media_browser/authorize_root", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directory: this.state.directory }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        if (grid) grid.innerHTML = `<div class="umb-empty">错误: ${escapeHtml(data.error || "目录授权失败")}</div>`;
+        return false;
+      }
+      await Promise.all([this.loadFolders(), this.loadItems()]);
+      return true;
+    } catch (err) {
+      console.error("[UnifiedMediaBrowser] 目录授权失败:", err);
+      if (grid) grid.innerHTML = '<div class="umb-empty">目录授权失败</div>';
+      return false;
+    }
   }
 
   async loadFolders() {
@@ -572,7 +594,7 @@ class UnifiedMediaBrowser {
         this.renderItems();
         this.updateCounts();
       } else {
-        grid.innerHTML = `<div class="umb-empty">错误: ${data.error}</div>`;
+        grid.innerHTML = `<div class="umb-empty">错误: ${escapeHtml(data.error || "未知")}</div>`;
       }
     } catch (err) {
       console.error("[UnifiedMediaBrowser] 加载失败:", err);
@@ -806,7 +828,11 @@ app.registerExtension({
         this._umbApp = new UnifiedMediaBrowser(el, this);
       } catch (e) {
         console.error("[UnifiedMediaBrowser] 初始化失败:", e);
-        el.innerHTML = `<div style="padding:30px;color:#e55">错误: ${e.message}</div>`;
+        el.replaceChildren();
+        const errorBox = document.createElement("div");
+        errorBox.style.cssText = "padding:30px;color:#e55";
+        errorBox.textContent = `错误: ${e && e.message ? e.message : "初始化失败"}`;
+        el.appendChild(errorBox);
       }
 
       const onResize = this.onResize;

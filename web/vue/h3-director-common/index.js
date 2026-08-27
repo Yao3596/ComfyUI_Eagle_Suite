@@ -6,7 +6,7 @@
  *   composables/ useComfyNode / useH3State / usePromptCompiler
  *   styles/      h3-director-theme.js
  */
-import { defineComponent, reactive, computed, watch, ref, nextTick, provide } from "../../../lib/vue.esm-browser.js";
+import { defineComponent, reactive, computed, watch, ref, nextTick, provide } from "../../lib/vue.esm-browser.js";
 import { loadState, saveState, createScene, createShot, createDialogue } from "./composables/useH3State.js";
 
 console.log("[EagleH3Director] H3DirectorApp module loaded");

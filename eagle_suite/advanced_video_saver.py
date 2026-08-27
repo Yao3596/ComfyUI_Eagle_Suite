@@ -20,6 +20,7 @@ import tempfile
 import time
 import zlib
 import shutil
+import re
 import av
 
 from .eagle_client import eagle_client
@@ -154,9 +155,10 @@ class EagleAdvancedVideoSaver:
                eagle_tags="", eagle_annotation="",
                prompt=None, extra_pnginfo=None, unique_id=None):
 
-        print("\n" + "="*60)
-        print("🎬 高级视频保存器（Eagle 集成版）")
-        print("="*60)
+        filename_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_prefix or "video"))
+        filename_prefix = filename_prefix.strip(" .") or "video"
+
+        logger.debug("高级视频保存器开始执行")
 
         # === 0. 验证输入 ===
         if images is None and video is None:
@@ -164,7 +166,7 @@ class EagleAdvancedVideoSaver:
 
         # 如果同时提供了 images 和 video，优先使用 video
         if images is not None and video is not None:
-            print("⚠️ 同时检测到 images 和 video 输入，优先使用 video")
+            logger.info("同时检测到 images 和 video 输入，优先使用 video")
             images = None  # 忽略 images
         
         # === 1. 解析保存目标 ===
@@ -217,7 +219,7 @@ class EagleAdvancedVideoSaver:
             counter += 1
         
         base_name = f"{filename_prefix}_{counter:05d}"
-        print(f"📁 输出文件: {filename}")
+        logger.debug(f"输出文件: {filename}")
         
         # === 3. 处理视频源 ===
         actual_fps = fps
@@ -231,24 +233,24 @@ class EagleAdvancedVideoSaver:
                     stream_source = video.get_stream_source()
                     if isinstance(stream_source, (str, Path)) and os.path.isfile(stream_source):
                         source_video_path = str(stream_source)
-                        print(f"🎥 使用 VIDEO 文件流: {source_video_path}")
+                        logger.debug(f"使用 VIDEO 文件流: {source_video_path}")
                 except Exception as error:
                     logger.debug(f"读取 VIDEO 流源失败，尝试组件模式: {error}")
 
             # 非文件型原生 VIDEO（例如内存视频）通过组件帧处理。
             if source_video_path is None and hasattr(video, "get_components"):
                 try:
-                    print("🎥 使用 VIDEO 组件输入")
+                    logger.debug("使用 VIDEO 组件输入")
                     components = video.get_components()
                     source_tensor = getattr(components, "images", None)
                     if source_tensor is not None and getattr(source_tensor, "numel", lambda: 0)() > 0:
                         video_frames = self._process_video_input(source_tensor)
                     if getattr(components, "frame_rate", None):
                         actual_fps = float(components.frame_rate)
-                        print(f"🎞️ 使用 VIDEO 自带帧率: {actual_fps} fps")
+                        logger.debug(f"使用 VIDEO 自带帧率: {actual_fps} fps")
                     if audio is None and getattr(components, "audio", None) is not None:
                         audio = components.audio
-                        print("🔊 使用 VIDEO 输入口自带的音轨")
+                        logger.debug("使用 VIDEO 输入口自带的音轨")
                 except Exception as error:
                     logger.warning(f"VIDEO 组件读取失败: {error}")
 
@@ -267,14 +269,14 @@ class EagleAdvancedVideoSaver:
                             break
                 if candidate and os.path.isfile(candidate):
                     source_video_path = os.path.abspath(candidate)
-                    print(f"🎥 使用兼容视频路径: {source_video_path}")
+                    logger.debug(f"使用兼容视频路径: {source_video_path}")
 
             if source_video_path is None and video_frames is None:
                 return self._error_result(f"❌ 无法从 video 输入读取有效视频: {type(video).__name__}")
 
         elif images is not None:
             # 情况 3：使用 images 输入（图像序列）
-            print("🖼️ 使用 images 输入（图像序列）")
+            logger.debug("使用 images 输入（图像序列）")
             video_frames = self._process_video_input(images)
 
         if source_video_path is None and video_frames is None:
@@ -283,29 +285,28 @@ class EagleAdvancedVideoSaver:
         # 如果有视频帧（从 images 或 VIDEO.images 获取），进行后续处理
         if video_frames is not None:
             original_frame_count = len(video_frames)
-            print(f"📊 原始帧数: {original_frame_count}")
+            logger.debug(f"原始帧数: {original_frame_count}")
 
             # 如果启用插帧
             if enable_interpolation:
-                print(f"🔄 启用插帧: {interpolation_multiplier}x")
+                logger.debug(f"启用插帧: {interpolation_multiplier}x")
                 video_frames = self._interpolate_frames(video_frames, interpolation_multiplier)
                 actual_fps = actual_fps * interpolation_multiplier
-                print(f"📊 插帧后帧数: {len(video_frames)}")
-                print(f"🎞️ 实际帧率: {actual_fps} fps")
+                logger.debug(f"插帧后帧数: {len(video_frames)}")
+                logger.debug(f"实际帧率: {actual_fps} fps")
 
             # 调整分辨率
             if resize_width > 0 and resize_height > 0:
-                print(f"📐 调整分辨率: {resize_width}x{resize_height}")
+                logger.debug(f"调整分辨率: {resize_width}x{resize_height}")
                 video_frames = self._resize_frames(video_frames, resize_width, resize_height)
 
             h, w = video_frames.shape[1:3]
-            print(f"📐 视频尺寸: {w}x{h}")
-            print(f"🎞️ 帧率: {actual_fps} fps")
-            print(f"🎨 编码器: {codec} ({quality})")
+            logger.debug(f"视频尺寸: {w}x{h}; 帧率: {actual_fps}; 编码器: {codec} ({quality})")
 
         
         # === 4. 保存临时视频文件 ===
-        temp_dir = tempfile.mkdtemp(prefix="eagle_video_saver_")
+        temp_owner = tempfile.TemporaryDirectory(prefix="eagle_video_saver_")
+        temp_dir = temp_owner.name
         temp_video_path = Path(temp_dir) / f"temp_{counter:05d}.{format}"
         
         if source_video_path:
@@ -319,7 +320,7 @@ class EagleAdvancedVideoSaver:
         # === 5. 合并音频（如果有） ===
         final_path = full_path
         if audio is not None:
-            print("🔊 合并音频...")
+            logger.debug("合并音频")
             temp_audio_path = Path(temp_dir) / f"temp_audio_{counter:05d}.wav"
             self._save_audio(audio, temp_audio_path)
             self._merge_audio_video(temp_video_path, temp_audio_path, final_path, audio_codec, audio_bitrate)
@@ -330,7 +331,7 @@ class EagleAdvancedVideoSaver:
         else:
             # 直接重命名临时视频
             if temp_video_path.exists():
-                os.rename(temp_video_path, final_path)
+                shutil.move(str(temp_video_path), str(final_path))
         
         # === 6. 获取视频信息 ===
         file_size = final_path.stat().st_size
@@ -368,34 +369,38 @@ class EagleAdvancedVideoSaver:
         }
         # 同名 JSON 保持标准 ComfyUI workflow 结构，便于直接加载；无 workflow 时保存完整包用于排查。
         workflow_json = workflow_bundle.get("workflow") or workflow_bundle
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(workflow_json, f, indent=2, ensure_ascii=False)
+        fd, workflow_temp = tempfile.mkstemp(prefix=f".{json_path.name}.", suffix=".tmp", dir=str(json_path.parent))
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
+                json.dump(workflow_json, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(workflow_temp, json_path)
+        finally:
+            if os.path.exists(workflow_temp):
+                os.remove(workflow_temp)
         
         metadata_json = json.dumps(metadata, ensure_ascii=False)
         
         # === 8. 保存到 Eagle ===
         eagle_result = ""
         if save_to_eagle:
-            print("🦅 导入到 Eagle...")
+            logger.debug("导入到 Eagle")
             eagle_result = self._save_to_eagle(
                 final_path, folder_id, base_name,
                 eagle_tags, eagle_rating, eagle_annotation, metadata
             )
-            print(eagle_result)
+            logger.info(eagle_result)
         
         # === 9. 生成视频预览 ===
         ui_result = {}
         if preview and unique_id:
-            print("🎥 生成视频预览...")
+            logger.debug("生成视频预览")
             ui_result = self._generate_preview(final_path, unique_id, filename)
         
         # === 10. 清理临时文件 ===
-        try:
-            if temp_video_path.exists():
-                os.remove(temp_video_path)
-            os.rmdir(temp_dir)
-        except Exception as e:
-            logger.warning(f"清理临时文件失败: {e}")
+        temp_owner.cleanup()
         
         # === 11. 汇总结果 ===
         save_result = f"✅ 保存成功: {final_path}\n"
@@ -407,8 +412,7 @@ class EagleAdvancedVideoSaver:
         save_result += f"📄 工作流 JSON: {json_path}\n"
         save_result += f"💾 大小: {file_size_mb:.2f} MB | ⏱️ 时长: {duration:.2f}s | 🎞️ 帧率: {actual_fps} fps"
         
-        print(save_result)
-        print("="*60 + "\n")
+        logger.info(save_result)
         
         # === 12. 返回 VIDEO 输出 ===
         video_output = str(final_path)
@@ -480,7 +484,7 @@ class EagleAdvancedVideoSaver:
             
             # 使用 ffmpeg 提取第一帧
             cmd = [
-                'ffmpeg',
+                self._media_tool("ffmpeg"),
                 '-y',
                 '-i', str(video_path),
                 '-vf', 'select=eq(n\\,0)',
@@ -503,7 +507,7 @@ class EagleAdvancedVideoSaver:
         codec_params = self._get_codec_params(codec, quality)
         
         cmd = [
-            'ffmpeg',
+            self._media_tool("ffmpeg"),
             '-y',
             '-i', str(input_path),
             '-c:v', codec_params['codec'],
@@ -748,7 +752,7 @@ class EagleAdvancedVideoSaver:
                 video_size_mb = video_path.stat().st_size / (1024 * 1024)
                 
                 if video_size_mb > 50:
-                    print(f"📦 视频较大({video_size_mb:.1f}MB)，生成压缩预览...")
+                    logger.debug(f"视频较大({video_size_mb:.1f}MB)，生成压缩预览")
                     self._create_preview_video(video_path, preview_path)
                 else:
                     import shutil
@@ -763,13 +767,13 @@ class EagleAdvancedVideoSaver:
                     }]
                 }
         except Exception as e:
-            print(f"⚠️ 预览生成失败: {str(e)}")
+            logger.warning(f"预览生成失败: {str(e)}")
             return {}
     
     def _create_preview_video(self, input_path, output_path):
         """创建压缩的预览视频"""
         cmd = [
-            'ffmpeg',
+            self._media_tool("ffmpeg"),
             '-y',
             '-i', str(input_path),
             '-c:v', 'libx264',
@@ -783,7 +787,7 @@ class EagleAdvancedVideoSaver:
         try:
             subprocess.run(cmd, capture_output=True, check=True, timeout=60)
         except Exception as e:
-            print(f"⚠️ 压缩预览失败: {str(e)}")
+            logger.warning(f"压缩预览失败: {str(e)}")
             import shutil
             shutil.copy2(input_path, output_path)
     
@@ -849,7 +853,7 @@ class EagleAdvancedVideoSaver:
         codec_params = self._get_codec_params(codec, quality)
         
         cmd = [
-            'ffmpeg',
+            self._media_tool("ffmpeg"),
             '-y',
             '-f', 'rawvideo',
             '-vcodec', 'rawvideo',
@@ -865,18 +869,23 @@ class EagleAdvancedVideoSaver:
         cmd.append(str(output_path))
         
         try:
-            process = subprocess.Popen(
-                cmd, 
-                stdin=subprocess.PIPE, 
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            for frame in frames:
-                process.stdin.write(frame.tobytes())
-            
-            process.stdin.close()
-            stdout, stderr = process.communicate()
+            with tempfile.TemporaryFile() as stderr_file:
+                process = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                    stderr=stderr_file
+                )
+                try:
+                    for frame in frames:
+                        process.stdin.write(frame.tobytes())
+                    process.stdin.close()
+                    process.stdin = None
+                    process.wait(timeout=600)
+                except Exception:
+                    process.kill()
+                    process.wait()
+                    raise
+                stderr_file.seek(0)
+                stderr = stderr_file.read()
             
             if process.returncode != 0:
                 error_msg = stderr.decode('utf-8', errors='ignore')
@@ -997,7 +1006,7 @@ class EagleAdvancedVideoSaver:
     def _merge_audio_video(self, video_path, audio_path, output_path, audio_codec, audio_bitrate):
         """合并音频和视频"""
         cmd = [
-            'ffmpeg',
+            self._media_tool("ffmpeg"),
             '-y',
             '-i', str(video_path),
             '-i', str(audio_path),

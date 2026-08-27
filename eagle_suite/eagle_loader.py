@@ -11,6 +11,7 @@ import torch
 import numpy as np
 from PIL import Image
 import folder_paths
+import threading
 
 from .eagle_client import eagle_client
 from .logger import logger
@@ -21,15 +22,63 @@ class EagleLoader:
     SAFETY_MAX = 10000
     SUPPORTED_EXT = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff', '.tif'}
 
+    # 按 unique_id 维护递增/递减/随机状态，解决 ComfyUI 批次运行时前端 index 来不及更新的问题
+    _state = {}
+    _state_lock = threading.RLock()
+
     def __init__(self):
         pass
 
     @classmethod
+    def _state_key(cls, unique_id, index):
+        if unique_id is not None:
+            return f"eagle_loader:{unique_id}"
+        return f"eagle_loader:__global__:{index}"
+
+    @classmethod
+    def _get_effective_index(cls, control_mode, index, total, unique_id):
+        if total <= 0:
+            return 0
+
+        key = cls._state_key(unique_id, index)
+        if len(cls._state) > 512:
+            with cls._state_lock:
+                cls._state.pop(next(iter(cls._state)), None)
+
+        if control_mode in ("随机", "增加", "减少"):
+            with cls._state_lock:
+                state = cls._state.get(key)
+                if not isinstance(state, dict) or state.get("mode") != control_mode or state.get("anchor") != index:
+                    state = {"mode": control_mode, "anchor": index, "current": None, "counter": 0}
+                    cls._state[key] = state
+                if control_mode == "随机":
+                    current = random.Random(f"{index}:{state['counter']}").randint(0, total - 1)
+                elif control_mode == "增加":
+                    current = ((state["current"] if state["current"] is not None else index - 1) + 1) % total
+                else:
+                    current = ((state["current"] if state["current"] is not None else index + 1) - 1) % total
+                state["current"] = current
+                state["counter"] += 1
+                return current
+
+        cls._state.pop(key, None)
+        return index % total
+
+    @classmethod
     def IS_CHANGED(cls, **kwargs):
         mode = kwargs.get("control_mode", "固定")
+        index = kwargs.get("index", 0)
+        unique_id = kwargs.get("unique_id")
+        key = cls._state_key(unique_id, index)
+
         if mode in ("增加", "减少", "随机"):
-            return float("nan")
-        return kwargs.get("index", 0)
+            state = cls._state.get(key)
+            if not isinstance(state, dict) or state.get("mode") != mode or state.get("anchor") != index:
+                return float("nan")
+            return f"{mode}:{index}:{state.get('counter', 0)}:{state.get('current')}"
+
+        cls._state.pop(key, None)
+        return index
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -52,6 +101,10 @@ class EagleLoader:
                 "star_filter": (["全部", "未评分", "1星", "2星", "3星", "4星", "5星"], {"default": "全部"}),
                 "aspect_filter": (["全部", "横向", "纵向", "方形"], {"default": "全部"}),
                 "include_subfolders": ("BOOLEAN", {"default": True}),
+            },
+            "hidden": {
+                # 批次状态必须按节点隔离；没有 UNIQUE_ID 时多个加载器会共享全局索引。
+                "unique_id": "UNIQUE_ID",
             }
         }
 
@@ -64,7 +117,7 @@ class EagleLoader:
     def load_image(self, preview, folder_input, control_mode,
                    index=0, sort_by="添加日期", sort_order="降序", max_count=0,
                    tags_filter="", star_filter="全部", aspect_filter="全部",
-                   include_subfolders=True):
+                   include_subfolders=True, unique_id=None):
 
         # 1. 解析文件夹
         val, itype = eagle_client.parse_folder_input(folder_input)
@@ -94,8 +147,8 @@ class EagleLoader:
         if total == 0:
             raise Exception("❌ 筛选后没有符合条件的图片")
 
-        # 4. 选择图片索引
-        image_index = self._select_index(control_mode, index, total)
+        # 4. 选择图片索引（后端维护递增/递减/随机状态，兼容批次运行）
+        image_index = self._get_effective_index(control_mode, index, total, unique_id)
         target_item = items[image_index]
         item_id = target_item.get("id")
 
@@ -115,12 +168,12 @@ class EagleLoader:
             img.save(tmp_path, compress_level=4)
             preview_ui.append({"filename": tmp_name, "subfolder": "", "type": "temp"})
 
-        info = self._format_info(folder_input, target_item, image_index, total, actual_size, index, control_mode, filters_applied)
+        info = self._format_info(folder_input, target_item, image_index, total, actual_size, image_index, control_mode, filters_applied)
         metadata = self._format_metadata(target_item, actual_size)
 
         return {
             "ui": {"images": preview_ui},
-            "result": (img_tensor, actual_path, info, total, index, metadata)
+            "result": (img_tensor, actual_path, info, total, image_index, metadata)
         }
 
     def _filter_items(self, items, tags_f, star_f, aspect_f):

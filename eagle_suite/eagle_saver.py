@@ -4,6 +4,7 @@ Eagle 图片保存器 (重构版)
 """
 
 import os
+import re
 import tempfile
 import time
 import numpy as np
@@ -109,6 +110,9 @@ class EagleSaver:
                     save_metadata_in_png=True, save_metadata_json=False,
                     tags="", star=0, annotation="",
                     prompt=None, extra_pnginfo=None):
+
+        filename_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_prefix or "ComfyUI")).strip(" .") or "ComfyUI"
+        filename_separator = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_separator or "_"))
 
         save_to_eagle = bool(eagle_folder.strip())
         save_to_local = bool(local_save_path.strip())

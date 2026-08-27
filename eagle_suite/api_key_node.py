@@ -9,6 +9,9 @@ Eagle API Key & Config Loader Nodes
 """
 
 import requests
+import ipaddress
+import socket
+from urllib.parse import urlparse
 
 from .logger import logger
 from .utils import decode_api_key, _ENC_PREFIX
@@ -175,14 +178,19 @@ except Exception:
     PromptServer = None
     _HAS_PROMPT_SERVER = False
 
+_REGISTERED_SERVERS = set()
+
 
 def register_routes():
     """延迟注册 API Loader 路由。"""
     if not _HAS_PROMPT_SERVER:
         return
-    server = PromptServer.instance
+    server = getattr(PromptServer, "instance", None)
     if not server:
         logger.warning("[APILoader] PromptServer.instance 未就绪，跳过路由注册")
+        return
+    server_key = id(server)
+    if server_key in _REGISTERED_SERVERS:
         return
     routes = server.routes
 
@@ -192,6 +200,26 @@ def register_routes():
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
+
+    def _same_origin(request):
+        origin = request.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            return urlparse(origin).netloc.lower() == request.host.lower()
+        except Exception:
+            return False
+
+    def _validate_api_target(url):
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("API 地址无效")
+        for info in socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)):
+            address = ipaddress.ip_address(info[4][0])
+            if address.is_loopback:
+                continue
+            if not address.is_global:
+                raise ValueError("API 地址指向不允许的私有、链路本地或保留网络")
 
     @routes.post("/api_loader/models")
     async def get_models_route(request):
@@ -258,10 +286,13 @@ def register_routes():
     async def save_profile_route(request):
         """保存或更新一个 Profile。"""
         try:
+            if not _same_origin(request):
+                return web.json_response({"success": False, "error": "cross-origin request rejected"}, status=403)
             body = await _safe_json(request)
             name = (body.get("name") or "").strip()
             original_name = (body.get("original_name") or "").strip()
             api_key = body.get("api_key", "")
+            source_profile = (body.get("source_profile") or "").strip()
             base_url = (body.get("base_url") or "").strip()
             model = (body.get("model") or "").strip()
             raw_model_type = body.get("model_type")
@@ -283,6 +314,8 @@ def register_routes():
 
             profiles_data = _profile_mgr.load_profiles()
             profiles = profiles_data.get("profiles", {})
+            if not api_key and source_profile in profiles:
+                api_key = profiles[source_profile].get("api_key", "")
             target_name = original_name or name
             if target_name in profiles:
                 ok = _profile_mgr.update_profile(
@@ -328,6 +361,8 @@ def register_routes():
     async def delete_profile_route(request):
         """删除一个 Profile。"""
         try:
+            if not _same_origin(request):
+                return web.json_response({"success": False, "error": "cross-origin request rejected"}, status=403)
             body = await _safe_json(request)
             name = (body.get("name") or "").strip()
             if not name:
@@ -351,6 +386,8 @@ def register_routes():
     async def fetch_models_route(request):
         """从当前选中的 Profile 的 API 服务商 /v1/models 拉取模型列表。"""
         try:
+            if not _same_origin(request):
+                return web.json_response({"success": False, "error": "cross-origin request rejected"}, status=403)
             body = await _safe_json(request)
             profile_name = (body.get("profile_name") or "").strip()
             if not profile_name:
@@ -373,11 +410,13 @@ def register_routes():
                 }, status=400)
 
             try:
+                _validate_api_target(base_url)
                 resp = requests.get(
                     f"{base_url}/models",
                     headers={"Authorization": f"Bearer {api_key}"},
                     timeout=30
                 )
+                _validate_api_target(str(resp.url))
                 if resp.status_code != 200:
                     return web.json_response({
                         "success": False,
@@ -418,6 +457,7 @@ def register_routes():
             logger.error(f"[api_loader/fetch_models] 错误: {e}")
             return web.json_response({"success": False, "error": str(e)}, status=500)
 
+    _REGISTERED_SERVERS.add(server_key)
     logger.info("[APILoader] API Loader 路由已注册")
 
 

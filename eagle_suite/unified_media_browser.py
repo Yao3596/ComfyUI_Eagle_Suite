@@ -23,6 +23,7 @@ from PIL import Image
 from aiohttp import web
 from .route_registry import route
 from .logger import logger
+from ..tools_utils import authorize_media_root, is_trusted_browser_request, resolve_allowed_media_path
 
 # 视频扩展名
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v")
@@ -30,7 +31,8 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", "
 
 # 缓存
 _directory_cache = {}
-_cache_lock = {}
+_cache_timestamps = {}
+_directory_cache_lock = threading.RLock()
 _thumbnail_cache = {}
 _thumbnail_cache_lock = threading.Lock()
 _dimension_cache = {}
@@ -200,11 +202,11 @@ def _get_media_files(directory, media_type="all", recursive=True):
 
     directory = os.path.abspath(directory)
     cache_key = f"{directory}:{media_type}:{int(bool(recursive))}"
-    cache_time = _cache_lock.get(cache_key, 0)
-
-    # 缓存 60 秒
-    if cache_key in _directory_cache and (time.time() - cache_time) < 60:
-        return _directory_cache[cache_key]
+    with _directory_cache_lock:
+        cache_time = _cache_timestamps.get(cache_key, 0)
+        # 缓存 60 秒
+        if cache_key in _directory_cache and (time.time() - cache_time) < 60:
+            return list(_directory_cache[cache_key])
 
     files = []
     try:
@@ -241,8 +243,9 @@ def _get_media_files(directory, media_type="all", recursive=True):
     except Exception as e:
         logger.error(f"[UnifiedMediaBrowser] 扫描目录失败 {directory}: {e}")
 
-    _directory_cache[cache_key] = files
-    _cache_lock[cache_key] = time.time()
+    with _directory_cache_lock:
+        _directory_cache[cache_key] = files
+        _cache_timestamps[cache_key] = time.time()
     return files
 
 
@@ -312,8 +315,15 @@ def _matches_aspect_ratio(file_path, aspect_ratio):
         return True
 
 
-def _build_folder_tree(directory):
+def _build_folder_tree(directory, _visited=None, _depth=0):
     """构建文件夹树结构（滑动双栏用）"""
+    if _depth > 32:
+        return []
+    _visited = _visited if _visited is not None else set()
+    canonical = os.path.normcase(os.path.realpath(directory))
+    if canonical in _visited:
+        return []
+    _visited.add(canonical)
     if not os.path.isdir(directory):
         return []
 
@@ -327,7 +337,7 @@ def _build_folder_tree(directory):
                     "id": item_path,
                     "name": item,
                     "path": item_path,
-                    "children": _build_folder_tree(item_path)
+                    "children": _build_folder_tree(item_path, _visited, _depth + 1)
                 })
     except PermissionError:
         logger.warning(f"[UnifiedMediaBrowser] 无权限访问 {directory}")
@@ -337,16 +347,33 @@ def _build_folder_tree(directory):
     return tree
 
 
+@route("POST", "/unified_media_browser/authorize_root")
+async def authorize_root(request):
+    """Authorize a user-entered image/video directory for this UI session."""
+    if not is_trusted_browser_request(request):
+        return web.json_response({"success": False, "error": "仅允许同源界面授权媒体目录"}, status=403)
+    try:
+        data = await request.json()
+        root_dir = authorize_media_root(data.get("directory", ""), "all")
+        if not root_dir:
+            return web.json_response({"success": False, "error": "目录不存在、不可访问或不是绝对路径"}, status=400)
+        return web.json_response({"success": True, "root": root_dir})
+    except Exception as error:
+        logger.warning(f"[UnifiedMediaBrowser] 授权目录失败: {error}")
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+
+
 @route("GET", "/unified_media_browser/folders")
 async def get_folders(request):
     """返回指定目录的文件夹树"""
     try:
         root_dir = request.query.get("directory", "")
-        if not root_dir or not os.path.isdir(root_dir):
+        root_dir = resolve_allowed_media_path(root_dir, "all", "directory")
+        if not root_dir:
             return web.json_response({
                 "success": False,
-                "error": "目录不存在或未指定"
-            }, status=400)
+                "error": "目录未配置为允许的媒体根目录"
+            }, status=403)
 
         tree = await asyncio.to_thread(_build_folder_tree, root_dir)
         return web.json_response({
@@ -376,11 +403,12 @@ async def list_media(request):
         offset = int(body.get("offset", 0))
         limit = max(1, min(200, int(body.get("limit", 50))))
 
-        if not directory or not os.path.isdir(directory):
+        directory = resolve_allowed_media_path(directory, "all", "directory")
+        if not directory:
             return web.json_response({
                 "success": False,
-                "error": "目录不存在或未指定"
-            }, status=400)
+                "error": "目录未配置为允许的媒体根目录"
+            }, status=403)
 
         files = await asyncio.to_thread(_get_media_files, directory, media_type, recursive)
 
@@ -437,7 +465,8 @@ async def get_thumbnail(request):
     """返回缩略图"""
     try:
         file_path = request.query.get("path", "")
-        if not file_path or not os.path.isfile(file_path):
+        file_path = resolve_allowed_media_path(file_path, "all", "file")
+        if not file_path:
             return web.Response(status=404, text="文件不存在")
 
         size = max(96, min(512, int(request.query.get("size", THUMBNAIL_SIZE))))
@@ -461,8 +490,9 @@ async def get_thumbnail(request):
 @route("POST", "/unified_media_browser/clear_cache")
 async def clear_cache(request):
     """清除目录、尺寸、内存缩略图和磁盘临时缓存。"""
-    _directory_cache.clear()
-    _cache_lock.clear()
+    with _directory_cache_lock:
+        _directory_cache.clear()
+        _cache_timestamps.clear()
     with _thumbnail_cache_lock:
         _thumbnail_cache.clear()
     _dimension_cache.clear()
@@ -473,8 +503,44 @@ async def clear_cache(request):
 class UnifiedMediaBrowser:
     """统一媒体浏览器 - 支持图片和视频加载"""
 
+    # 按 unique_id 维护 sequential/random 状态，解决 ComfyUI 批次运行时 start_index 不变的卡图问题
+    _state = {}
+    _state_lock = threading.RLock()
+
     def __init__(self):
         pass
+
+    @classmethod
+    def _state_key(cls, unique_id):
+        return f"umb:{unique_id}" if unique_id else "umb:__global__"
+
+    @classmethod
+    def _init_state(cls, unique_id, start_index):
+        with cls._state_lock:
+            key = cls._state_key(unique_id)
+            state = cls._state.get(key)
+            if state is None or state.get("last_start") != start_index:
+                state = {"start_index": start_index, "last_start": start_index, "counter": 0}
+                cls._state[key] = state
+                if len(cls._state) > 512:
+                    cls._state.pop(next(iter(cls._state)))
+            return key, state
+
+    @classmethod
+    def _advance_sequential(cls, unique_id, start_index, batch_count, total):
+        key, state = cls._init_state(unique_id, start_index)
+        current = state["start_index"]
+        step = max(1, batch_count) if batch_count > 0 else max(1, total)
+        state["start_index"] = (current + step) % max(1, total)
+        state["counter"] += 1
+        return current, state["counter"]
+
+    @classmethod
+    def _advance_random(cls, unique_id, start_index):
+        key, state = cls._init_state(unique_id, start_index)
+        counter = state["counter"]
+        state["counter"] += 1
+        return counter
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -494,16 +560,20 @@ class UnifiedMediaBrowser:
                 "recursive": ("BOOLEAN", {"default": True}),
                 "view_mode": (["grid", "list"], {"default": "grid"}),
                 "fallback_mode": (["sequential", "random"], {"default": "sequential"}),
-                "batch_count": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "batch_count": ("INT", {"default": 1, "min": 0, "max": 64}),
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
                 "random_seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
                 "aspect_ratio": (["all", "landscape", "portrait", "square", "1:1", "4:3", "3:4", "16:9", "9:16"], {"default": "all"}),
                 "selection_data": ("STRING", {"default": "[]", "multiline": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             }
         }
 
     RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "VIDEO")
     RETURN_NAMES = ("images", "masks", "width", "height", "videos")
+    OUTPUT_IS_LIST = (False, False, False, False, True)
     FUNCTION = "process"
     CATEGORY = "🦅 Eagle"
     OUTPUT_NODE = False
@@ -520,6 +590,7 @@ class UnifiedMediaBrowser:
         start_index = max(0, int(kwargs.get("start_index", 0)))
         random_seed = int(kwargs.get("random_seed", -1))
         aspect_ratio = str(kwargs.get("aspect_ratio", "all") or "all")
+        unique_id = kwargs.get("unique_id")
 
         logger.info(
             f"[UnifiedMediaBrowser] 执行参数: directory={directory!r}, "
@@ -532,7 +603,8 @@ class UnifiedMediaBrowser:
             selections = []
 
         # 显式选择始终优先；没有选择时才按当前文件夹顺序或随机取一个批次。
-        if not selections and directory and os.path.isdir(directory):
+        directory = resolve_allowed_media_path(directory, "all", "directory") if directory else ""
+        if not selections and directory:
             files = _get_media_files(directory, media_type, recursive)
             files = [f for f in files if _matches_aspect_ratio(f["path"], aspect_ratio)]
             files.sort(key=lambda item: os.path.relpath(item["path"], directory).replace("\\", "/").lower())
@@ -541,11 +613,20 @@ class UnifiedMediaBrowser:
                 # 为防止目录文件过多导致 OOM，按与控件上限一致的 64 封顶。
                 take = min(len(files), 64) if batch_count == 0 else min(batch_count, len(files))
                 if fallback_mode == "random":
-                    rng = random.SystemRandom() if random_seed < 0 else random.Random(random_seed)
+                    # 使用后端计数器作为随机种子，避免批次运行重复
+                    rand_counter = type(self)._advance_random(unique_id, start_index)
+                    rng = random.SystemRandom() if random_seed < 0 else random.Random(random_seed + rand_counter)
                     files = rng.sample(files, take)
                 else:
-                    begin = start_index % len(files)
+                    # 顺序模式：后端维护真正起始索引，批次运行自动推进
+                    effective_start, run_counter = type(self)._advance_sequential(
+                        unique_id, start_index, batch_count, len(files)
+                    )
+                    begin = effective_start % len(files)
                     files = [files[(begin + offset) % len(files)] for offset in range(take)]
+                    logger.info(
+                        f"[UnifiedMediaBrowser] sequential run={run_counter}, effective_start={effective_start}, take={take}"
+                    )
                 selections = [
                     {"path": item["path"], "name": item["name"], "type": item["type"]}
                     for item in files
@@ -555,6 +636,12 @@ class UnifiedMediaBrowser:
                     f"{[s['name'] for s in selections[:5]]}{'...' if len(selections) > 5 else ''}"
                 )
 
+        selections = [
+            dict(item, path=path)
+            for item in selections if isinstance(item, dict)
+            if (path := resolve_allowed_media_path(item.get("path", ""), "all", "file"))
+        ]
+
         if selections and aspect_ratio != "all":
             selections = [
                 item for item in selections
@@ -563,7 +650,7 @@ class UnifiedMediaBrowser:
 
         if not selections:
             empty_img = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-            return (empty_img, empty_img[:, :, :, 0], 64, 64, None)
+            return (empty_img, empty_img[:, :, :, 0], 64, 64, [])
 
         images = []
         masks = []
@@ -571,8 +658,8 @@ class UnifiedMediaBrowser:
         image_sources = []
 
         for item in selections:
-            path = item.get("path", "")
-            if not path or not os.path.isfile(path):
+            path = resolve_allowed_media_path(item.get("path", ""), "all", "file")
+            if not path:
                 continue
 
             ext = os.path.splitext(path)[1].lower()
@@ -593,23 +680,20 @@ class UnifiedMediaBrowser:
                     source = source.resize(target_size, Image.Resampling.LANCZOS)
                 rgba = np.asarray(source).astype(np.float32) / 255.0
                 images.append(rgba[:, :, :3])
-                masks.append(rgba[:, :, 3])
+                # ComfyUI MASK uses 1 for masked/transparent pixels.
+                masks.append(1.0 - rgba[:, :, 3])
 
         # 构建 VIDEO 输出格式
+        video_output = []
         if video_paths:
-            # 如果选中多个视频，只返回第一个
             try:
                 from comfy_api.input_impl import VideoFromFile
-                video_output = VideoFromFile(video_paths[0])
+                video_output = [VideoFromFile(path) for path in video_paths]
             except Exception:
-                video_output = {
-                    "source": "path",
-                    "format": "video",
-                    "path": video_paths[0],
-                    "paths": video_paths,
-                }
-        else:
-            video_output = None
+                video_output = [
+                    {"source": "path", "format": "video", "path": path}
+                    for path in video_paths
+                ]
 
         if not images:
             empty_img = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
@@ -624,9 +708,28 @@ class UnifiedMediaBrowser:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        # seed=-1 的随机模式每次执行都重新抽取；其余模式由控件值正常参与缓存键。
-        if kwargs.get("fallback_mode") == "random" and int(kwargs.get("random_seed", -1)) < 0:
-            return float("nan")
+        unique_id = kwargs.get("unique_id")
+        fallback_mode = str(kwargs.get("fallback_mode", "sequential") or "sequential")
+        selection_data = kwargs.get("selection_data", "[]")
+        has_selection = False
+        try:
+            has_selection = len(json.loads(selection_data or "[]")) > 0
+        except Exception:
+            pass
+
+        # 有手动选择时，按选择内容决定输出（选择不变则输出不变，符合预期）
+        if has_selection:
+            return json.dumps(kwargs, sort_keys=True, ensure_ascii=False, default=str)
+
+        # 顺序/随机 fallback 模式下，用后端计数器作为变化标识，绕过 ComfyUI 缓存
+        if fallback_mode in ("sequential", "random"):
+            key = cls._state_key(unique_id)
+            with cls._state_lock:
+                state = cls._state.get(key)
+            if state is None:
+                return float("nan")
+            return state["counter"]
+
         return json.dumps(kwargs, sort_keys=True, ensure_ascii=False, default=str)
 
 

@@ -78,7 +78,11 @@ export function mountH3Director(nodeType, vueComponent, options = {}) {
             this._vueApp = appInstance;
             console.log("[EagleH3Director] Vue app mounted");
         } catch (e) {
-            el.innerHTML = '<div style="padding:30px;min-height:120px;color:#ff6b6b;background:#1a0b0b;border:1px solid #ff6b6b;border-radius:8px;">H3 Director 加载失败: ' + (e && e.message) + "</div>";
+            el.replaceChildren();
+            const errorBox = document.createElement("div");
+            errorBox.style.cssText = "padding:30px;min-height:120px;color:#ff6b6b;background:#1a0b0b;border:1px solid #ff6b6b;border-radius:8px";
+            errorBox.textContent = "H3 Director 加载失败: " + (e && e.message ? e.message : "unknown error");
+            el.appendChild(errorBox);
             console.error("[EagleH3Director] mount failed:", e);
         }
 

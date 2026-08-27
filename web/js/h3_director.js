@@ -121,6 +121,27 @@ var H3D_CSS = `
 .h3d-warn-box ul{margin:4px 0 0;padding-left:16px;}
 .h3d-statusbar{display:flex;align-items:center;gap:12px;padding:5px 10px;font-size:10px;color:var(--h3d-muted);background:var(--h3d-bg2);border-top:1px solid var(--h3d-bd);flex-shrink:0;}
 .h3d-empty{color:var(--h3d-muted);text-align:center;padding:20px;font-size:11px;}
+.h3d-media-strip{display:flex;align-items:stretch;gap:7px;min-height:76px;padding:7px;background:#101218;border:1px solid var(--h3d-bd);border-radius:7px;overflow-x:auto;overflow-y:hidden;flex-shrink:0;}
+.h3d-media-strip::-webkit-scrollbar{height:8px}.h3d-media-strip::-webkit-scrollbar-thumb{background:#343845;border-radius:5px}
+.h3d-media-card{position:relative;flex:0 0 82px;height:62px;border:1px solid var(--h3d-bd);border-radius:6px;background:#191c24;overflow:hidden;cursor:pointer;user-select:none;}
+.h3d-media-card:hover,.h3d-media-card.drag-over{border-color:var(--h3d-primary);box-shadow:0 0 0 1px rgba(74,125,224,.25)}
+.h3d-media-card.dragging{opacity:.45}.h3d-media-card img,.h3d-media-card video{width:100%;height:100%;object-fit:cover;display:block;background:#090a0d}
+.h3d-media-card .audio-icon{height:100%;display:flex;align-items:center;justify-content:center;font-size:26px;color:#73b7ed;background:linear-gradient(135deg,#15293a,#1a1d28)}
+.h3d-media-card .media-tag{position:absolute;left:3px;top:3px;background:rgba(0,0,0,.78);padding:1px 4px;border-radius:3px;color:#fff;font-size:9px;max-width:74px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.h3d-media-card .media-time{position:absolute;right:3px;bottom:3px;background:rgba(0,0,0,.76);padding:1px 4px;border-radius:3px;color:#ddd;font-size:9px}
+.h3d-media-card .media-actions{position:absolute;right:2px;top:2px;display:flex;gap:2px;opacity:0}.h3d-media-card:hover .media-actions{opacity:1}
+.h3d-media-card .media-action{width:18px;height:18px;border:0;border-radius:3px;background:rgba(10,10,10,.82);color:#fff;padding:0;cursor:pointer;font-size:10px}
+.h3d-media-add{flex:0 0 82px;height:62px;border:1px dashed #465064;border-radius:6px;background:#141720;color:var(--h3d-muted);cursor:pointer;font-size:11px}.h3d-media-add:hover{color:#fff;border-color:var(--h3d-primary)}
+.h3d-media-token{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 4px 0 2px;border-radius:4px;border:1px solid #3d5364;background:#172630;color:#8fc8e8;font-size:10px;vertical-align:baseline;}
+.h3d-media-token.video{background:#271e34;border-color:#59436f;color:#c7a6e8}.h3d-media-token.audio{background:#24272d;border-color:#515864;color:#cbd2dc}
+.h3d-media-token img{width:15px;height:15px;object-fit:cover;border-radius:3px}.h3d-media-token i{width:15px;text-align:center;font-style:normal;font-size:10px}
+.h3d-media-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.h3d-media-detail{border:1px solid var(--h3d-bd);border-radius:7px;background:var(--h3d-bg2);padding:7px;min-width:0}
+.h3d-media-detail-preview{height:82px;border-radius:5px;overflow:hidden;background:#0b0d12;display:flex;align-items:center;justify-content:center;position:relative}.h3d-media-detail-preview img,.h3d-media-detail-preview video{width:100%;height:100%;object-fit:cover}.h3d-media-detail-preview .audio-icon{font-size:30px;color:#73b7ed}
+.h3d-media-dropzone{min-height:118px;border:2px dashed #465064;border-radius:9px;background:linear-gradient(180deg,#111722,#0e1118);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:var(--h3d-muted);cursor:pointer;transition:.15s;flex-shrink:0}
+.h3d-media-dropzone:hover{border-color:var(--h3d-primary);background:#131c2b;color:#fff}.h3d-media-dropzone .drop-icon{font-size:26px;color:#73a7ef;line-height:1}.h3d-media-dropzone .drop-title{font-size:12px;font-weight:600}.h3d-media-dropzone .drop-sub{font-size:10px;color:var(--h3d-muted)}
+.h3d-trim-overlay{position:absolute;z-index:40;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px}.h3d-trim-dialog{width:min(620px,92%);background:#171b23;border:1px solid #465064;border-radius:9px;padding:14px;box-shadow:0 14px 50px rgba(0,0,0,.55)}
+.h3d-trim-preview{height:220px;background:#090b0f;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin:10px 0}.h3d-trim-preview video{max-width:100%;max-height:100%}.h3d-trim-preview audio{width:92%}
+.h3d-trim-ranges{display:grid;grid-template-columns:72px 1fr 70px;gap:7px;align-items:center;margin:8px 0}.h3d-trim-ranges input[type=range]{width:100%}
 `;
 
 // ─────────────────────────────────────────────────────────────────
@@ -138,6 +159,38 @@ function createShot(id) {
 }
 function createDialogue(id) { return { id: id, role: '', text: '', time: '' }; }
 function createRef() { return { url: '', filename: '', name: '', kind: 'person', retention: 'fully_preserved' }; }
+function createMediaRef(data) {
+    data = data || {};
+    var duration = Math.max(0, Number(data.duration) || 0);
+    return {
+        id: data.id || ('media-' + Date.now() + '-' + Math.random().toString(16).slice(2)),
+        type: ['image','video','audio'].indexOf(data.type) >= 0 ? data.type : 'image',
+        filename: data.filename || '',
+        originalName: data.originalName || data.name || data.filename || '',
+        name: data.name || '',
+        kind: data.kind || (data.type === 'image' ? 'person' : 'reference'),
+        retention: data.retention || 'fully_preserved',
+        duration: duration,
+        trimStart: Math.max(0, Number(data.trimStart) || 0),
+        trimEnd: Number.isFinite(Number(data.trimEnd)) && Number(data.trimEnd) > 0 ? Number(data.trimEnd) : duration,
+        url: data.url || (data.filename ? '/h3_director/media?filename=' + encodeURIComponent(data.filename) : '')
+    };
+}
+function migrateMediaRefs(project) {
+    if (!project) return;
+    if (!Array.isArray(project.mediaRefs)) project.mediaRefs = [];
+    project.mediaRefs = project.mediaRefs.filter(function(x) { return x && x.filename; }).map(createMediaRef);
+    if (!project.mediaRefs.length && Array.isArray(project.refs)) {
+        project.refs.forEach(function(r, i) {
+            if (!r || !r.filename) return;
+            project.mediaRefs.push(createMediaRef({
+                id: r.id || ('legacy-image-' + (i + 1)), type: 'image', filename: r.filename,
+                originalName: r.name || r.filename, name: r.name || '', kind: r.kind || 'person',
+                retention: r.retention || 'fully_preserved', url: r.url || ''
+            }));
+        });
+    }
+}
 function defaultProject() {
     return {
         mode: 't2v', globalDuration: 7, globalSteps: 8,
@@ -149,6 +202,7 @@ function defaultProject() {
         refMaxMegapixels: 1.5,
         videoBlendFrames: 0, continuationMode: 'guide',
         refs: Array.from({ length: 9 }, function() { return createRef(); }),
+        mediaRefs: [],
         skill: {
             tasks: [],            // ['script','shots','dialogue'] 多选
             modelPref: 'local',   // 'local' 本地优先 | 'api'
@@ -175,6 +229,7 @@ function loadState(node) {
             if (data && Array.isArray(data.scenes) && data.scenes.length) scenes = data.scenes;
         }
     } catch(e) { console.warn('[EagleH3Director] loadState error:', e); }
+    migrateMediaRefs(project);
     return { project: project, scenes: scenes };
 }
 function extractDialoguesIfNeeded(scenes) {
@@ -198,6 +253,7 @@ function applyStateToReactive(project, scenes, store, data) {
     Object.keys(defProject).forEach(function(k) {
         project[k] = (k in savedProject) ? savedProject[k] : defProject[k];
     });
+    migrateMediaRefs(project);
     // skill 配置确保字段完整（兼容旧工作流缺失字段）
     var defSkill = defProject.skill;
     if (!project.skill || typeof project.skill !== 'object') project.skill = {};
@@ -220,7 +276,11 @@ function saveState(node, project, scenes) {
     node._h3SaveTimer = setTimeout(function() {
         try {
             var clean = JSON.parse(JSON.stringify({ project: project, scenes: scenes }));
-            (clean.project.refs || []).forEach(function(r) { if (r) delete r.file; });
+            (clean.project.mediaRefs || []).forEach(function(r) { if (r) delete r.file; });
+            // Keep a legacy image-only mirror so older workflow consumers continue to work.
+            clean.project.refs = (clean.project.mediaRefs || []).filter(function(r) { return r.type === 'image'; }).map(function(r) {
+                return { id:r.id, url:r.url, filename:r.filename, name:r.name, kind:r.kind, retention:r.retention };
+            });
             var json = JSON.stringify(clean);
             w.value = json;
             if (typeof w.callback === 'function') w.callback(w.value, w, node);
@@ -256,14 +316,59 @@ function buildDTag(role, text) { return '<d>[' + role + '] ' + text + '</d>'; }
 function _escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-function highlightText(s) {
+function mediaTagFor(item, items) {
+    items = items || [];
+    var names = { image:'Picture', video:'Video', audio:'Audio' };
+    var number = 0;
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].type === item.type) number++;
+        if (items[i].id === item.id) return '<' + (names[item.type] || 'Picture') + ' ' + number + '>';
+    }
+    return '';
+}
+function mediaNumberMap(items) {
+    var map = {};
+    (items || []).forEach(function(item) { map[item.id] = mediaTagFor(item, items); });
+    return map;
+}
+function rewriteMediaTags(text, before, after, removedId) {
+    text = text || '';
+    var placeholders = {};
+    Object.keys(before || {}).forEach(function(id, index) {
+        var tag = before[id];
+        if (!tag) return;
+        var marker = '__H3_MEDIA_' + index + '_' + Date.now() + '__';
+        placeholders[id] = marker;
+        text = text.split(tag).join(marker);
+    });
+    Object.keys(placeholders).forEach(function(id) {
+        var replacement = id === removedId ? '' : ((after && after[id]) || before[id] || '');
+        text = text.split(placeholders[id]).join(replacement);
+    });
+    return text.replace(/[ \t]{2,}/g, ' ');
+}
+function highlightText(s, mediaItems) {
     if (!s) return '';
     var out = _escapeHtml(s);
     // 先识别 <d>...</d>（可能跨行）
     out = out.replace(/&lt;d&gt;[\s\S]*?&lt;\/d&gt;/g, function(m) {
         return '<span class="h3d-hl-d">' + m + '</span>';
     });
-    // 再识别 @refN / @图片N / @音频N 等引用标签
+    var lookup = {};
+    (mediaItems || []).forEach(function(item) { lookup[mediaTagFor(item, mediaItems)] = item; });
+    out = out.replace(/&lt;(Picture|Video|Audio)\s+(\d+)&gt;/gi, function(match, type, number) {
+        var canonical = '<' + type.charAt(0).toUpperCase() + type.slice(1).toLowerCase() + ' ' + number + '>';
+        var item = lookup[canonical];
+        var icon = type.toLowerCase() === 'video' ? '▶' : (type.toLowerCase() === 'audio' ? '♪' : '▧');
+        var thumb = '';
+        if (item && item.type === 'image' && item.url) {
+            thumb = '<img src="' + _escapeHtml(item.url) + '" alt="">';
+        } else {
+            thumb = '<i>' + icon + '</i>';
+        }
+        return '<span class="h3d-media-token ' + type.toLowerCase() + '">' + thumb + match + '</span>';
+    });
+    // 再识别旧版 @refN / @图片N / @音频N 等引用标签
     out = out.replace(/@(?:ref|图片|音频|视频|video|audio)\d+/g, '<span class="h3d-hl-ref">$&</span>');
     return out;
 }
@@ -288,21 +393,23 @@ function compilePrompt(project, scene) {
         parts.push('integrated_multimodal_description:\n  (Shared prompt placeholder — fill in 世界构建 & 风格基础 to prepend to every scene.)');
     }
 
-    // 参考预设信息：只输出已上传图片的槽位，保留原始槽位编号
-    var refs = (project.refs || []).map(function(r, idx) { return { r: r, idx: idx }; }).filter(function(item) { return item.r && item.r.filename; });
+    // 多模态参考信息：编号在各媒体类型内独立计算。
+    var mediaRefs = (project.mediaRefs || []).filter(function(r) { return r && r.filename; });
+    var refs = mediaRefs.filter(function(r) { return r.type === 'image'; });
     var noun = { person:'a character', prop:'a prop', style:'an art style', environment:'an environment', composition:'a composition' };
-    var subj = refs.map(function(item) {
-        var r = item.r, idx = item.idx;
+    var subj = mediaRefs.map(function(r) {
+        var tag = mediaTagFor(r, mediaRefs);
         var name = (r.name || '').trim();
         var ofName = name ? ' of ' + name : '';
-        return '  <Picture ' + (idx+1) + '> is ' + (noun[r.kind]||'a reference') + ofName + ' used as @ref' + (idx+1) + '.';
+        var description = r.type === 'image' ? (noun[r.kind] || 'an image') : (r.type === 'video' ? 'a video' : 'an audio');
+        return '  ' + tag + ' is ' + description + ofName + ' reference.';
     }).join('\n');
     if (subj) parts.push('subject_definitions:\n' + subj);
-    var ret = refs.map(function(item) {
-        var r = item.r, idx = item.idx;
+    var ret = refs.map(function(r) {
+        var tag = mediaTagFor(r, mediaRefs);
         var name = (r.name || '').trim();
         var nameTag = name ? ' (' + name + ')' : '';
-        var line = '  @ref' + (idx+1) + nameTag + ': ' + (r.retention||'fully_preserved') + '.';
+        var line = '  ' + tag + nameTag + ': ' + (r.retention||'fully_preserved') + '.';
         if (r.kind === 'person') line += ' Do not copy the background of the reference image; keep only the character design.';
         return line;
     }).join('\n');
@@ -518,7 +625,9 @@ var H3DirectorApp = defineComponent({
             e.target.value = ''; pendingRefIdx.value = -1;
         }
         function clearRef(i) {
+            var oldName = store.project.refs[i].filename;
             store.project.refs[i].filename = ''; store.project.refs[i].url = '';
+            if (oldName) fetch('/h3_director/media?filename=' + encodeURIComponent(oldName), { method:'DELETE' }).catch(function(){});
             markDirty();
         }
         function addRef() {
@@ -570,7 +679,7 @@ var H3DirectorApp = defineComponent({
             if (!sc || !sc.shots || !sc.shots.length) w.push('当前场景没有镜头。');
             if (!sc || !(sc.dialogues || []).length) w.push('当前场景没有台词。');
             if (['i2v','fl2v','r2v','rv2v'].indexOf(store.project.mode) !== -1) {
-                var usedRefs = (store.project.refs || []).filter(function(r) { return r.filename; }).length;
+                var usedRefs = (store.project.mediaRefs || []).filter(function(r) { return r.type === 'image' && r.filename; }).length;
                 if (!usedRefs) w.push('该模式通常需要参考图。');
             }
             return w;
@@ -776,7 +885,8 @@ var HighlightTextarea = defineComponent({
         modelValue: { type: String, default: '' },
         placeholder: { type: String, default: '' },
         minHeight: { type: String, default: '' },
-        flex: { type: Boolean, default: false }
+        flex: { type: Boolean, default: false },
+        mediaItems: { type: Array, default: function() { return []; } }
     },
     emits: ['update:modelValue', 'input'],
     setup: function(props, ctx) {
@@ -792,7 +902,24 @@ var HighlightTextarea = defineComponent({
             layer.value.style.left = (-ta.value.scrollLeft) + 'px';
         }
         function onInput() { nextTick(syncScroll); }
-        var html = computed(function() { return highlightText(text.value); });
+        function insertText(value) {
+            if (!ta.value) return;
+            var start = ta.value.selectionStart == null ? text.value.length : ta.value.selectionStart;
+            var end = ta.value.selectionEnd == null ? start : ta.value.selectionEnd;
+            var before = text.value.slice(0, start);
+            var after = text.value.slice(end);
+            var leftSpace = before && !/\s$/.test(before) ? ' ' : '';
+            var rightSpace = after && !/^\s/.test(after) ? ' ' : '';
+            text.value = before + leftSpace + value + rightSpace + after;
+            var caret = start + leftSpace.length + value.length + rightSpace.length;
+            nextTick(function() {
+                ta.value.focus();
+                ta.value.setSelectionRange(caret, caret);
+                syncScroll();
+            });
+        }
+        ctx.expose({ insertText: insertText, focus: function() { if (ta.value) ta.value.focus(); } });
+        var html = computed(function() { return highlightText(text.value, props.mediaItems); });
         var wrapStyle = computed(function() {
             var s = {};
             if (props.minHeight) s.minHeight = props.minHeight;
@@ -807,7 +934,7 @@ var HighlightTextarea = defineComponent({
     <div v-if="!text" class="h3d-hl-placeholder">{{ placeholder }}</div>
     <div v-html="html"></div>
   </div>
-  <textarea class="h3d-hl-textarea" ref="ta" v-model="text" :placeholder="placeholder" @scroll="syncScroll" @input="onInput" spellcheck="false"></textarea>
+  <textarea class="h3d-hl-textarea" ref="ta" v-model="text" :placeholder="placeholder" @scroll="syncScroll" @input="onInput" @keydown.stop @paste.stop spellcheck="false"></textarea>
 </div>`
 });
 
@@ -901,6 +1028,7 @@ var PlanPanel = defineComponent({
 // ─────────────────────────────────────────────────────────────────
 var EditorPanel = defineComponent({
     name: 'EditorPanel',
+    components: { HighlightTextarea: HighlightTextarea },
     setup: function() {
         var store = inject('h3store');
         var actions = inject('h3actions');
@@ -914,10 +1042,160 @@ var EditorPanel = defineComponent({
             { key: 'shot', label: '🎬 分镜' },
             { key: 'generate', label: '🎬 生成' }
         ];
-        return { store: store, actions: actions, scene: scene, tabs: tabs };
+        var scriptEditor = ref(null);
+        var mediaFileInput = ref(null);
+        var trimPlayer = ref(null);
+        var dragIndex = ref(-1);
+        var trimOpen = ref(false);
+        var trimDraft = reactive({ id:'', type:'', filename:'', originalName:'', url:'', duration:0, start:0, end:0 });
+        var mediaItems = computed(function() { return store.project.mediaRefs || []; });
+
+        function formatDuration(value) {
+            value = Math.max(0, Number(value) || 0);
+            var minutes = Math.floor(value / 60);
+            var seconds = value - minutes * 60;
+            return minutes ? (minutes + ':' + seconds.toFixed(1).padStart(4, '0')) : (seconds.toFixed(1) + 's');
+        }
+        function selectedDuration(item) {
+            if (!item || item.type === 'image') return 0;
+            var end = Number(item.trimEnd) || Number(item.duration) || 0;
+            return Math.max(0, end - (Number(item.trimStart) || 0));
+        }
+        function insertMedia(item) {
+            var tag = mediaTagFor(item, mediaItems.value);
+            if (!tag || !scriptEditor.value || !scriptEditor.value.insertText) return;
+            scriptEditor.value.insertText(tag);
+            actions.flash('已插入 ' + tag);
+        }
+        function openMediaPicker() { if (mediaFileInput.value) mediaFileInput.value.click(); }
+        function inferFileType(file) {
+            var mime = (file.type || '').toLowerCase();
+            if (mime.indexOf('image/') === 0) return 'image';
+            if (mime.indexOf('video/') === 0) return 'video';
+            if (mime.indexOf('audio/') === 0) return 'audio';
+            var ext = (file.name || '').split('.').pop().toLowerCase();
+            if (['png','jpg','jpeg','webp','bmp','gif'].indexOf(ext) >= 0) return 'image';
+            if (['mp4','webm','mov','mkv','avi','m4v'].indexOf(ext) >= 0) return 'video';
+            if (['wav','mp3','flac','ogg','m4a','aac','opus'].indexOf(ext) >= 0) return 'audio';
+            return '';
+        }
+        function withinLimit(type) {
+            var max = type === 'image' ? 9 : 3;
+            return mediaItems.value.filter(function(item) { return item.type === type; }).length < max;
+        }
+        function uploadOne(file) {
+            var type = inferFileType(file);
+            if (!type) { actions.flash('不支持的素材格式: ' + file.name); return Promise.resolve(); }
+            if (!withinLimit(type)) { actions.flash(type === 'image' ? '图片最多 9 张' : (type === 'video' ? '视频最多 3 个' : '音频最多 3 个')); return Promise.resolve(); }
+            var fd = new FormData(); fd.append('file', file);
+            return fetch('/h3_director/upload_media', { method:'POST', body:fd })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data.success || !data.item) throw new Error(data.error || '上传失败');
+                    store.project.mediaRefs.push(createMediaRef(data.item));
+                    actions.markDirty();
+                }).catch(function(err) { actions.flash('上传失败: ' + (err.message || err)); });
+        }
+        function uploadFiles(files) {
+            var queue = Promise.resolve();
+            Array.from(files || []).forEach(function(file) { queue = queue.then(function() { return uploadOne(file); }); });
+            return queue.then(function() { if ((files || []).length) actions.flash('素材已添加'); });
+        }
+        function onMediaFiles(e) {
+            uploadFiles(e.target && e.target.files);
+            if (e.target) e.target.value = '';
+        }
+        function onMediaWheel(e) {
+            if (e.deltaY) { e.preventDefault(); e.currentTarget.scrollLeft += e.deltaY; }
+        }
+        function onExternalDrop(e) {
+            var files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length) uploadFiles(files);
+        }
+        function onDragStart(e, index) {
+            dragIndex.value = index;
+            if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(index)); }
+        }
+        function moveMedia(from, to) {
+            if (from < 0 || to < 0 || from === to || from >= mediaItems.value.length || to >= mediaItems.value.length) return;
+            var before = mediaNumberMap(mediaItems.value);
+            var moved = store.project.mediaRefs.splice(from, 1)[0];
+            store.project.mediaRefs.splice(to, 0, moved);
+            var after = mediaNumberMap(mediaItems.value);
+            store.scenes.forEach(function(sc) { sc.preamble = rewriteMediaTags(sc.preamble, before, after, ''); });
+            dragIndex.value = -1;
+            actions.markDirty();
+        }
+        function onDropAt(e, index) {
+            if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) { onExternalDrop(e); return; }
+            var from = dragIndex.value;
+            if (from < 0 && e.dataTransfer) from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+            moveMedia(from, index);
+        }
+        function removeMedia(item) {
+            var index = mediaItems.value.findIndex(function(x) { return x.id === item.id; });
+            if (index < 0) return;
+            var before = mediaNumberMap(mediaItems.value);
+            store.project.mediaRefs.splice(index, 1);
+            var after = mediaNumberMap(mediaItems.value);
+            store.scenes.forEach(function(sc) { sc.preamble = rewriteMediaTags(sc.preamble, before, after, item.id); });
+            if (item.filename) fetch('/h3_director/media?filename=' + encodeURIComponent(item.filename), { method:'DELETE' }).catch(function(){});
+            actions.markDirty();
+        }
+        function onLoadedMetadata(e, item) {
+            var duration = Number(e.target && e.target.duration) || 0;
+            if (duration > 0 && (!item.duration || !item.trimEnd)) {
+                item.duration = duration; item.trimEnd = duration; actions.markDirty();
+            }
+        }
+        function openTrim(item) {
+            if (!item || item.type === 'image') return;
+            var duration = Math.max(0, Number(item.duration) || 0);
+            Object.assign(trimDraft, {
+                id:item.id, type:item.type, filename:item.filename, originalName:item.originalName,
+                url:item.url || ('/h3_director/media?filename=' + encodeURIComponent(item.filename)),
+                duration:duration, start:Math.max(0, Number(item.trimStart) || 0),
+                end:Number(item.trimEnd) > 0 ? Number(item.trimEnd) : duration
+            });
+            trimOpen.value = true;
+        }
+        function clampTrim(which) {
+            var minGap = Math.min(0.05, trimDraft.duration || 0.05);
+            trimDraft.start = Math.max(0, Math.min(Number(trimDraft.start) || 0, Math.max(0, trimDraft.end - minGap)));
+            trimDraft.end = Math.min(trimDraft.duration, Math.max(Number(trimDraft.end) || 0, trimDraft.start + minGap));
+            if (which === 'start' && trimPlayer.value) trimPlayer.value.currentTime = trimDraft.start;
+        }
+        function resetTrim() { trimDraft.start = 0; trimDraft.end = trimDraft.duration; }
+        function previewTrim() {
+            if (!trimPlayer.value) return;
+            trimPlayer.value.currentTime = trimDraft.start;
+            var promise = trimPlayer.value.play();
+            if (promise && promise.catch) promise.catch(function() {});
+        }
+        function onTrimTime() {
+            if (trimPlayer.value && trimPlayer.value.currentTime >= trimDraft.end) trimPlayer.value.pause();
+        }
+        function saveTrim() {
+            var item = mediaItems.value.find(function(x) { return x.id === trimDraft.id; });
+            if (item) { item.trimStart = trimDraft.start; item.trimEnd = trimDraft.end; actions.markDirty(); }
+            trimOpen.value = false;
+        }
+        function closeTrim() { if (trimPlayer.value) trimPlayer.value.pause(); trimOpen.value = false; }
+
+        return {
+            store:store, actions:actions, scene:scene, tabs:tabs, mediaItems:mediaItems,
+            scriptEditor:scriptEditor, mediaFileInput:mediaFileInput, trimPlayer:trimPlayer,
+            dragIndex:dragIndex, trimOpen:trimOpen, trimDraft:trimDraft,
+            formatDuration:formatDuration, selectedDuration:selectedDuration, mediaTagFor:mediaTagFor,
+            insertMedia:insertMedia, openMediaPicker:openMediaPicker, onMediaFiles:onMediaFiles,
+            onMediaWheel:onMediaWheel, onExternalDrop:onExternalDrop, onDragStart:onDragStart,
+            onDropAt:onDropAt, removeMedia:removeMedia, onLoadedMetadata:onLoadedMetadata,
+            openTrim:openTrim, clampTrim:clampTrim, resetTrim:resetTrim, previewTrim:previewTrim,
+            onTrimTime:onTrimTime, saveTrim:saveTrim, closeTrim:closeTrim
+        };
     },
     template: `
-<div class="h3d-col" style="display:flex;flex-direction:column;min-height:0;flex:1">
+<div class="h3d-col" style="display:flex;flex-direction:column;min-height:0;flex:1;position:relative">
   <div class="h3d-col-hd">
     <span>✎ Editor · 场景编辑</span>
     <span class="h3d-mini" v-if="scene">{{ store.scenes.findIndex(s=>s.id===store.currentSceneId)+1 }}/{{ store.scenes.length }}</span>
@@ -936,8 +1214,28 @@ var EditorPanel = defineComponent({
       <div class="h3d-scroll-box">
         <!-- 台本 -->
         <div v-show="store.editorTab==='script'" style="display:flex;flex-direction:column;gap:6px;flex:1;min-height:0">
-          <div class="h3d-hint">完整台本（含 <span class="h3d-tag">&lt;d&gt;[角色] 台词&lt;/d&gt;</span>），编辑后自动回写台词列表。</div>
-          <textarea class="h3d-textarea" style="flex:1;min-height:120px" v-model="scene.preamble" @input="actions.onPreambleInput" placeholder="自由文本 + [Shot N] 描述..."></textarea>
+          <div class="h3d-hint">点击素材插入 &lt;Picture N&gt;、&lt;Video N&gt; 或 &lt;Audio N&gt;；拖拽卡片可手动调整位置。</div>
+          <div class="h3d-media-strip" @wheel="onMediaWheel" @dragover.prevent @drop.prevent="onExternalDrop">
+            <div v-for="(item,i) in mediaItems" :key="item.id" class="h3d-media-card"
+                 :class="{dragging:dragIndex===i}" draggable="true"
+                 @dragstart="onDragStart($event,i)" @dragend="dragIndex=-1"
+                 @dragover.prevent @drop.stop.prevent="onDropAt($event,i)" @click="insertMedia(item)"
+                 :title="'点击插入 ' + mediaTagFor(item, mediaItems)">
+              <img v-if="item.type==='image'" :src="item.url" alt="">
+              <video v-else-if="item.type==='video'" :src="item.url" muted preload="metadata" @loadedmetadata="onLoadedMetadata($event,item)"></video>
+              <div v-else class="audio-icon">♪<audio :src="item.url" preload="metadata" style="display:none" @loadedmetadata="onLoadedMetadata($event,item)"></audio></div>
+              <span class="media-tag">{{ mediaTagFor(item, mediaItems) }}</span>
+              <span v-if="item.type!=='image'" class="media-time">{{ formatDuration(selectedDuration(item)) }}</span>
+              <div class="media-actions">
+                <button v-if="item.type!=='image'" class="media-action" title="裁剪" @click.stop="openTrim(item)">✂</button>
+                <button class="media-action" title="移除" @click.stop="removeMedia(item)">×</button>
+              </div>
+            </div>
+            <button class="h3d-media-add" @click="openMediaPicker" @drop.stop.prevent="onExternalDrop">＋ 添加素材</button>
+          </div>
+          <input ref="mediaFileInput" type="file" accept="image/*,video/*,audio/*" multiple style="display:none" @change="onMediaFiles">
+          <highlight-textarea ref="scriptEditor" v-model="scene.preamble" :media-items="mediaItems" :flex="true" min-height="120px"
+                              @input="actions.onPreambleInput" placeholder="自由文本 + [Shot N] 描述..."></highlight-textarea>
         </div>
 
         <!-- 台词 -->
@@ -957,32 +1255,42 @@ var EditorPanel = defineComponent({
 
         <!-- 参考 -->
         <div v-show="store.editorTab==='ref'" style="display:flex;flex-direction:column;gap:8px">
-          <div class="h3d-hint">参考图后端保存，REF_IMAGES 输出端口直连 H3 节点。填写“名称”后编译输出会显示该图对应角色/物品（如 Nali）。人物类自动附带“不复制背景”提醒。拖拽图片到槽位可直接上传。</div>
-          <div class="h3d-row" style="margin-bottom:4px;justify-content:flex-end">
-            <button class="h3d-btn sm" @click="actions.addRef">+ 增加参考槽</button>
-            <button class="h3d-btn sm danger" v-if="store.project.refs.length>9" @click="actions.removeLastRef">- 移除末槽</button>
+          <div class="h3d-row" style="justify-content:space-between">
+            <div class="h3d-hint">与台本上方素材栏共用同一份数据；不自动排序，拖拽卡片可调整位置。图片最多9张，视频/音频各3个。</div>
+            <button class="h3d-btn sm primary" @click="openMediaPicker">＋ 添加素材</button>
           </div>
-          <div class="h3d-ref-grid">
-            <div v-for="(r,i) in store.project.refs" :key="i" class="h3d-refslot" :class="{'has-img':r.filename}"
-                 @dragover.prevent
-                 @drop.prevent="actions.onRefDrop($event, i)">
-              <div class="thumb" @click="actions.triggerUpload(i)">
-                <span class="badge">@ref{{ i+1 }}</span>
-                <img v-if="r.url" :src="r.url" alt="">
-                <span v-else class="ph">+</span>
+          <div class="h3d-media-dropzone" @click="openMediaPicker" @dragover.prevent @drop.stop.prevent="onExternalDrop">
+            <div class="drop-icon">⇩</div>
+            <div class="drop-title">将图片、视频或音频拖入这里</div>
+            <div class="drop-sub">也可以点击此区域选择文件 · 支持多选</div>
+          </div>
+          <div v-if="mediaItems.length" class="h3d-media-grid" @dragover.prevent @drop.prevent="onExternalDrop">
+            <div v-for="(item,i) in mediaItems" :key="item.id" class="h3d-media-detail" draggable="true"
+                 :class="{dragging:dragIndex===i}" @dragstart="onDragStart($event,i)" @dragend="dragIndex=-1"
+                 @dragover.prevent @drop.stop.prevent="onDropAt($event,i)">
+              <div class="h3d-media-detail-preview">
+                <img v-if="item.type==='image'" :src="item.url" alt="">
+                <video v-else-if="item.type==='video'" :src="item.url" muted controls preload="metadata" @loadedmetadata="onLoadedMetadata($event,item)"></video>
+                <div v-else class="audio-icon">♪<audio :src="item.url" preload="metadata" style="display:none" @loadedmetadata="onLoadedMetadata($event,item)"></audio></div>
+                <span class="h3d-tag" style="position:absolute;left:4px;top:4px">{{ mediaTagFor(item, mediaItems) }}</span>
               </div>
-              <input class="h3d-inp sm" v-model="r.name" placeholder="名称：Nali" @input="actions.markDirty" style="width:100%;margin-bottom:4px">
-              <select class="h3d-sel" v-model="r.kind" @change="actions.markDirty">
-                <option value="person">人物</option><option value="prop">道具</option>
-                <option value="style">风格</option><option value="environment">环境</option>
-                <option value="composition">构图</option>
-              </select>
-              <select class="h3d-sel" v-model="r.retention" @change="actions.markDirty">
-                <option value="fully_preserved">完全保留</option>
-                <option value="partially_preserved">部分保留</option>
-                <option value="style_only">仅风格</option>
-              </select>
-              <button v-if="r.filename" class="h3d-btn sm danger" @click="actions.clearRef(i)">移除</button>
+              <input class="h3d-inp sm" v-model="item.name" :placeholder="item.originalName || '素材名称'" @input="actions.markDirty" style="width:100%;margin-top:6px">
+              <template v-if="item.type==='image'">
+                <select class="h3d-sel" v-model="item.kind" @change="actions.markDirty" style="width:100%;margin-top:5px">
+                  <option value="person">人物</option><option value="prop">道具</option><option value="style">风格</option>
+                  <option value="environment">环境</option><option value="composition">构图</option>
+                </select>
+                <select class="h3d-sel" v-model="item.retention" @change="actions.markDirty" style="width:100%;margin-top:5px">
+                  <option value="fully_preserved">完全保留</option><option value="partially_preserved">部分保留</option><option value="style_only">仅风格</option>
+                </select>
+              </template>
+              <div class="h3d-row" style="margin-top:6px;justify-content:space-between">
+                <span class="h3d-mini" v-if="item.type!=='image'">选区 {{ formatDuration(selectedDuration(item)) }}</span><span v-else></span>
+                <span style="display:flex;gap:4px">
+                  <button v-if="item.type!=='image'" class="h3d-btn sm" @click="openTrim(item)">✂ 裁剪</button>
+                  <button class="h3d-btn sm danger" @click="removeMedia(item)">移除</button>
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -1053,6 +1361,21 @@ var EditorPanel = defineComponent({
         </div>
       </div>
     </template>
+  </div>
+  <div v-if="trimOpen" class="h3d-trim-overlay" @click.self="closeTrim">
+    <div class="h3d-trim-dialog">
+      <div class="h3d-row" style="justify-content:space-between"><b>{{ trimDraft.type==='video' ? '视频裁剪' : '音频裁剪' }}</b><button class="h3d-btn sm" @click="closeTrim">×</button></div>
+      <div class="h3d-trim-preview">
+        <video v-if="trimDraft.type==='video'" ref="trimPlayer" :src="trimDraft.url" controls @timeupdate="onTrimTime"></video>
+        <audio v-else ref="trimPlayer" :src="trimDraft.url" controls @timeupdate="onTrimTime"></audio>
+      </div>
+      <div class="h3d-trim-ranges"><span>开始</span><input type="range" min="0" :max="trimDraft.duration" step="0.01" v-model.number="trimDraft.start" @input="clampTrim('start')"><b>{{ trimDraft.start.toFixed(2) }}s</b></div>
+      <div class="h3d-trim-ranges"><span>结束</span><input type="range" min="0" :max="trimDraft.duration" step="0.01" v-model.number="trimDraft.end" @input="clampTrim('end')"><b>{{ trimDraft.end.toFixed(2) }}s</b></div>
+      <div class="h3d-row" style="justify-content:space-between;margin-top:12px">
+        <span><button class="h3d-btn" @click="previewTrim">▶ 播放选区</button> <button class="h3d-btn" @click="resetTrim">恢复全部</button></span>
+        <span><button class="h3d-btn" @click="closeTrim">取消</button> <button class="h3d-btn primary" @click="saveTrim">保存</button></span>
+      </div>
+    </div>
   </div>
 </div>`
 });
@@ -1192,7 +1515,11 @@ app.registerExtension({
                 this._vueApp = appInstance;
                 console.log('[EagleH3Director] Vue mounted OK');
             } catch(e) {
-                el.innerHTML = '<div style="padding:30px;min-height:120px;color:#ff6b6b;background:#1a0b0b;border:1px solid #ff6b6b;border-radius:8px;font-family:monospace">H3 Director 加载失败: ' + (e && e.message) + '<br><br>' + (e && e.stack) + '</div>';
+                el.replaceChildren();
+                var errorBox = document.createElement('div');
+                errorBox.style.cssText = 'padding:30px;min-height:120px;color:#ff6b6b;background:#1a0b0b;border:1px solid #ff6b6b;border-radius:8px;font-family:monospace;white-space:pre-wrap';
+                errorBox.textContent = 'H3 Director 加载失败: ' + (e && e.message ? e.message : 'unknown error') + '\n\n' + (e && e.stack ? e.stack : '');
+                el.appendChild(errorBox);
                 console.error('[EagleH3Director] mount failed:', e);
             }
 

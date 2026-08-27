@@ -52,7 +52,16 @@ class EagleAudioExtractor:
         ensure_dir(out_dir)
         # 输出文件
         base_name = os.path.splitext(os.path.basename(video_path))[0]
-        ext = "wav" if audio_codec == "wav" else ("flac" if audio_codec == "flac" else "m4a")
+        extension_map = {
+            "copy(原始流)": "mka",
+            "aac": "m4a",
+            "mp3": "mp3",
+            "wav": "wav",
+            "flac": "flac",
+            "ogg": "ogg",
+            "m4a": "m4a",
+        }
+        ext = extension_map.get(audio_codec, "m4a")
         output_path = os.path.join(out_dir, f"{base_name}_audio.{ext}")
         try:
             args = [ffmpeg, "-y", "-i", video_path]
@@ -73,17 +82,19 @@ class EagleAudioExtractor:
                     codec = "aac" if audio_codec == "aac" else "libmp3lame"
                     bitrate = "192k" if audio_bitrate == "lossless" else audio_bitrate
                     args += ["-vn", "-c:a", codec, "-b:a", bitrate]
-                args += ["-ar", "44100", output_path]
+                if audio_codec != "copy(原始流)":
+                    args += ["-ar", "44100"]
+                args.append(output_path)
                 result = subprocess.run(args, capture_output=True, timeout=300)
                 if result.returncode != 0:
                     return (self._empty_audio(), 
                             f"音频提取失败: {result.stderr.decode('utf-8', errors='replace')[-200:]}",
                             0.0, 44100)
                 waveform, sample_rate = self._read_audio(output_path)
-                duration = len(waveform) / sample_rate if sample_rate > 0 else 0
+                duration = waveform.shape[-1] / sample_rate if sample_rate > 0 else 0
                 info = f"音频已提取 {output_path}\n⏱️ 时长: {duration:.2f}s\n🎵 采样率: {sample_rate}Hz"
                 audio_data = {
-                    "waveform": torch.from_numpy(waveform).float(),
+                    "waveform": torch.from_numpy(waveform).float().unsqueeze(0),
                     "sample_rate": sample_rate,
                     "path": output_path
                 }
@@ -95,26 +106,31 @@ class EagleAudioExtractor:
         except Exception as e:
             return (self._empty_audio(), f"错误: {str(e)}", 0.0, 44100)
     def _read_audio(self, audio_path: str) -> tuple:
-        """读取音频文件"""
+        """读取音频并统一返回 [channels, samples] float32。"""
         try:
-            import soundfile as sf
-            data, sr = sf.read(audio_path)
-            if data.ndim == 1:
-                data = np.stack([data, data], axis=0)
-            return data.T, sr
-        except ImportError:
+            from comfy_extras.nodes_audio import load as comfy_load_audio
+            waveform, sr = comfy_load_audio(audio_path)
+            return waveform.detach().cpu().numpy().astype(np.float32, copy=False), sr
+        except Exception:
             try:
+                import soundfile as sf
+                data, sr = sf.read(audio_path, always_2d=True, dtype="float32")
+                return data.T, sr
+            except Exception:
                 from scipy.io import wavfile
                 sr, data = wavfile.read(audio_path)
                 if data.ndim == 1:
-                    data = np.stack([data, data], axis=0)
-                return data.T.astype(np.float32) / 32768.0, sr
-            except Exception:
-                return np.zeros((2, 44100), dtype=np.float32), 44100
+                    data = data[:, None]
+                if np.issubdtype(data.dtype, np.integer):
+                    scale = float(max(abs(np.iinfo(data.dtype).min), np.iinfo(data.dtype).max))
+                    data = data.astype(np.float32) / scale
+                else:
+                    data = data.astype(np.float32, copy=False)
+                return data.T, sr
     def _empty_audio(self):
         """返回空音频数"""
         return {
-            "waveform": torch.zeros((2, 44100), dtype=torch.float32),
+            "waveform": torch.zeros((1, 2, 44100), dtype=torch.float32),
             "sample_rate": 44100
         }
 class EagleAudioMixer:
@@ -161,48 +177,51 @@ class EagleAudioMixer:
         if not audio_list:
             return (self._empty_audio(), "⚠️ 没有有效音频输入")
         target_sr = max(sample_rates) if sample_rates else 44100
+        audio_list = [
+            self._resample_waveform(waveform, sample_rate, target_sr)
+            for waveform, sample_rate in zip(audio_list, sample_rates)
+        ]
+        audio_list = self._match_batch_and_channels(audio_list)
         if mix_mode == "叠加混合":
             max_len = max(a.shape[-1] for a in audio_list)
             padded = []
             for a in audio_list:
                 if a.shape[-1] < max_len:
                     pad_len = max_len - a.shape[-1]
-                    a = np.pad(a, ((0, 0), (0, pad_len)), mode='constant')
+                    a = np.pad(a, ((0, 0), (0, 0), (0, pad_len)), mode='constant')
                 padded.append(a)
             mixed = np.sum(padded, axis=0)
             mixed = mixed / max(1.0, np.max(np.abs(mixed)) + 0.001)
         elif mix_mode == "交叉淡入淡出":
-            if len(audio_list) >= 2:
-                a, b = audio_list[0], audio_list[1]
-                min_len = min(a.shape[-1], b.shape[-1])
-                a, b = a[..., :min_len], b[..., :min_len]
-                fade_len = min_len // 4
-                fade_in_curve = np.linspace(0, 1, fade_len)
-                fade_out_curve = np.linspace(1, 0, fade_len)
-                for i in range(a.shape[0]):
-                    a[i, -fade_len:] *= fade_out_curve
-                    b[i, :fade_len] *= fade_in_curve
-                mixed = a + b
-            else:
-                mixed = audio_list[0]
+            mixed = audio_list[0]
+            for following in audio_list[1:]:
+                overlap = min(max(1, target_sr // 2), mixed.shape[-1], following.shape[-1])
+                phase = np.linspace(0.0, np.pi / 2.0, overlap, dtype=np.float32)
+                fade_out_curve = np.cos(phase)
+                fade_in_curve = np.sin(phase)
+                cross = (
+                    mixed[..., -overlap:] * fade_out_curve
+                    + following[..., :overlap] * fade_in_curve
+                )
+                mixed = np.concatenate(
+                    [mixed[..., :-overlap], cross, following[..., overlap:]], axis=-1
+                )
         else:
             max_len = sum(a.shape[-1] for a in audio_list)
-            mixed = np.zeros((audio_list[0].shape[0], max_len))
+            mixed = np.zeros((*audio_list[0].shape[:-1], max_len), dtype=np.float32)
             offset = 0
             for a in audio_list:
-                mixed[:, offset:offset+a.shape[-1]] = a
+                mixed[..., offset:offset+a.shape[-1]] = a
                 offset += a.shape[-1]
         # 淡入淡出
         if fade_in > 0:
             fade_samples = int(fade_in * target_sr)
             fade_curve = np.linspace(0, 1, min(fade_samples, mixed.shape[-1]))
-            for i in range(mixed.shape[0]):
-                mixed[i, :len(fade_curve)] *= fade_curve
+            mixed[..., :len(fade_curve)] *= fade_curve
         if fade_out > 0:
             fade_samples = int(fade_out * target_sr)
             fade_curve = np.linspace(1, 0, min(fade_samples, mixed.shape[-1]))
-            for i in range(mixed.shape[0]):
-                mixed[i, -len(fade_curve):] *= fade_curve
+            mixed[..., -len(fade_curve):] *= fade_curve
         result = torch.from_numpy(mixed).float()
         info = f"混音完成\n🎚模式: {mix_mode}\n⏱️ 时长: {mixed.shape[-1]/target_sr:.2f}s"
         audio_data = {
@@ -214,17 +233,53 @@ class EagleAudioMixer:
         if isinstance(audio, dict):
             waveform = audio.get("waveform")
             if isinstance(waveform, torch.Tensor):
-                return waveform.cpu().numpy()
-            return np.array(waveform)
+                waveform = waveform.detach().cpu().numpy().copy()
+            else:
+                waveform = np.array(waveform, dtype=np.float32, copy=True)
         elif isinstance(audio, torch.Tensor):
-            return audio.cpu().numpy()
-        return np.array(audio)
+            waveform = audio.detach().cpu().numpy().copy()
+        else:
+            waveform = np.array(audio, dtype=np.float32, copy=True)
+        if waveform.ndim == 1:
+            waveform = waveform[None, None, :]
+        elif waveform.ndim == 2:
+            waveform = waveform[None, :, :]
+        elif waveform.ndim != 3:
+            raise ValueError(f"不支持的音频维度: {waveform.shape}")
+        return waveform.astype(np.float32, copy=False)
+
+    def _resample_waveform(self, waveform: np.ndarray, source_sr: int, target_sr: int) -> np.ndarray:
+        if source_sr == target_sr:
+            return waveform
+        if source_sr <= 0 or target_sr <= 0:
+            raise ValueError("采样率必须大于 0")
+        target_length = max(1, int(round(waveform.shape[-1] * target_sr / source_sr)))
+        tensor = torch.from_numpy(waveform)
+        return torch.nn.functional.interpolate(
+            tensor, size=target_length, mode="linear", align_corners=False
+        ).numpy()
+
+    def _match_batch_and_channels(self, waveforms: list[np.ndarray]) -> list[np.ndarray]:
+        target_batch = max(w.shape[0] for w in waveforms)
+        target_channels = max(w.shape[1] for w in waveforms)
+        matched = []
+        for waveform in waveforms:
+            if waveform.shape[0] not in (1, target_batch):
+                raise ValueError("音频 batch 数量不兼容")
+            if waveform.shape[0] == 1 and target_batch > 1:
+                waveform = np.repeat(waveform, target_batch, axis=0)
+            if waveform.shape[1] not in (1, target_channels):
+                raise ValueError("音频声道数量不兼容")
+            if waveform.shape[1] == 1 and target_channels > 1:
+                waveform = np.repeat(waveform, target_channels, axis=1)
+            matched.append(waveform)
+        return matched
     def _get_sample_rate(self, audio) -> int:
         if isinstance(audio, dict):
             return audio.get("sample_rate", 44100)
         return 44100
     def _empty_audio(self):
         return {
-            "waveform": torch.zeros((2, 44100), dtype=torch.float32),
+            "waveform": torch.zeros((1, 2, 44100), dtype=torch.float32),
             "sample_rate": 44100
         }

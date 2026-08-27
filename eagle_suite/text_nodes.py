@@ -82,6 +82,19 @@ class EagleLoadTextFiles:
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle/文本"
 
+    @classmethod
+    def IS_CHANGED(cls, folder_path, index, max_files):
+        signatures = []
+        if folder_path and os.path.isdir(folder_path):
+            for ext in ("*.txt", "*.md", "*.json"):
+                for path in glob.glob(os.path.join(folder_path, ext)):
+                    try:
+                        stat = os.stat(path)
+                        signatures.append((os.path.basename(path), stat.st_mtime_ns, stat.st_size))
+                    except OSError:
+                        pass
+        return repr((index, max_files, sorted(signatures)))
+
     def load(self, folder_path, index, max_files):
         if not folder_path or not os.path.isdir(folder_path):
             return ("", "", 0)
@@ -157,6 +170,8 @@ class EagleSplitString:
     def split(self, text, separator=",", index=-1):
         if not text.strip():
             return ("", text)
+        if separator == "":
+            return (text.strip(), text)
         parts = [p.strip() for p in text.split(separator) if p.strip()]
         if 0 <= index < len(parts):
             return (parts[index], text)
@@ -188,6 +203,12 @@ class EagleRandomLine:
     RETURN_NAMES = ("result", "all_items")
     FUNCTION = "random"
     CATEGORY = "🦅 Eagle/文本"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        if int(kwargs.get("seed", -1)) < 0:
+            return float("nan")
+        return repr(sorted(kwargs.items()))
 
     def random(self, text, count, join_separator, weight, seed,
                split_mode="按行", split_separator=","):

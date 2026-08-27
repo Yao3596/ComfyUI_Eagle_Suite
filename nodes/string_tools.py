@@ -46,30 +46,3 @@ class EagleStringRows:
 
         lines = text.split("\n")
         return (len(lines), text)
-
-
-class EagleSplitString:
-    """按分隔符分割字符串为列表"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "text": ("STRING", {"default": "", "multiline": True}),
-                "separator": ("STRING", {"default": ","}),
-            },
-            "optional": {
-                "index": ("INT", {"default": -1, "min": -1, "max": 9999}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("结果", "原始文本")
-    FUNCTION = "process"
-    CATEGORY = "🦅 Eagle/工具"
-
-    def process(self, text, separator=",", index=-1):
-        parts = [p.strip() for p in text.split(separator) if p.strip()]
-        if 0 <= index < len(parts):
-            return (parts[index], text)
-        return (", ".join(parts), text)
