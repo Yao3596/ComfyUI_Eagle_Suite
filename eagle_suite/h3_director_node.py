@@ -20,8 +20,11 @@ import time
 import math
 import hashlib
 import uuid
+from pathlib import Path
 
 from aiohttp import web
+from PIL import Image
+import folder_paths
 
 from .route_registry import route
 from .logger import logger
@@ -41,6 +44,31 @@ try:
     os.makedirs(REF_DIR, exist_ok=True)
 except Exception:
     pass
+
+
+def _comfy_input_root():
+    return Path(folder_paths.get_input_directory()).resolve()
+
+
+def _director_media_dir():
+    path = _comfy_input_root() / "h3_director"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_input_path(relative_name):
+    """Resolve a ComfyUI/input relative path without permitting traversal."""
+    value = str(relative_name or "").replace("\\", "/").lstrip("/")
+    if not value or "\x00" in value:
+        return None
+    root = _comfy_input_root()
+    try:
+        candidate = (root / value).resolve()
+        if root not in (candidate, *candidate.parents):
+            return None
+        return candidate
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 _KIND_NOUN = {
     "person": "a character",
@@ -64,6 +92,7 @@ H3_AUDIO_MODES = ("source_track", "generated_audio", "source_plus_timeline")
 H3_CONTINUATION_MODES = ("guide", "masked_av")
 H3_PLAN_VERSION = 2
 H3_PLAN_TYPE = "H3_CHAIN_PLAN"
+H3_MEDIA_BUNDLE_TYPE = "H3_MEDIA_BUNDLE"
 
 
 def _h3_frame_length(seconds):
@@ -172,6 +201,90 @@ def _numbered_media(project):
     return result
 
 
+_MEDIA_TAG_RE = re.compile(r"<(Picture|Video|Audio)\s+(-?\d+)>", re.IGNORECASE)
+
+
+def _build_plan_preflight(project, plan):
+    """在进入耗时的 H3 生成链之前检查计划与素材引用。
+
+    warn 只记录错误标签，strict 会阻止流水线，off 则不检查文本标签。
+    端口数量与裁剪区间属于数据完整性问题，始终作为硬错误。
+    """
+    policy = str(_safe_get(project, "referencePolicy", "warn") or "warn").lower()
+    if policy not in ("off", "warn", "strict"):
+        policy = "warn"
+    errors, warnings = [], []
+    media = list(plan.get("reference_media") or [])
+    counts = {
+        kind: sum(1 for item in media if item.get("type") == kind)
+        for kind in ("image", "video", "audio")
+    }
+
+    limits = {"image": 9, "video": 3, "audio": 3}
+    for kind, limit in limits.items():
+        if counts[kind] > limit:
+            errors.append(f"{kind} 参考素材 {counts[kind]} 个，超过端口上限 {limit} 个")
+
+    seen_names = set()
+    for offset, item in enumerate(media, start=1):
+        filename = str(item.get("filename") or "").strip()
+        key = (str(item.get("type") or "image"), filename.casefold())
+        if filename and key in seen_names:
+            warnings.append(f"参考素材重复: {filename}")
+        seen_names.add(key)
+        duration = float(item.get("duration", 0.0) or 0.0)
+        trim_start = float(item.get("trim_start", 0.0) or 0.0)
+        trim_end = float(item.get("trim_end", duration) or 0.0)
+        if trim_start < 0 or trim_end < 0:
+            errors.append(f"素材 {offset} 的裁剪时间不能为负数")
+        if duration > 0 and trim_start >= duration:
+            errors.append(f"素材 {offset} 的裁剪起点超出时长")
+        if trim_end > 0 and trim_end <= trim_start:
+            errors.append(f"素材 {offset} 的裁剪终点必须大于起点")
+        if duration > 0 and trim_end > duration + 0.01:
+            errors.append(f"素材 {offset} 的裁剪终点超出时长")
+
+    if policy != "off":
+        tag_counts = {"picture": counts["image"], "video": counts["video"], "audio": counts["audio"]}
+        invalid_tags = []
+        for shot in plan.get("shots") or []:
+            text = str(shot.get("prompt") or "")
+            for match in _MEDIA_TAG_RE.finditer(text):
+                label = match.group(1)
+                index = int(match.group(2))
+                available = tag_counts[label.lower()]
+                if index < 1 or index > available:
+                    invalid_tags.append(
+                        f"{shot.get('id', '未命名镜头')}: <{label} {index}> 无对应素材（可用 {available}）"
+                    )
+        if policy == "strict":
+            errors.extend(invalid_tags)
+        else:
+            warnings.extend(invalid_tags)
+
+    previous_start = -1
+    for offset, shot in enumerate(plan.get("shots") or [], start=1):
+        raw_frames = int(shot.get("raw_frames", 0) or 0)
+        delivered = int(shot.get("delivered_frames", 0) or 0)
+        start = int(shot.get("generation_start_frame", 0) or 0)
+        if raw_frames <= 0 or raw_frames % 17 != 5:
+            errors.append(f"镜头 {offset} 的帧数 {raw_frames} 不是 H3 合法长度 17k+5")
+        if delivered <= 0 or delivered > raw_frames:
+            errors.append(f"镜头 {offset} 的交付帧数 {delivered} 无效")
+        if start < previous_start:
+            errors.append(f"镜头 {offset} 的时间线起点逆序")
+        previous_start = start
+
+    return {
+        "ok": not errors,
+        "policy": policy,
+        "errors": errors,
+        "warnings": warnings,
+        "media_counts": counts,
+        "checked_shots": len(plan.get("shots") or []),
+    }
+
+
 def _used_ref_indices(project):
     """返回有 filename 的参考槽下标列表（0-based）。"""
     images = [item for item in _project_media(project) if item.get("type", "image") == "image"]
@@ -265,10 +378,35 @@ def _strip_dialogue_tags(text):
     return text.strip()
 
 
+def _disabled_scene_tokens(scene):
+    values = _safe_get(scene, "disabledTokens", []) or []
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if str(value or "").strip()]
+
+
+def _active_scene_text(scene, value):
+    """Remove UI-disabled atomic tokens without changing the stored screenplay."""
+    text = str(value or "")
+    for token in _disabled_scene_tokens(scene):
+        text = text.replace(token, "")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def _build_body(project, scene):
-    preamble = _strip_dialogue_tags(_safe_get(scene, "preamble", ""))
+    preamble = _strip_dialogue_tags(_active_scene_text(scene, _safe_get(scene, "preamble", "")))
     detailed = _build_shot_blocks(_safe_get(scene, "shots", []) or [])
-    dialogue = _build_dialogue_block(_safe_get(scene, "dialogues", []) or [])
+    disabled = set(_disabled_scene_tokens(scene))
+    dialogues = []
+    for item in _safe_get(scene, "dialogues", []) or []:
+        if not isinstance(item, dict):
+            continue
+        token = f"<d>[{(item.get('role') or '').strip()}] {(item.get('text') or '').strip()}</d>"
+        if token not in disabled:
+            dialogues.append(item)
+    dialogue = _build_dialogue_block(dialogues)
     sections = [x for x in [preamble, detailed, dialogue] if x]
     return "\n\n".join(sections)
 
@@ -397,12 +535,20 @@ def _build_scene_prompt(project, scene):
         parts.append(detailed)
 
     # 台词块追加到 body（如果存在）
-    dialogue = _build_dialogue_block(_safe_get(scene, "dialogues", []) or [])
+    disabled = set(_disabled_scene_tokens(scene))
+    active_dialogues = []
+    for item in _safe_get(scene, "dialogues", []) or []:
+        if not isinstance(item, dict):
+            continue
+        token = f"<d>[{(item.get('role') or '').strip()}] {(item.get('text') or '').strip()}</d>"
+        if token not in disabled:
+            active_dialogues.append(item)
+    dialogue = _build_dialogue_block(active_dialogues)
     if dialogue:
         parts.append(dialogue)
 
     # preamble（去除已有的 <d> 台词标签，避免重复）
-    preamble = _strip_dialogue_tags(_safe_get(scene, "preamble", ""))
+    preamble = _strip_dialogue_tags(_active_scene_text(scene, _safe_get(scene, "preamble", "")))
     if preamble:
         # 放到最前面（场景前言）
         parts.insert(0, preamble)
@@ -498,8 +644,19 @@ def compile_h3_params(project, scenes, llm_hint=""):
         title = str(_safe_get(s, "title", "")).strip() or f"scene_{index:02d}"
         scene_id = f"scene_{index:02d}_{_slugify(title)}"
 
-        # scene 级 context_length 覆盖
-        shot_context_length = _snap_context_length(_safe_get(s, "contextLength", None))
+        # scene 级 context/audio/steps 覆盖；空值必须继承全局，不能意外回落到 22。
+        scene_context_value = _safe_get(s, "contextLength", None)
+        shot_context_length = (
+            context_length if scene_context_value in (None, "")
+            else _snap_context_length(scene_context_value)
+        )
+        scene_audio_context_value = _safe_get(s, "audioContextLength", None)
+        shot_audio_context_length = (
+            audio_context_length if scene_audio_context_value in (None, "")
+            else _snap_context_length(scene_audio_context_value)
+        )
+        shot_steps = int(_safe_get(s, "defaultSteps", steps) or steps)
+        shot_steps = max(1, min(10000, shot_steps))
         resolved_context_lengths.append(shot_context_length)
 
         # scene 级 continuation_mode 覆盖
@@ -549,21 +706,31 @@ def compile_h3_params(project, scenes, llm_hint=""):
         shot = {
             "index": index,
             "id": scene_id,
+            "source_scene_id": str(_safe_get(s, "id", index)),
             "scene_prompt": scene_prompt,
             "prompt": full_prompt,
             "prompt_hash": _fingerprint(full_prompt),
             "seed": seed,
-            "steps": steps,
+            "steps": shot_steps,
+            # Native Context Loop aliases make the plan directly inspectable
+            # by its Plan/Review tooling while Eagle keeps resolved fields.
+            "duration_seconds": secs,
+            "length": raw_frames,
             "raw_frames": raw_frames,
             "delivered_frames": delivered_frames,
             "generation_start_frame": generation_start_frame,
             "audio_start_seconds": generation_start_frame / float(fps),
             "audio_duration_seconds": raw_frames / float(fps),
+            "reference_tags": sorted(set(
+                match.group(0) for match in _MEDIA_TAG_RE.finditer(full_prompt)
+            )),
         }
 
         # 仅当与全局默认值不同才写入覆盖字段
         if shot_context_length != context_length:
             shot["context_length"] = shot_context_length
+        if shot_audio_context_length != audio_context_length:
+            shot["audio_context_length"] = shot_audio_context_length
         if shot_continuation_mode != continuation_mode:
             shot["continuation_mode"] = shot_continuation_mode
 
@@ -581,6 +748,8 @@ def compile_h3_params(project, scenes, llm_hint=""):
                 old_raw = shot["raw_frames"]
                 # 向上取到 17k+5
                 shot["raw_frames"] = needed_raw + (5 - needed_raw % 17) % 17
+                shot["length"] = shot["raw_frames"]
+                shot["duration_seconds"] = shot["raw_frames"] / float(fps)
                 delta = shot["raw_frames"] - old_raw
                 shot["delivered_frames"] += delta
                 shot["audio_duration_seconds"] = shot["raw_frames"] / float(fps)
@@ -600,6 +769,25 @@ def compile_h3_params(project, scenes, llm_hint=""):
             shot["generation_start_frame"] = sum(s["delivered_frames"] for s in shots_list[:offset])
         shot["audio_start_seconds"] = shot["generation_start_frame"] / float(fps)
 
+    reference_media = [
+        {
+            "id": item.get("id", ""),
+            "type": item.get("type", "image"),
+            "filename": item.get("filename", ""),
+            "name": item.get("name", ""),
+            "duration": float(item.get("duration", 0.0) or 0.0),
+            "trim_start": float(item.get("trimStart", 0.0) or 0.0),
+            "trim_end": float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0),
+        }
+        for item in _project_media(project)
+    ]
+    reference_fingerprint = _fingerprint(reference_media)
+    external_generation_fingerprint = str(generation_fingerprint or "").strip()
+    resolved_generation_fingerprint = _fingerprint({
+        "external": external_generation_fingerprint,
+        "references": reference_fingerprint,
+    })
+
     compatibility = {
         "fps": fps,
         "width": width,
@@ -612,7 +800,9 @@ def compile_h3_params(project, scenes, llm_hint=""):
         "audio_context_length": audio_context_length,
         "segment_crf": segment_crf,
         "video_blend_frames": video_blend_frames,
-        "generation_fingerprint": generation_fingerprint,
+        "generation_fingerprint": resolved_generation_fingerprint,
+        "generation_fingerprint_source": external_generation_fingerprint,
+        "reference_fingerprint": reference_fingerprint,
     }
     if continuation_mode != "guide":
         compatibility["continuation_mode"] = continuation_mode
@@ -624,23 +814,14 @@ def compile_h3_params(project, scenes, llm_hint=""):
         "version": H3_PLAN_VERSION,
         "run_name": run_name,
         "prompt_prefix": prompt_prefix,
+        "defaults": {"duration_seconds": float(_safe_get(project, "globalDuration", 7) or 7), "steps": steps},
         "shots": shots_list,
         "compatibility": compatibility,
         "segment_crf": segment_crf,
         "total_delivered_frames": stitched_frames,
-        "reference_media": [
-            {
-                "id": item.get("id", ""),
-                "type": item.get("type", "image"),
-                "filename": item.get("filename", ""),
-                "name": item.get("name", ""),
-                "duration": float(item.get("duration", 0.0) or 0.0),
-                "trim_start": float(item.get("trimStart", 0.0) or 0.0),
-                "trim_end": float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0),
-            }
-            for item in _project_media(project)
-        ],
+        "reference_media": reference_media,
     }
+    plan["preflight"] = _build_plan_preflight(project, plan)
     plan["plan_hash"] = _fingerprint({
         "compatibility": compatibility,
         "reference_media": plan["reference_media"],
@@ -662,7 +843,9 @@ def compile_h3_params(project, scenes, llm_hint=""):
         f"({stitched_frames / float(fps):.3f}s) at {width}x{height}; "
         f"context={context_length}/{continuation_summary}; "
         f"blend={video_blend_frames}; audio={audio_mode}; "
-        f"refs={media_counts['image']}/{media_counts['video']}/{media_counts['audio']}; run={run_name}"
+        f"refs={media_counts['image']}/{media_counts['video']}/{media_counts['audio']}; "
+        f"preflight={'ok' if plan['preflight']['ok'] else 'failed'}"
+        f"/{len(plan['preflight']['warnings'])}w; run={run_name}"
     )
 
     return plan
@@ -843,50 +1026,139 @@ def _extract_json(text):
     return None
 
 
+def _scene_duration_budget(scene):
+    """Return a stable scene duration budget for all chained skill tasks."""
+    try:
+        seconds = float(scene.get("defaultSeconds", 10) or 10)
+    except (TypeError, ValueError):
+        seconds = 10.0
+    seconds = max(0.1, seconds)
+    label = f"{seconds:.3f}".rstrip("0").rstrip(".")
+    return seconds, label
+
+
+def _skill_reference_context(project, scene):
+    """Describe stable native reference tags to the model without reading media pixels."""
+    disabled = set(_disabled_scene_tokens(scene))
+    lines = []
+    for item, number, tag_name in _numbered_media(project):
+        token = f"<{tag_name} {number}>"
+        if token in disabled:
+            continue
+        media_type = str(item.get("type") or "image")
+        name = str(item.get("name") or item.get("originalName") or item.get("filename") or "").strip()
+        kind = str(item.get("kind") or "reference").strip()
+        retention = str(item.get("retention") or "").strip()
+        details = [media_type, kind]
+        if name:
+            details.append(name)
+        if retention:
+            details.append(retention)
+        lines.append(f"- {token}: " + " | ".join(details))
+    if not lines:
+        return "【当前场景可用参考素材】\n(无)\n"
+    return (
+        "【当前场景可用参考素材】\n" + "\n".join(lines) + "\n"
+        "仅在语义确实匹配时使用上述原生标签；必须逐字保留标签，"
+        "不得虚构未列出的 <Picture N>/<Video N>/<Audio N>。\n"
+    )
+
+
+def _adjacent_scene_context(scenes, scene_index):
+    """Compact handoff context for chained generation across an arbitrary scene count."""
+    if not isinstance(scenes, list) or not (0 <= scene_index < len(scenes)):
+        return ""
+    lines = []
+    if scene_index > 0:
+        previous = scenes[scene_index - 1] if isinstance(scenes[scene_index - 1], dict) else {}
+        previous_text = _active_scene_text(previous, previous.get("preamble", ""))
+        previous_shots = previous.get("shots") or []
+        tail = ""
+        if previous_shots and isinstance(previous_shots[-1], dict):
+            tail = str(previous_shots[-1].get("content") or "").strip()
+        if not tail:
+            tail = previous_text[-1200:]
+        lines.append(
+            "上一场景：%s（%s 秒）\n承接结尾：%s" % (
+                str(previous.get("title") or "未命名"),
+                str(previous.get("defaultSeconds") or 10),
+                tail or "(尚无内容)",
+            )
+        )
+    if scene_index + 1 < len(scenes):
+        following = scenes[scene_index + 1] if isinstance(scenes[scene_index + 1], dict) else {}
+        lines.append(
+            "下一场景：%s（%s 秒）；当前场景结尾应留下可执行的视觉/动作承接。" % (
+                str(following.get("title") or "未命名"),
+                str(following.get("defaultSeconds") or 10),
+            )
+        )
+    return "【相邻场景承接】\n" + "\n\n".join(lines) + "\n" if lines else ""
+
+
 def _build_skill_prompts(task, project, scene, hint, director_skill="", request=None):
     """返回 (system, user) 提示词。"""
     foundation = (project.get("foundation") or "").strip()
     director_skill = (director_skill or project.get("director_skill") or "").strip()
     director_skill = _compose_director_guidance(task, request, director_skill)
     title = (scene.get("title") or "").strip() or "未命名场景"
-    preamble = (scene.get("preamble") or "").strip()
+    preamble = _active_scene_text(scene, scene.get("preamble") or "")
+    _duration_seconds, duration_label = _scene_duration_budget(scene)
+    duration_context = f"【场景时长预算】{duration_label} 秒（以导演台当前场景设置为准）\n"
     director_ctx = ""
     if director_skill:
         director_ctx = "【导演技能库 / Director Skill】\n" + director_skill + "\n\n"
+    request = request if isinstance(request, dict) else {}
+    reference_ctx = _skill_reference_context(project, scene)
+    chain_ctx = str(request.get("_chainContext") or "")
+    common_ctx = reference_ctx + (chain_ctx + "\n" if chain_ctx else "")
     if task == "script":
         user = (
             "【Shared prompt / 世界构建】\n" + (foundation or "(无，请自行设定统一风格)") + "\n\n"
+            + common_ctx + "\n"
             "【场景标题】" + title + "\n"
+            + duration_context +
             "【用户额外指令】" + (hint or "(无)") + "\n\n"
             "请撰写该场景的完整台本（screenplay）。要求：\n"
             "1. 用 [Shot 1]、[Shot 2]… 标记划分镜头；\n"
-            "2. 每个镜头写英文描述（主体 / 动作 / 运镜 / 氛围），单镜头约 10 秒且自包含，"
+            f"2. 根据 {duration_label} 秒的场景总预算决定镜头数量和节奏；"
+            f"各镜头时长合计约为 {duration_label} 秒，"
+            "不要套用固定的 10 秒单镜头假设；\n"
+            "3. 每个镜头写英文描述（主体 / 动作 / 运镜 / 氛围）且自包含，"
             "不得出现“如前所述”“同上”等承接语；\n"
-            "3. 角色台词用内联标签：<d>[角色名] 中文台词（≤30 字）</d>；\n"
-            "4. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
+            "4. 角色台词用内联标签：<d>[角色名] 中文台词（≤30 字）</d>；\n"
+            "5. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
         )
         return _SKILL_SYSTEM, director_ctx + user
     if task == "shots":
         user = (
             "【场景标题】" + title + "\n"
+            + duration_context +
+            common_ctx + "\n" +
             "【现有台本】\n" + (preamble or "(空)") + "\n\n"
             "请将台本拆分为镜头条目。输出 ONLY JSON：\n"
             "{\"shots\":[{\"title\":\"\",\"time\":\"00:00.000\",\"framing\":\"\","
             "\"content\":\"\",\"camera\":\"\",\"lens\":\"\",\"intent\":\"\","
             "\"action\":\"\",\"sound\":\"\",\"transitionIn\":\"\",\"transitionOut\":\"\","
             "\"estSeconds\":2.5}]}\n"
-            "要求：time 顺序递增；estSeconds 之和约等于场景时长；framing 用 "
+            "要求：time 从 00:00.000 起按顺序递增；每个 estSeconds 必须大于 0，"
+            f"所有 estSeconds 之和约等于 {duration_label} 秒，且不得超出该场景预算；framing 用 "
             "extreme_close_up / close_up / medium_shot / cowboy_shot / full_body / wide_shot "
             "之一或空；content 为英文镜头描述。"
         )
         return _SKILL_SYSTEM, director_ctx + user
     if task == "dialogue":
+        shots_context = json.dumps(scene.get("shots") or [], ensure_ascii=False)
         user = (
             "【场景标题】" + title + "\n"
+            + duration_context +
+            common_ctx + "\n" +
             "【现有台本】\n" + (preamble or "(空)") + "\n\n"
+            "【已生成分镜】\n" + (shots_context or "[]") + "\n\n"
             "请提取 / 补全所有台词。输出 ONLY JSON：\n"
             "{\"dialogues\":[{\"role\":\"角色名\",\"text\":\"中文台词（≤30 字）\",\"time\":\"00:00.000\"}]}\n"
-            "要求：text 为简洁中文，≤30 字；time 为该句出现的大致时间码。"
+            "要求：text 为简洁中文，≤30 字；time 为该句出现的大致时间码，"
+            f"必须落在 0 至 {duration_label} 秒的场景范围内。"
         )
         return _SKILL_SYSTEM, director_ctx + user
     return _SKILL_SYSTEM, ""
@@ -901,9 +1173,16 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         "transport": None, "error": None,
         "skill_profile": request.get("profile", "balanced"),
         "skill_policy": request.get("skillPolicy", "merge"),
+        "requestId": request.get("requestId", ""),
+        "batchId": request.get("batchId", ""),
+        "batchIndex": request.get("batchIndex", 0),
+        "batchTotal": request.get("batchTotal", 1),
+        "mergeMode": request.get("mergeMode", "overwrite"),
     }
     try:
-        tasks = request.get("tasks") or []
+        requested_tasks = set(request.get("tasks") or [])
+        # The generation chain is semantic, not checkbox-click order.
+        tasks = [task for task in ("script", "shots", "dialogue") if task in requested_tasks]
         temperature = request.get("temperature", 0.7) or 0.7
         pref = request.get("modelPref", "local")
         hint = request.get("hint", "") or ""
@@ -916,28 +1195,34 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         out["transport"] = kind
 
         scene = None
-        for s in scenes:
-            if s.get("id") == out["scene_id"]:
-                scene = s
+        scene_index = -1
+        for index, candidate in enumerate(scenes):
+            if str(candidate.get("id")) == str(out["scene_id"]):
+                scene = candidate
+                scene_index = index
                 break
-        if scene is None and scenes:
-            scene = scenes[0]
         if scene is None:
-            out["error"] = "没有可用场景。"
+            out["error"] = f"目标场景不存在或 sceneId 已过期: {out['scene_id']}"
             return out
         out["scene_id"] = scene.get("id")
         out["sceneId"] = scene.get("id")
 
         cur = {
+            "id": scene.get("id"),
+            "title": scene.get("title", ""),
+            "defaultSeconds": scene.get("defaultSeconds", 10),
             "preamble": scene.get("preamble", ""),
             "shots": scene.get("shots", []),
             "dialogues": scene.get("dialogues", []),
+            "disabledTokens": scene.get("disabledTokens", []),
         }
+        request_context = dict(request)
+        request_context["_chainContext"] = _adjacent_scene_context(scenes, scene_index)
         for task in tasks:
             if task not in ("script", "shots", "dialogue"):
                 continue
             sys_p, user_p = _build_skill_prompts(
-                task, project, cur, hint, director_skill, request=request
+                task, project, cur, hint, director_skill, request=request_context
             )
             raw = _call_llm(kind, transport, sys_p, user_p, temperature)
             parsed = _extract_json(raw)
@@ -989,13 +1274,13 @@ def _fit_to_max_megapixels(img, max_mp, filename=None):
 
 
 def _load_ref_tensor(filename, max_megapixels=1.5):
-    """从 REF_DIR 加载单张参考图，按 max_megapixels 限制缩放，返回 [1,H,W,3] float32 张量；失败返回 None。"""
+    """加载单张参考图并限制像素量；兼容旧私有目录与 ComfyUI/input。"""
     try:
         from PIL import Image
         import numpy as np
         import torch
-        path = os.path.join(REF_DIR, os.path.basename(filename))
-        if not os.path.isfile(path):
+        path = _media_path(filename)
+        if not path:
             return None
         img = Image.open(path).convert("RGB")
         img = _fit_to_max_megapixels(img, max_megapixels, filename=filename)
@@ -1007,11 +1292,17 @@ def _load_ref_tensor(filename, max_megapixels=1.5):
 
 
 def _media_path(filename):
-    """Resolve a saved director media filename without allowing directory traversal."""
+    """Resolve legacy director media or a safe ComfyUI/input relative path."""
     if not filename:
         return ""
-    path = os.path.join(REF_DIR, os.path.basename(str(filename)))
-    return path if os.path.isfile(path) else ""
+    value = str(filename).replace("\\", "/")
+
+    input_path = _safe_input_path(value)
+    if input_path and input_path.is_file():
+        return str(input_path)
+
+    legacy = os.path.join(REF_DIR, os.path.basename(value))
+    return legacy if os.path.isfile(legacy) else ""
 
 
 def _probe_media_duration(path, media_type):
@@ -1162,22 +1453,11 @@ class EagleH3DirectorNode:
             },
         }
 
-    # 与 ethanfel MiniMaxH3ChainPlan 对齐：plan 为 H3_CHAIN_PLAN 自定义类型
-    # MiniMax H3 的 Autogrow 参考输入每个插槽接收一个普通 IMAGE/AUDIO，
-    # 不能接 ComfyUI 的 list-output。因此视频与音频按目标插槽逐路输出。
-    # 前 10 个输出的位置保持不变，减少旧工作流迁移成本。
-    RETURN_TYPES = (H3_PLAN_TYPE, "IMAGE", "INT", "INT", "INT", "INT", "STRING",
-                    "IMAGE", "AUDIO", "STRING",
-                    "AUDIO", "IMAGE", "AUDIO", "IMAGE", "AUDIO", "AUDIO", "AUDIO")
-    RETURN_NAMES = ("plan", "REF_IMAGES", "width", "height", "clip_count",
-                    "video_blend_frames", "summary",
-                    "ref_videos.ref_video_0", "ref_audios.ref_audio_0", "media_mapping",
-                    "ref_video_audios.ref_video_audio_0",
-                    "ref_videos.ref_video_1", "ref_video_audios.ref_video_audio_1",
-                    "ref_videos.ref_video_2", "ref_video_audios.ref_video_audio_2",
-                    "ref_audios.ref_audio_1", "ref_audios.ref_audio_2")
-    OUTPUT_IS_LIST = (False, True, False, False, False, False, False,
-                      False, False, False, False, False, False, False, False, False, False)
+    # 导演台只输出编排数据与一个媒体包。大量媒体插槽由独立的
+    # EagleH3MediaPortsNode 展开，避免 DOM 面板被右侧端口挤压越框。
+    RETURN_TYPES = (H3_PLAN_TYPE, H3_MEDIA_BUNDLE_TYPE, "INT", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("plan", "media_bundle", "width", "height", "clip_count",
+                    "video_blend_frames", "summary")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
 
@@ -1206,11 +1486,17 @@ class EagleH3DirectorNode:
                 project = {}
             project["foundation"] = foundation_input.strip()
 
-        # 导演技能库节点输出的技能内容，作为生成上下文（关联导演技能库）
-        if director_skill and director_skill.strip():
-            if not isinstance(project, dict):
-                project = {}
-            project["director_skill"] = director_skill.strip()
+        # 导演台内置选择与外接“导演技能库”节点可以同时工作；完全相同的快照不重复。
+        if not isinstance(project, dict):
+            project = {}
+        embedded_skill = str(project.get("director_skill") or "").strip()
+        connected_skill = str(director_skill or "").strip()
+        skill_layers = []
+        for layer in (embedded_skill, connected_skill):
+            if layer and layer not in skill_layers:
+                skill_layers.append(layer)
+        effective_director_skill = "\n\n---\n\n".join(skill_layers)
+        project["director_skill"] = effective_director_skill
 
         # ── 导演 Skill 生成（手动「生成」按钮触发）──
         if skill_request and skill_request.strip():
@@ -1219,8 +1505,9 @@ class EagleH3DirectorNode:
                 if req.get("run"):
                     result = run_director_skill(
                         project, scenes, req, api_config=api_config, local_model=local_model,
-                        director_skill=director_skill
+                        director_skill=effective_director_skill
                     )
+                    result["skill_layers"] = len(skill_layers)
                     result["node_id"] = node_id
                     try:
                         from server import PromptServer
@@ -1299,13 +1586,57 @@ class EagleH3DirectorNode:
         video_audio_slots = (ref_video_audios + [None, None, None])[:3]
         audio_slots = (ref_audios + [None, None, None])[:3]
 
-        return (plan_data, ref_images, width_val, height_val,
-                clip_count, video_blend_frames_val, summary,
-                video_slots[0], audio_slots[0], media_mapping,
-                video_audio_slots[0],
-                video_slots[1], video_audio_slots[1],
-                video_slots[2], video_audio_slots[2],
-                audio_slots[1], audio_slots[2])
+        media_bundle = {
+            "ref_images": ref_images,
+            "video_slots": video_slots,
+            "video_audio_slots": video_audio_slots,
+            "audio_slots": audio_slots,
+            "media_mapping": media_mapping,
+        }
+        return (plan_data, media_bundle, width_val, height_val,
+                clip_count, video_blend_frames_val, summary)
+
+
+class EagleH3MediaPortsNode:
+    """把导演台媒体包展开为 MiniMax H3 Autogrow 所需的固定插槽。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"media_bundle": (H3_MEDIA_BUNDLE_TYPE,)}}
+
+    RETURN_TYPES = (
+        "IMAGE", "IMAGE", "AUDIO", "STRING", "AUDIO",
+        "IMAGE", "AUDIO", "IMAGE", "AUDIO", "AUDIO", "AUDIO",
+    )
+    RETURN_NAMES = (
+        "REF_IMAGES",
+        "ref_videos.ref_video_0", "ref_audios.ref_audio_0", "media_mapping",
+        "ref_video_audios.ref_video_audio_0",
+        "ref_videos.ref_video_1", "ref_video_audios.ref_video_audio_1",
+        "ref_videos.ref_video_2", "ref_video_audios.ref_video_audio_2",
+        "ref_audios.ref_audio_1", "ref_audios.ref_audio_2",
+    )
+    OUTPUT_IS_LIST = (True, False, False, False, False, False, False, False, False, False, False)
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台"
+
+    def execute(self, media_bundle):
+        bundle = media_bundle if isinstance(media_bundle, dict) else {}
+        ref_images = bundle.get("ref_images") or []
+        video_slots = list(bundle.get("video_slots") or [])
+        video_audio_slots = list(bundle.get("video_audio_slots") or [])
+        audio_slots = list(bundle.get("audio_slots") or [])
+        video_slots = (video_slots + [None, None, None])[:3]
+        video_audio_slots = (video_audio_slots + [None, None, None])[:3]
+        audio_slots = (audio_slots + [None, None, None])[:3]
+        return (
+            ref_images,
+            video_slots[0], audio_slots[0], bundle.get("media_mapping", "[]"),
+            video_audio_slots[0],
+            video_slots[1], video_audio_slots[1],
+            video_slots[2], video_audio_slots[2],
+            audio_slots[1], audio_slots[2],
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1317,10 +1648,54 @@ _VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 _AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 
 
+def _validate_uploaded_image(path):
+    """Decode and verify an uploaded image before exposing it through the proxy."""
+    with Image.open(path) as uploaded:
+        if uploaded.width * uploaded.height > 80_000_000:
+            raise ValueError("image pixel count too large")
+        uploaded.verify()
+
+
+@route("GET", "/h3_director/input_images")
+async def list_input_images(request):
+    """List safe image references under ComfyUI/input for the director picker."""
+    try:
+        root = _comfy_input_root()
+        items = []
+        if root.is_dir():
+            for path in root.rglob("*"):
+                if len(items) >= 5000:
+                    break
+                try:
+                    if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+                        continue
+                    resolved = path.resolve()
+                    if root not in resolved.parents:
+                        continue
+                    relative = path.relative_to(root).as_posix()
+                    stat = path.stat()
+                    items.append({
+                        "path": relative,
+                        "name": path.name,
+                        "subfolder": path.parent.relative_to(root).as_posix()
+                            if path.parent != root else "",
+                        "size": int(stat.st_size),
+                        "mtime": int(stat.st_mtime_ns),
+                    })
+                except (OSError, RuntimeError, ValueError):
+                    continue
+        items.sort(key=lambda item: item["path"].lower())
+        return web.json_response({"success": True, "items": items})
+    except Exception as error:
+        logger.warning(f"[EagleH3Director] input 图片列表失败: {error}")
+        return web.json_response({"success": False, "error": str(error)}, status=500)
+
+
 @route("POST", "/h3_director/upload_media")
 async def upload_media(request):
     """Save one director-owned image/video/audio reference and return normalized metadata."""
     try:
+        media_dir = _director_media_dir()
         reader = await request.multipart()
         field = await reader.next()
         if field is None:
@@ -1337,7 +1712,8 @@ async def upload_media(request):
             return web.json_response({"success": False, "error": "unsupported type"}, status=400)
 
         filename = f"media_{time.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:10]}{ext}"
-        out_path = os.path.join(REF_DIR, filename)
+        out_path = str(media_dir / filename)
+        relative_name = f"h3_director/{filename}"
         total = 0
         max_bytes = {
             "image": 64 * 1024 * 1024,
@@ -1368,10 +1744,7 @@ async def upload_media(request):
         duration = _probe_media_duration(out_path, media_type)
         try:
             if media_type == "image":
-                with Image.open(out_path) as uploaded:
-                    if uploaded.width * uploaded.height > 80_000_000:
-                        raise ValueError("image pixel count too large")
-                    uploaded.verify()
+                _validate_uploaded_image(out_path)
             elif duration <= 0:
                 raise ValueError("media stream could not be validated")
         except Exception as validation_error:
@@ -1385,7 +1758,7 @@ async def upload_media(request):
             "item": {
                 "id": f"media-{uuid.uuid4().hex}",
                 "type": media_type,
-                "filename": filename,
+                "filename": relative_name,
                 "originalName": original_name,
                 "name": "",
                 "kind": "person" if media_type == "image" else "reference",
@@ -1393,7 +1766,9 @@ async def upload_media(request):
                 "duration": round(duration, 4),
                 "trimStart": 0.0,
                 "trimEnd": round(duration, 4),
-                "url": "/h3_director/media?filename=" + filename,
+                "source": "input",
+                "managed": True,
+                "url": "",
             },
         })
     except Exception as e:
@@ -1417,10 +1792,23 @@ async def media_proxy(request):
 @route("DELETE", "/h3_director/media")
 async def delete_media(request):
     """Delete only files created inside the director reference directory."""
-    filename = os.path.basename(request.query.get("filename", ""))
+    raw_name = request.query.get("filename", "")
+    filename = os.path.basename(str(raw_name).replace("\\", "/"))
     if not filename.startswith(("media_", "ref_")):
         return web.json_response({"success": False, "error": "invalid filename"}, status=400)
-    path = _media_path(filename)
+    legacy_candidate = Path(REF_DIR) / filename
+    path = str(legacy_candidate) if legacy_candidate.is_file() else ""
+    input_candidate = _safe_input_path(raw_name)
+    director_root = _director_media_dir().resolve()
+    if input_candidate and input_candidate.is_file() and director_root in input_candidate.parents:
+        path = str(input_candidate)
+    elif path:
+        try:
+            legacy_root = Path(REF_DIR).resolve()
+            if legacy_root not in Path(path).resolve().parents:
+                path = ""
+        except (OSError, RuntimeError, ValueError):
+            path = ""
     if not path:
         return web.json_response({"success": True, "deleted": False})
     try:
@@ -1431,8 +1819,9 @@ async def delete_media(request):
 
 @route("POST", "/h3_director/upload_ref")
 async def upload_ref(request):
-    """接收前端上传的参考图，保存到 REF_DIR，返回 {filename}。"""
+    """接收前端上传的参考图，保存到 ComfyUI/input/h3_director。"""
     try:
+        media_dir = _director_media_dir()
         reader = await request.multipart()
         field = await reader.next()
         if field is None:
@@ -1444,7 +1833,8 @@ async def upload_ref(request):
             return web.json_response({"success": False, "error": "unsupported type"}, status=400)
         stamp = time.strftime("%Y%m%d%H%M%S")
         safe_name = f"ref_{stamp}_{abs(hash(disp)) & 0xffffffff}{ext}"
-        out_path = os.path.join(REF_DIR, safe_name)
+        out_path = str(media_dir / safe_name)
+        relative_name = f"h3_director/{safe_name}"
         total = 0
         max_bytes = 25 * 1024 * 1024
         with open(out_path, "wb") as f:
@@ -1471,17 +1861,15 @@ async def upload_ref(request):
                 pass
             return web.json_response({"success": False, "error": "empty"}, status=400)
         try:
-            with Image.open(out_path) as uploaded:
-                if uploaded.width * uploaded.height > 80_000_000:
-                    raise ValueError("image pixel count too large")
-                uploaded.verify()
+            _validate_uploaded_image(out_path)
         except Exception as validation_error:
             try:
                 os.remove(out_path)
             except OSError:
                 pass
             return web.json_response({"success": False, "error": str(validation_error)}, status=400)
-        return web.json_response({"success": True, "filename": safe_name})
+        return web.json_response({"success": True, "filename": relative_name,
+                                  "source": "input", "managed": True})
     except Exception as e:
         logger.warning(f"[EagleH3Director] upload_ref 失败: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -1494,8 +1882,8 @@ async def ref_proxy(request):
         filename = request.query.get("filename", "")
         if not filename:
             return web.Response(status=404)
-        path = os.path.join(REF_DIR, os.path.basename(filename))
-        if not os.path.isfile(path):
+        path = _media_path(filename)
+        if not path:
             return web.Response(status=404)
         return web.FileResponse(path)
     except Exception as e:

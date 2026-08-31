@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, reactive, computed, onMounted, onUnmounted, watch } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 // ============ 样式加载 ============
 // 提示词预设不依赖通用画廊主题：通用主题不会覆盖 pp-* 专用类，缺失时会退回
@@ -24,13 +25,21 @@ function loadStyles() {
     .eagle-prompt-presets-root {
       width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden;
       position: relative; display: flex; flex-direction: column; isolation: isolate;
-      color: var(--fg-color, #e8ebf2); background: var(--comfy-menu-bg, #17181e);
+      color: var(--ppui-text); background: var(--ppui-bg);
       font-family: inherit; font-size: 13px; line-height: 1.35;
-      --ppui-primary: #4a7de0; --ppui-primary-hover: #5a8fe0;
+      --ppui-theme-bg: var(--comfy-menu-bg, var(--bg-color, #17181e));
+      --ppui-text: var(--fg-color, #e8ebf2);
+      --ppui-bg: var(--ppui-theme-bg);
+      --ppui-panel: color-mix(in srgb, var(--ppui-theme-bg) 94%, var(--ppui-text) 6%);
+      --ppui-surface: color-mix(in srgb, var(--ppui-theme-bg) 88%, var(--ppui-text) 12%);
+      --ppui-surface-alt: color-mix(in srgb, var(--ppui-theme-bg) 82%, var(--ppui-text) 18%);
+      --ppui-hover: color-mix(in srgb, var(--ppui-theme-bg) 74%, var(--ppui-text) 26%);
+      --ppui-input: var(--comfy-input-bg, var(--input-bg, color-mix(in srgb, var(--ppui-theme-bg) 97%, #000 3%)));
+      --ppui-border: var(--border-color, color-mix(in srgb, var(--ppui-theme-bg) 68%, var(--ppui-text) 32%));
+      --ppui-muted: var(--descrip-text, color-mix(in srgb, var(--ppui-text) 64%, var(--ppui-theme-bg) 36%));
+      --ppui-primary: var(--p-primary-color, #4a7de0); --ppui-primary-hover: var(--p-primary-hover-color, #5a8fe0);
       --ppui-danger: #a43a3a; --ppui-danger-hover: #bd4747;
-      --ppui-bg: var(--comfy-menu-bg, #17181e); --ppui-surface: #1c1e26;
-      --ppui-surface-alt: #242631; --ppui-border: #3a3e4c;
-      --ppui-text: var(--fg-color, #e8ebf2); --ppui-muted: #9aa2b1; --ppui-radius: 7px;
+      --ppui-radius: 7px;
     }
     .eagle-prompt-presets-root button,
     .eagle-prompt-presets-root input,
@@ -39,46 +48,46 @@ function loadStyles() {
     .eagle-prompt-presets-root button { appearance: none; cursor: pointer; }
     .eagle-prompt-presets-root .ppui-toolbar {
       flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-      padding: 10px 12px; background: #191a21; border-bottom: 1px solid #30323d;
+      padding: 10px 12px; background: var(--ppui-panel); border-bottom: 1px solid var(--ppui-border);
     }
     .eagle-prompt-presets-root .ppui-btn,
     .eagle-prompt-presets-root .ppui-mode-toggle button,
     .eagle-prompt-presets-root .ppui-mode-toggle > span {
-      min-height: 34px; padding: 6px 11px; border: 1px solid #3a3d4b; border-radius: 7px;
+      min-height: 34px; padding: 6px 11px; border: 1px solid var(--ppui-border); border-radius: 7px;
       display: inline-flex; align-items: center; justify-content: center;
-      background: #242631; color: #e6e9f0; cursor: pointer; user-select: none;
+      background: var(--ppui-surface-alt); color: var(--ppui-text); cursor: pointer; user-select: none;
     }
     .eagle-prompt-presets-root .ppui-btn:hover,
     .eagle-prompt-presets-root .ppui-mode-toggle button:hover,
-    .eagle-prompt-presets-root .ppui-mode-toggle > span:hover { background: #303341; }
+    .eagle-prompt-presets-root .ppui-mode-toggle > span:hover { background: var(--ppui-hover); }
     .eagle-prompt-presets-root .ppui-mode-toggle { display: flex; gap: 5px; }
-    .eagle-prompt-presets-root .ppui-mode-toggle .active { background: #2765b8; border-color: #4b8ee8; color: #fff; }
+    .eagle-prompt-presets-root .ppui-mode-toggle .active { background: var(--ppui-primary); border-color: var(--ppui-primary); color: #fff; }
     .eagle-prompt-presets-root .ppui-search {
       flex: 1 1 210px; min-width: 160px; height: 34px; padding: 6px 10px;
-      background: #111217; border: 1px solid #383b49; border-radius: 7px; outline: none;
+      background: var(--ppui-input); border: 1px solid var(--ppui-border); border-radius: 7px; outline: none;
     }
     .eagle-prompt-presets-root .ppui-search:focus,
     .eagle-prompt-presets-root input:focus,
     .eagle-prompt-presets-root textarea:focus,
-    .eagle-prompt-presets-root select:focus { border-color: #4c8ce5; outline: none; }
+    .eagle-prompt-presets-root select:focus { border-color: var(--ppui-primary); outline: none; }
     .eagle-prompt-presets-root .ppui-main {
       flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column;
     }
     .eagle-prompt-presets-root .ppui-sidebar.pp-master {
       min-width: 0 !important; min-height: 0 !important; overflow: auto !important; padding: 10px !important;
       display: block !important; grid-template-columns: none !important;
-      background: #14151b !important; border-right: 1px solid #30323d !important;
+      background: var(--ppui-panel) !important; border-right: 1px solid var(--ppui-border) !important;
     }
     .eagle-prompt-presets-root .pp-master-item {
       width: 100% !important; min-width: 0; min-height: 66px; margin: 0 0 8px; padding: 8px;
       display: grid !important; grid-template-columns: 46px minmax(0, 1fr) auto !important; gap: 9px; align-items: center;
-      text-align: left; border: 1px solid #303442; border-radius: 9px;
-      background: #20222b !important; color: #edf0f8 !important; transition: background .14s ease, border-color .14s ease;
+      text-align: left; border: 1px solid var(--ppui-border); border-radius: 9px;
+      background: var(--ppui-surface) !important; color: var(--ppui-text) !important; transition: background .14s ease, border-color .14s ease;
     }
-    .eagle-prompt-presets-root .pp-master-item:hover { background: #292c38; border-color: #4e78ae; }
-    .eagle-prompt-presets-root .pp-master-item.active { background: #203b63; border-color: #4c8de7; box-shadow: inset 3px 0 #69a6ff; }
+    .eagle-prompt-presets-root .pp-master-item:hover { background: var(--ppui-surface-alt) !important; border-color: var(--ppui-primary); }
+    .eagle-prompt-presets-root .pp-master-item.active { background: color-mix(in srgb, var(--ppui-primary) 30%, var(--ppui-bg) 70%) !important; border-color: var(--ppui-primary); box-shadow: inset 3px 0 var(--ppui-primary); }
     .eagle-prompt-presets-root .pp-master-cover {
-      width: 46px; height: 46px; object-fit: cover; border-radius: 7px; background: #34384a;
+      width: 46px; height: 46px; object-fit: cover; border-radius: 7px; background: var(--ppui-surface-alt);
     }
     .eagle-prompt-presets-root .pp-cover-placeholder {
       display: grid; place-items: center; color: #b8c9e9; font-weight: 700; font-size: 18px;
@@ -86,31 +95,23 @@ function loadStyles() {
     }
     .eagle-prompt-presets-root .pp-master-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
     .eagle-prompt-presets-root .pp-master-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-    .eagle-prompt-presets-root .pp-master-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #a4abba; font-size: 11px; }
+    .eagle-prompt-presets-root .pp-master-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ppui-muted); font-size: 11px; }
     .eagle-prompt-presets-root .pp-var-count { color: #8ec0ff; font-size: 11px; white-space: nowrap; }
-    .eagle-prompt-presets-root .pp-master-group { margin: 0 0 10px; }
-    .eagle-prompt-presets-root .pp-master-group-head {
-      width: 100%; display: flex; align-items: center; gap: 7px; padding: 5px 4px 7px;
-      border: 0; background: transparent; color: #aeb8ca; text-align: left;
-    }
-    .eagle-prompt-presets-root .pp-master-group-title { font-weight: 700; }
-    .eagle-prompt-presets-root .pp-master-group-count { margin-left: auto; font-size: 11px; color: #72809a; }
-    .eagle-prompt-presets-root .pp-master-group-items { display: flex; flex-direction: column; min-width: 0; }
     /* ── 详情面板（右侧） ────────────────────────────── */
     .eagle-prompt-presets-root .pp-detail {
       display: flex; flex-direction: column; min-width: 0; min-height: 0;
       overflow-y: auto; overflow-x: hidden;
-      padding: 15px 17px; background: #191a20; height: 100%;
+      padding: 15px 17px; background: var(--ppui-bg); height: 100%;
     }
     .eagle-prompt-presets-root .pp-detail-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; flex-shrink: 0; }
     .eagle-prompt-presets-root .pp-detail-identity { min-width: 0; display: flex; align-items: center; gap: 10px; flex: 1; }
-    .eagle-prompt-presets-root .pp-detail-cover { width: 58px; height: 58px; object-fit: cover; border-radius: 9px; background: #31354a; }
-    .eagle-prompt-presets-root .pp-detail-title { margin: 0; font-size: 19px; color: #f4f6fb; }
-    .eagle-prompt-presets-root .pp-detail-subtitle { margin-top: 3px; color: #a7adba; }
+    .eagle-prompt-presets-root .pp-detail-cover { width: 58px; height: 58px; object-fit: cover; border-radius: 9px; background: var(--ppui-surface-alt); }
+    .eagle-prompt-presets-root .pp-detail-title { margin: 0; font-size: 19px; color: var(--ppui-text); }
+    .eagle-prompt-presets-root .pp-detail-subtitle { margin-top: 3px; color: var(--ppui-muted); }
     .eagle-prompt-presets-root .pp-detail-tools { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; flex-shrink: 0; }
     .eagle-prompt-presets-root .pp-detail-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 15px; flex-shrink: 0; }
     .eagle-prompt-presets-root .pp-detail-scroll { min-width: 0; flex: 1; }
-    .eagle-prompt-presets-root .pp-detail-section { margin: 11px 0; padding: 12px; border: 1px solid #30333f; border-radius: 9px; background: #202127; }
+    .eagle-prompt-presets-root .pp-detail-section { margin: 11px 0; padding: 12px; border: 1px solid var(--ppui-border); border-radius: 9px; background: var(--ppui-surface); }
     .eagle-prompt-presets-root .pp-detail-section h4 { margin: 0 0 8px; color: #c8d2e5; }
     .eagle-prompt-presets-root .pp-section-label { color: #cbd6eb; font-weight: 700; }
     .eagle-prompt-presets-root .pp-example-line { margin-top: 8px; color: #aab2c1; font-style: italic; }
@@ -118,13 +119,13 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-output-preview,
     .eagle-prompt-presets-root .pp-markdown-preview {
       width: 100%; min-height: 92px; padding: 11px; overflow: auto; border: 1px solid #333743;
-      border-radius: 7px; background: #111217; color: #d7f1dc; white-space: pre-wrap; font-family: Consolas, monospace;
+      border-radius: 7px; background: var(--ppui-input); color: var(--ppui-text); white-space: pre-wrap; font-family: Consolas, monospace;
     }
     .eagle-prompt-presets-root .pp-variable-row { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
     .eagle-prompt-presets-root .pp-variable-row label { min-width: 92px; color: #bfc6d4; }
     .eagle-prompt-presets-root .pp-variable-row input,
     .eagle-prompt-presets-root textarea,
-    .eagle-prompt-presets-root select { background: #111217; border: 1px solid #383b49; border-radius: 6px; padding: 7px 9px; }
+    .eagle-prompt-presets-root select { background: var(--ppui-input); border: 1px solid var(--ppui-border); border-radius: 6px; padding: 7px 9px; }
     .eagle-prompt-presets-root .pp-variable-row input { flex: 1; min-width: 0; }
     .eagle-prompt-presets-root .pp-var-heading,
     .eagle-prompt-presets-root .pp-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -140,14 +141,14 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-var-source { margin-left: 4px; font-size: 10px; }
     .eagle-prompt-presets-root .pp-preview-mode { display: flex; gap: 5px; }
     .eagle-prompt-presets-root .pp-preview-markdown,
-    .eagle-prompt-presets-root .pp-preview-textarea { width: 100%; min-height: 100px; margin-top: 9px; padding: 10px; border: 1px solid #333743; border-radius: 7px; background: #111217; color: #d7f1dc; overflow: auto; white-space: pre-wrap; }
+    .eagle-prompt-presets-root .pp-preview-textarea { width: 100%; min-height: 100px; margin-top: 9px; padding: 10px; border: 1px solid var(--ppui-border); border-radius: 7px; background: var(--ppui-input); color: var(--ppui-text); overflow: auto; white-space: pre-wrap; }
     .eagle-prompt-presets-root .pp-preview-markdown { white-space: normal; overflow-wrap: anywhere; }
     .eagle-prompt-presets-root .pp-preview-markdown h1,
     .eagle-prompt-presets-root .pp-preview-markdown h2,
     .eagle-prompt-presets-root .pp-preview-markdown h3,
     .eagle-prompt-presets-root .pp-preview-markdown h4,
     .eagle-prompt-presets-root .pp-preview-markdown h5,
-    .eagle-prompt-presets-root .pp-preview-markdown h6 { margin: .75em 0 .4em; line-height: 1.25; color: #edf2ff; }
+    .eagle-prompt-presets-root .pp-preview-markdown h6 { margin: .75em 0 .4em; line-height: 1.25; color: var(--ppui-text); }
     .eagle-prompt-presets-root .pp-preview-markdown p { margin: .55em 0; }
     .eagle-prompt-presets-root .pp-preview-markdown ul,
     .eagle-prompt-presets-root .pp-preview-markdown ol { margin: .5em 0; padding-left: 1.6em; }
@@ -156,12 +157,12 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-preview-markdown code { padding: 1px 4px; border-radius: 4px; background: #252835; color: #ffd8a8; }
     .eagle-prompt-presets-root .pp-preview-markdown pre code { padding: 0; background: transparent; color: inherit; }
     .eagle-prompt-presets-root .pp-preview-markdown hr { border: 0; border-top: 1px solid #393d49; margin: 12px 0; }
-    .eagle-prompt-presets-root .ppui-btn.primary { background: #2765b8; border-color: #4b8ee8; color: #fff; }
+    .eagle-prompt-presets-root .ppui-btn.primary { background: var(--ppui-primary); border-color: var(--ppui-primary); color: #fff; }
     .eagle-prompt-presets-root .ppui-toolbar-sep { flex: 1 1 auto; min-width: 8px; }
     .eagle-prompt-presets-root .ppui-badge {
       display: inline-flex; align-items: center; min-height: 22px; padding: 2px 7px;
-      border: 1px solid #46506a; border-radius: 999px; background: #282c3a;
-      color: #c8d4e8; font-size: 11px; white-space: nowrap;
+      border: 1px solid var(--ppui-border); border-radius: 999px; background: var(--ppui-surface-alt);
+      color: var(--ppui-text); font-size: 11px; white-space: nowrap;
     }
     .eagle-prompt-presets-root .ppui-btn-sm { min-height: 28px; padding: 4px 8px; }
     .eagle-prompt-presets-root .ppui-danger {
@@ -194,11 +195,11 @@ function loadStyles() {
     }
     .eagle-prompt-presets-root .ppui-settings-panel {
       width: min(640px, 100%) !important; max-height: calc(100% - 12px) !important;
-      padding: 18px !important; overflow: auto !important; border: 1px solid #3a3e4c;
-      border-radius: 10px; background: #1c1e26 !important; box-shadow: 0 18px 48px rgba(0,0,0,.5);
+      padding: 18px !important; overflow: auto !important; border: 1px solid var(--ppui-border);
+      border-radius: 10px; background: var(--ppui-panel) !important; box-shadow: 0 18px 48px rgba(0,0,0,.5);
     }
-    .eagle-prompt-presets-root .pp-setting-card { margin-bottom: 16px; padding: 14px; border: 1px solid #2f3340; border-radius: 10px; background: #181a21; }
-    .eagle-prompt-presets-root .pp-setting-card > h4 { margin: 0 0 12px; font-size: 14px; color: #e6ecf7; display: flex; align-items: center; gap: 8px; }
+    .eagle-prompt-presets-root .pp-setting-card { margin-bottom: 16px; padding: 14px; border: 1px solid var(--ppui-border); border-radius: 10px; background: var(--ppui-surface); }
+    .eagle-prompt-presets-root .pp-setting-card > h4 { margin: 0 0 12px; font-size: 14px; color: var(--ppui-text); display: flex; align-items: center; gap: 8px; }
     .eagle-prompt-presets-root .pp-setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
     .eagle-prompt-presets-root .pp-setting-grid .pp-full { grid-column: 1 / -1; }
     .eagle-prompt-presets-root .pp-field { display: flex; flex-direction: column; gap: 4px; }
@@ -210,7 +211,7 @@ function loadStyles() {
     }
     .eagle-prompt-presets-root .pp-settings-title {
       position:sticky; top:0; z-index:2; margin:0!important; padding:14px 18px;
-      border-bottom:1px solid #343844; background:#1c1e26;
+      border-bottom:1px solid var(--ppui-border); background:var(--ppui-panel);
     }
     .eagle-prompt-presets-root .ppui-settings-panel > .pp-setting-card { margin:12px 16px 0; }
     .eagle-prompt-presets-root .pp-setting-card .ppui-search,
@@ -222,7 +223,7 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-setting-card input[type="checkbox"] { width:16px!important; height:16px!important; min-height:16px!important; }
     .eagle-prompt-presets-root .pp-settings-footer {
       position:sticky; bottom:0; z-index:2; justify-content:flex-end; margin:12px 0 0!important;
-      padding:11px 16px!important; border-top:1px solid #343844!important; background:#191b22;
+      padding:11px 16px!important; border-top:1px solid var(--ppui-border)!important; background:var(--ppui-panel);
     }
     .eagle-prompt-presets-root .pp-settings-message { margin:12px 16px 0; padding:8px 10px; border:1px solid #3c5c83; border-radius:6px; background:#1d2b3d; color:#9fc7fa; }
     .eagle-prompt-presets-root .pp-settings-message.error { border-color:#81414a; background:#3b2227; color:#ff9eaa; }
@@ -230,8 +231,20 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-test-result { padding: 8px 12px; border-radius: 6px; font-size: 12px; }
     .eagle-prompt-presets-root .pp-test-result.ok { background: rgba(76,175,80,.12); border: 1px solid #4caf50; color: #81c784; }
     .eagle-prompt-presets-root .pp-test-result.fail { background: rgba(244,67,54,.12); border: 1px solid #f44336; color: #e57373; }
-    .eagle-prompt-presets-root .pp-cover-editor { display: flex; gap: 10px; padding: 10px; border: 1px dashed #4b5266; border-radius: 8px; background: #15161c; }
-    .eagle-prompt-presets-root .pp-cover-fallback { width: 80px; height: 80px; display: grid; place-items: center; border-radius: 6px; background: #334461; color: #dbeaff; font-size: 24px; font-weight: 700; }
+    .eagle-prompt-presets-root .pp-cover-editor { display:flex; align-items:center; gap:8px; min-height:0; padding:7px; border:1px dashed var(--ppui-border); border-radius:8px; background:var(--ppui-panel); }
+    .eagle-prompt-presets-root .pp-cover-fallback { width:44px; height:44px; flex:0 0 44px; display:grid; place-items:center; border-radius:6px; background:var(--ppui-surface-alt); color:var(--ppui-text); font-size:18px; font-weight:700; }
+    .eagle-prompt-presets-root .pp-cover-editor .ppui-search { flex:0 0 auto; width:100%; height:32px; min-height:32px; }
+    .eagle-prompt-presets-root .pp-master-item { position:relative; padding-right:32px; }
+    .eagle-prompt-presets-root .pp-template-delete {
+      position:absolute; top:6px; right:6px; width:20px; height:20px; padding:0; min-height:20px;
+      display:flex; align-items:center; justify-content:center; border:0; border-radius:4px;
+      background:transparent; color:var(--ppui-muted); font-size:15px; line-height:1;
+      opacity:0; pointer-events:none; transition:opacity .12s ease, background .12s ease, color .12s ease;
+    }
+    .eagle-prompt-presets-root .pp-master-item:hover .pp-template-delete,
+    .eagle-prompt-presets-root .pp-master-item:focus-within .pp-template-delete { opacity:1; pointer-events:auto; }
+    .eagle-prompt-presets-root .pp-template-delete:hover,
+    .eagle-prompt-presets-root .pp-template-delete:focus-visible { background:var(--ppui-danger); color:#fff; outline:none; }
     /* ── 导演技能面板 ────────────────────────────── */
     .eagle-prompt-presets-root .pp-director-layout {
       display: grid; grid-template-columns: 220px 1fr; width: 100%; height: 100%;
@@ -239,11 +252,11 @@ function loadStyles() {
     }
     .eagle-prompt-presets-root .pp-director-sidebar {
       display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-      background: #14151b; border-right: 1px solid #30323d;
+      background: var(--ppui-panel); border-right: 1px solid var(--ppui-border);
     }
     .eagle-prompt-presets-root .pp-sidebar-head {
       flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-      padding: 10px 12px; border-bottom: 1px solid #30323d;
+      padding: 10px 12px; border-bottom: 1px solid var(--ppui-border);
     }
     .eagle-prompt-presets-root .pp-sidebar-head h3 { margin: 0; font-size: 13px; color: #c8d4e8; }
     .eagle-prompt-presets-root .pp-skills-list {
@@ -251,19 +264,19 @@ function loadStyles() {
       display: flex; flex-direction: column; gap: 6px;
     }
     .eagle-prompt-presets-root .pp-skill-item {
-      width: 100%; padding: 8px 10px; text-align: left; border: 1px solid #2e3040;
-      border-radius: 7px; background: #20222b; color: #e0e4ef; cursor: pointer;
+      width: 100%; padding: 8px 10px; text-align: left; border: 1px solid var(--ppui-border);
+      border-radius: 7px; background: var(--ppui-surface); color: var(--ppui-text); cursor: pointer;
     }
-    .eagle-prompt-presets-root .pp-skill-item:hover { background: #292d3d; border-color: #4a6fa0; }
-    .eagle-prompt-presets-root .pp-skill-item.active { background: #1d3557; border-color: #4c8de7; }
+    .eagle-prompt-presets-root .pp-skill-item:hover { background: var(--ppui-surface-alt); border-color: var(--ppui-primary); }
+    .eagle-prompt-presets-root .pp-skill-item.active { background: color-mix(in srgb,var(--ppui-primary) 30%,var(--ppui-bg) 70%); border-color: var(--ppui-primary); }
     .eagle-prompt-presets-root .pp-skill-name { font-weight: 600; font-size: 13px; }
     .eagle-prompt-presets-root .pp-skill-meta { color: #8a90a0; font-size: 11px; margin-top: 2px; }
     .eagle-prompt-presets-root .pp-director-main {
-      display: flex; flex-direction: column; min-height: 0; overflow: hidden; background: #191a20;
+      display: flex; flex-direction: column; min-height: 0; overflow: hidden; background: var(--ppui-bg);
     }
     .eagle-prompt-presets-root .pp-director-toolbar {
       flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-      padding: 10px 14px; border-bottom: 1px solid #2c2e38; background: #1e1f27;
+      padding: 10px 14px; border-bottom: 1px solid var(--ppui-border); background: var(--ppui-panel);
     }
     .eagle-prompt-presets-root .pp-director-tools { display: flex; gap: 7px; }
     .eagle-prompt-presets-root .pp-director-content {
@@ -277,13 +290,13 @@ function loadStyles() {
     }
     .eagle-prompt-presets-root .pp-director-preview {
       min-height: 80px; max-height: 240px; overflow: auto; padding: 10px;
-      border: 1px solid #333743; border-radius: 7px; background: #111217;
+      border: 1px solid var(--ppui-border); border-radius: 7px; background: var(--ppui-input);
       color: #d7f1dc; white-space: normal; overflow-wrap: anywhere;
     }
     .eagle-prompt-presets-root .pp-filmstrip-grid {
       display: flex; flex-wrap: wrap; gap: 8px; padding: 8px;
-      border: 2px dashed #3a3e4c; border-radius: 8px; min-height: 80px;
-      background: #15161c;
+      border: 2px dashed var(--ppui-border); border-radius: 8px; min-height: 80px;
+      background: var(--ppui-panel);
     }
     .eagle-prompt-presets-root .pp-filmstrip-item {
       position: relative; width: 80px; height: 60px; border-radius: 6px; overflow: hidden;
@@ -455,8 +468,8 @@ var TemplateEditor = {
                 onDrop: function(e) { e.preventDefault(); uploadCover(e.dataTransfer.files && e.dataTransfer.files[0]); }
               }, [
                 form.cover
-                  ? h("img", { src: templateCoverUrl(form.cover), style: { width: "54px", height: "54px", objectFit: "cover", borderRadius: "6px", flex: "0 0 auto" } })
-                  : h("span", { class: "pp-cover-fallback", style: { width: "54px", height: "54px" } }, (form.Label || "P").slice(0, 1)),
+                  ? h("img", { src: templateCoverUrl(form.cover), style: { width: "44px", height: "44px", objectFit: "cover", borderRadius: "6px", flex: "0 0 44px" } })
+                  : h("span", { class: "pp-cover-fallback" }, (form.Label || "P").slice(0, 1)),
                 h("div", { style: { flex: 1, display: "flex", flexDirection: "column", gap: "8px" } }, [
                   h("input", {
                     class: "ppui-search",
@@ -928,7 +941,6 @@ var PromptPresetsApp = {
     var variableValues = reactive({});
     var externalVariableValues = reactive({});
     var previewMode = ref("markdown");
-    var collapsedGroups = reactive({});
     var errorMessage = ref("");
     var showEditor = ref(false);
     var editingTemplate = ref(null);
@@ -950,7 +962,6 @@ var PromptPresetsApp = {
     if (typeof restoredState.activeVariable === "string") activeVariable.value = restoredState.activeVariable;
     if (restoredState.previewMode === "source" || restoredState.previewMode === "markdown") previewMode.value = restoredState.previewMode;
     if (restoredState.activeTab === "presets") activeTab.value = restoredState.activeTab;
-    if (restoredState.collapsedGroups && typeof restoredState.collapsedGroups === "object") Object.assign(collapsedGroups, restoredState.collapsedGroups);
     if (restoredState.variableValues && typeof restoredState.variableValues === "object") Object.assign(variableValues, restoredState.variableValues);
     Object.assign(variableValues, restoredVariables);
 
@@ -963,7 +974,6 @@ var PromptPresetsApp = {
         activeVariable: activeVariable.value,
         previewMode: previewMode.value,
         activeTab: activeTab.value,
-        collapsedGroups: Object.assign({}, collapsedGroups),
         variableValues: Object.assign({}, variableValues)
       };
       var currentStateWidget = nodeWidget("ui_state");
@@ -1013,20 +1023,6 @@ var PromptPresetsApp = {
         if (name) seen[name] = true;
       });
       return Object.keys(seen);
-    });
-
-    var templateGroups = computed(function() {
-      var groups = [];
-      var byCategory = {};
-      filteredTemplates.value.forEach(function(template) {
-        var category = template.category || "未分类";
-        if (!byCategory[category]) {
-          byCategory[category] = { category: category, items: [] };
-          groups.push(byCategory[category]);
-        }
-        byCategory[category].items.push(template);
-      });
-      return groups;
     });
 
     var renderedPrompt = computed(function() {
@@ -1169,7 +1165,6 @@ var PromptPresetsApp = {
         activeVariable: activeVariable.value,
         previewMode: previewMode.value,
         activeTab: activeTab.value,
-        collapsedGroups: Object.assign({}, collapsedGroups),
         variableValues: Object.assign({}, variableValues)
       };
     }, persistUiState, { deep: true });
@@ -1223,10 +1218,15 @@ var PromptPresetsApp = {
       }
     }
 
-    async function saveTemplateField(patch) {
-      var t = selectedTemplate.value;
-      if (!t || isReadOnly(t)) return;
+    async function saveTemplateField(t, patch) {
+      if (!t) return;
+      var savingReadOnlyCopy = isReadOnly(t);
       var merged = Object.assign({}, t, patch);
+      if (savingReadOnlyCopy) {
+        merged.id = "";
+        merged.source = "user";
+        merged.Label = (t.Label || "未命名模板") + " 副本";
+      }
       try {
         var response = await fetch("/eaglePromptPresets/save_template", {
           method: "POST",
@@ -1234,9 +1234,19 @@ var PromptPresetsApp = {
           body: JSON.stringify({ template: merged, format: "json" })
         });
         var data = await response.json();
-        if (!data.success) console.warn("[EagleSuite] 字段保存失败:", data.error);
+        if (!data.success) {
+          console.warn("[EagleSuite] 字段保存失败:", data.error);
+          showNotice("保存失败：" + data.error, true);
+          return;
+        }
+        if (savingReadOnlyCopy) {
+          selectedId.value = templateKey(data.data);
+          await loadTemplates();
+          showNotice("只读来源已保存为可编辑副本", false);
+        }
       } catch (e) {
         console.warn("[EagleSuite] 字段保存出错:", e);
+        showNotice("保存出错：" + e.message, true);
       }
     }
 
@@ -1292,12 +1302,20 @@ var PromptPresetsApp = {
     function renderMasterItem(template) {
       var active = templateKey(template) === templateKey(selectedTemplate.value);
       var cover = templateCoverUrl(template.cover);
-      return h("button", {
+      var readOnly = isReadOnly(template);
+      return h("div", {
         key: templateKey(template),
-        type: "button",
+        role: "button",
+        tabindex: "0",
         class: ["pp-master-item", active ? "active" : ""],
         onClick: function() { selectTemplate(template); },
-        onDblclick: function() { selectTemplate(template); applySelected(); }
+        onDblclick: function() { selectTemplate(template); applySelected(); },
+        onKeydown: function(event) {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectTemplate(template);
+          }
+        }
       }, [
         cover
           ? h("img", { class: "pp-master-cover", src: cover, alt: "", loading: "lazy" })
@@ -1309,24 +1327,19 @@ var PromptPresetsApp = {
             h("span", {}, sourceLabel(template))
           ])
         ]),
-        h("span", { class: "pp-var-count" }, extractVariables(template.Instruction).length + " 变量")
-      ]);
-    }
-
-    function renderMasterGroup(group) {
-      var isCollapsed = !!collapsedGroups[group.category];
-      return h("section", { class: ["pp-master-group", isCollapsed ? "collapsed" : ""] }, [
-        h("button", {
+        h("span", { class: "pp-var-count" }, extractVariables(template.Instruction).length + " 变量"),
+        !readOnly ? h("button", {
           type: "button",
-          class: "pp-master-group-head",
-          title: isCollapsed ? "展开分类" : "折叠分类",
-          onClick: function() { collapsedGroups[group.category] = !isCollapsed; }
-        }, [
-          h("span", { class: "pp-tree-caret" }, isCollapsed ? "▸" : "▾"),
-          h("span", { class: "pp-master-group-title" }, group.category),
-          h("span", { class: "pp-master-group-count" }, String(group.items.length))
-        ]),
-        isCollapsed ? null : h("div", { class: "pp-master-group-items" }, group.items.map(renderMasterItem))
+          class: "pp-template-delete",
+          title: "删除“" + (template.Label || "未命名模板") + "”",
+          "aria-label": "删除“" + (template.Label || "未命名模板") + "”",
+          onClick: function(event) {
+            event.stopPropagation();
+            handleDelete(template);
+          },
+          onDblclick: function(event) { event.stopPropagation(); },
+          onKeydown: function(event) { event.stopPropagation(); }
+        }, "×") : null
       ]);
     }
 
@@ -1353,8 +1366,7 @@ var PromptPresetsApp = {
           ]),
           h("div", { class: "pp-detail-tools" }, [
             h("button", { class: "ppui-btn", onClick: function() { handleEdit(template); } }, readOnly ? "✎ 编辑副本" : "✎ 编辑"),
-            h("button", { class: "ppui-btn", onClick: function() { handleDuplicate(template); } }, "另存副本"),
-            !readOnly ? h("button", { class: "ppui-btn", style: { background: "var(--ppui-danger)" }, onClick: function() { handleDelete(template); } }, "删除") : null
+            h("button", { class: "ppui-btn", onClick: function() { handleDuplicate(template); } }, "另存副本")
           ])
         ]),
 
@@ -1364,17 +1376,16 @@ var PromptPresetsApp = {
           h("div", { class: "pp-detail-section" }, [
             h("div", { class: "pp-section-label" }, [
               "指令模板",
-              !readOnly ? h("span", { style: { marginLeft: "8px", fontSize: "11px", color: "#75c4ff" } }, "（可直接编辑，失焦保存）") : null
+              h("span", { class: "pp-external-hint", style: { marginLeft: "8px", fontSize: "11px" } },
+                readOnly ? "（修改后另存为自定义副本）" : "（可直接编辑，失焦保存）")
             ]),
-            readOnly
-              ? h("pre", { class: "pp-template-source" }, String(template.Instruction || ""))
-              : h("textarea", {
-                  class: "ppui-search pp-instruction-edit",
-                  style: { width: "100%", minHeight: "110px", resize: "vertical", fontFamily: "Consolas, monospace", lineHeight: "1.5" },
-                  value: template.Instruction || "",
-                  onInput: function(e) { template.Instruction = e.target.value; applySelected(); },
-                  onBlur: function(e) { saveTemplateField({ Instruction: e.target.value }); }
-                }),
+            h("textarea", {
+              class: "ppui-search pp-instruction-edit",
+              style: { width: "100%", minHeight: "110px", resize: "vertical", fontFamily: "Consolas, monospace", lineHeight: "1.5" },
+              value: template.Instruction || "",
+              onInput: function(e) { template.Instruction = e.target.value; applySelected(); },
+              onBlur: function(e) { saveTemplateField(template, { Instruction: e.target.value }); }
+            }),
             template.example ? h("div", { class: "pp-example-line" }, [h("b", {}, "示例："), String(template.example)]) : null
           ]),
 
@@ -1491,7 +1502,7 @@ var PromptPresetsApp = {
             : h("div", { class: "ppui-main", style: { flex: "1 1 auto", overflow: "hidden", minHeight: "0", height: "100%" } }, [
                 h("div", { style: { display: "grid", gridTemplateColumns: "minmax(250px, 34%) minmax(0, 1fr)", width: "100%", height: "100%", minWidth: "0", minHeight: "0", overflow: "hidden" } }, [
                   h("aside", { class: "ppui-sidebar pp-master" }, filteredTemplates.value.length
-                    ? templateGroups.value.map(renderMasterGroup)
+                    ? filteredTemplates.value.map(renderMasterItem)
                     : [h("div", { class: "ppui-empty" }, "没有匹配的模板")]),
                   renderDetail()
                 ])

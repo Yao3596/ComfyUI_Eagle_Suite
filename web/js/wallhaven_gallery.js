@@ -13,6 +13,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { createApp, reactive, ref, onMounted } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 const PAGE_SIZE = 24;
 

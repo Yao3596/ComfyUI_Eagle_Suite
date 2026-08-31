@@ -452,10 +452,12 @@ async def lora_cache_selection_route(request):
         node_id = str(body.get("node_id", ""))
         selections = body.get("selections", [])
         weights = body.get("weights", {})
+        enabled = body.get("enabled", {})
         if node_id:
             _lora_selection_cache[node_id] = {
                 "selections": selections,
                 "weights": weights,
+                "enabled": enabled,
             }
         return web.json_response({"success": True})
     except Exception as e:
@@ -467,7 +469,7 @@ async def lora_cache_selection_route(request):
 async def lora_cache_selection_get_route(request):
     try:
         node_id = str(request.query.get("node_id", ""))
-        cache = _lora_selection_cache.get(node_id, {"selections": [], "weights": {}})
+        cache = _lora_selection_cache.get(node_id, {"selections": [], "weights": {}, "enabled": {}})
         return web.json_response({"success": True, **cache})
     except Exception as e:
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -1382,12 +1384,14 @@ class EagleLoraGalleryNode:
         # 优先从 selection_data widget 读取（ComfyUI 会把它作为输入参数，变化时触发重算）
         selections = []
         weights = {}
+        enabled_map = {}
         if selection_data and selection_data != "[]":
             try:
                 restored = json.loads(selection_data)
                 if isinstance(restored, dict):
                     selections = restored.get("selections", [])
                     weights = restored.get("weights", {})
+                    enabled_map = restored.get("enabled", {})
                 elif isinstance(restored, list):
                     selections = restored
             except Exception:
@@ -1395,9 +1399,10 @@ class EagleLoraGalleryNode:
 
         # 如果 widget 没有数据，再回退到服务端内存缓存（兼容旧工作流/异常场景）
         if not selections:
-            cache = _lora_selection_cache.get(node_id, {"selections": [], "weights": {}})
+            cache = _lora_selection_cache.get(node_id, {"selections": [], "weights": {}, "enabled": {}})
             selections = cache.get("selections", [])
             weights = cache.get("weights", {})
+            enabled_map = cache.get("enabled", {})
 
         if not selections:
             empty_info = {
@@ -1511,6 +1516,7 @@ class EagleLoraGalleryNode:
             )
 
         applied = []
+        ignored = []
         all_triggers = []
         trigger_groups = []
 
@@ -1521,6 +1527,20 @@ class EagleLoraGalleryNode:
                 continue
             path = item["path"]
             w = float(weights.get(lid, sel.get("weight", 1.0)))
+            is_enabled = sel.get("enabled", enabled_map.get(lid, True)) is not False
+
+            if not is_enabled:
+                relative_name = item.get("rel") or item.get("fileName") or item["name"]
+                ignored.append({
+                    "name": relative_name.replace("/", "\\"),
+                    "weight": w,
+                    "enabled": False,
+                    "note": "已选择但本次忽略",
+                    "triggerWords": "",
+                    "logInfo": "未加载：LoRA 已设为忽略",
+                })
+                logger.info(f"[LoraGallery] 已忽略 LoRA: {item['name']} (weight={w})")
+                continue
 
             try:
                 lora = comfy.utils.load_torch_file(path, safe_load=True)
@@ -1581,8 +1601,10 @@ class EagleLoraGalleryNode:
             trigger_str = "\n".join(line for line in trigger_lines if line)
 
         info_payload = {
-            "loras": applied,
+            "loras": applied + ignored,
             "count": len(applied),
+            "selectedCount": len(applied) + len(ignored),
+            "ignoredCount": len(ignored),
             "triggerWords": ", ".join(all_triggers),
             "triggerSource": trigger_source,
             "triggerConcat": bool(trigger_concat),

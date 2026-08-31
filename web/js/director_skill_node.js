@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
 import { createApp, h, ref, reactive, computed, onMounted, watch } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 console.log("[Eagle Suite] director_skill_node.js module loaded", new Date().toISOString());
 
@@ -77,42 +79,72 @@ function loadStyles() {
   var style = document.createElement("style");
   style.id = "eagle-director-skill-style";
   style.textContent = `
-    .eagle-director-skill-root { position:relative; background:#1e1e1e; color:#d4d4d4; font-size:13px; }
+    .eagle-director-skill-root {
+      position:relative; font-size:13px;
+      --ppui-theme-bg:var(--comfy-menu-bg, var(--bg-color, #1e1e1e));
+      --ppui-text:var(--fg-color, #d4d4d4);
+      --ppui-bg:var(--ppui-theme-bg);
+      --ppui-panel:color-mix(in srgb, var(--ppui-theme-bg) 94%, var(--ppui-text) 6%);
+      --ppui-surface:color-mix(in srgb, var(--ppui-theme-bg) 87%, var(--ppui-text) 13%);
+      --ppui-surface-alt:color-mix(in srgb, var(--ppui-theme-bg) 80%, var(--ppui-text) 20%);
+      --ppui-hover:color-mix(in srgb, var(--ppui-theme-bg) 73%, var(--ppui-text) 27%);
+      --ppui-input:var(--comfy-input-bg, var(--input-bg, color-mix(in srgb, var(--ppui-theme-bg) 97%, #000 3%)));
+      --ppui-border:var(--border-color, color-mix(in srgb, var(--ppui-theme-bg) 67%, var(--ppui-text) 33%));
+      --ppui-muted:var(--descrip-text, color-mix(in srgb, var(--ppui-text) 62%, var(--ppui-theme-bg) 38%));
+      --ppui-primary:var(--p-primary-color, #2f6fd1);
+      background:var(--ppui-bg); color:var(--ppui-text);
+    }
     .eagle-director-skill-root .ppui-toolbar {
       display:flex; align-items:center; gap:6px; padding:8px 10px;
-      background:#252526; border-bottom:1px solid #3a3a3a; flex-shrink:0;
+      background:var(--ppui-panel); border-bottom:1px solid var(--ppui-border); flex-shrink:0;
     }
     .eagle-director-skill-root .ppui-btn {
-      background:#333; color:#d4d4d4; border:1px solid #444; border-radius:4px;
+      background:var(--ppui-surface-alt); color:var(--ppui-text); border:1px solid var(--ppui-border); border-radius:4px;
       padding:4px 10px; cursor:pointer; font-size:12px;
     }
-    .eagle-director-skill-root .ppui-btn:hover { background:#3c3c3c; }
-    .eagle-director-skill-root .ppui-btn.primary { background:#2f6fd1; border-color:#2f6fd1; color:#fff; }
-    .eagle-director-skill-root .ppui-btn.primary:hover { background:#3a7ee0; }
+    .eagle-director-skill-root .ppui-btn:hover { background:var(--ppui-hover); }
+    .eagle-director-skill-root .ppui-btn.primary { background:var(--ppui-primary); border-color:var(--ppui-primary); color:#fff; }
+    .eagle-director-skill-root .ppui-btn.primary:hover { filter:brightness(1.12); }
     .eagle-director-skill-root .ppui-btn-sm { padding:3px 8px; }
     .eagle-director-skill-root .pp-director-layout { display:flex; min-height:0; flex:1 1 auto; }
     .eagle-director-skill-root .pp-director-sidebar {
-      width:230px; flex-shrink:0; border-right:1px solid #3a3a3a; overflow-y:auto;
-      background:#232323; padding:8px;
+      width:230px; flex-shrink:0; border-right:1px solid var(--ppui-border); overflow-y:auto;
+      background:var(--ppui-panel); padding:8px;
     }
     .eagle-director-skill-root .pp-sidebar-head {
       display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;
     }
     .eagle-director-skill-root .pp-skills-list { display:flex; flex-direction:column; gap:6px; }
     .eagle-director-skill-root .pp-skill-item {
-      text-align:left; background:#2c2c2c; color:#d4d4d4; border:1px solid #3a3a3a;
-      border-radius:6px; padding:8px 10px; cursor:pointer;
+      text-align:left; background:var(--ppui-surface); color:var(--ppui-text); border:1px solid var(--ppui-border);
+      border-radius:6px; padding:8px 32px 8px 10px; cursor:pointer; position:relative;
     }
-    .eagle-director-skill-root .pp-skill-item:hover { background:#343434; }
-    .eagle-director-skill-root .pp-skill-item.active { border-color:#2f6fd1; background:#29384d; }
+    .eagle-director-skill-root .pp-skill-item:hover { background:var(--ppui-surface-alt); }
+    .eagle-director-skill-root .pp-skill-item.enabled { border-color:var(--ppui-primary); background:color-mix(in srgb, var(--ppui-primary) 28%, var(--ppui-bg) 72%); box-shadow:inset 3px 0 var(--ppui-primary); }
+    .eagle-director-skill-root .pp-skill-item.enabled:hover { background:color-mix(in srgb, var(--ppui-primary) 38%, var(--ppui-bg) 62%); }
+    .eagle-director-skill-root .pp-skill-item.active:not(.enabled) { border-color:#626b7a; outline:1px dashed #626b7a; outline-offset:-3px; }
     .eagle-director-skill-root .pp-skill-name { font-weight:600; }
-    .eagle-director-skill-root .pp-skill-meta { color:#8a8a8a; font-size:11px; margin-top:2px; }
+    .eagle-director-skill-root .pp-skill-meta { color:var(--ppui-muted); font-size:11px; margin-top:2px; }
+    .eagle-director-skill-root .pp-skill-delete {
+      position:absolute; top:6px; right:6px; width:20px; height:20px; padding:0;
+      display:flex; align-items:center; justify-content:center; border:0; border-radius:4px;
+      background:transparent; color:#9aa0aa; font-size:15px; line-height:1; cursor:pointer;
+      opacity:0; pointer-events:none; transition:opacity .12s ease, background .12s ease, color .12s ease;
+    }
+    .eagle-director-skill-root .pp-skill-item:hover .pp-skill-delete,
+    .eagle-director-skill-root .pp-skill-item:focus-within .pp-skill-delete {
+      opacity:1; pointer-events:auto;
+    }
+    .eagle-director-skill-root .pp-skill-delete:hover,
+    .eagle-director-skill-root .pp-skill-delete:focus-visible {
+      background:#b84a55; color:#fff; outline:none;
+    }
     .eagle-director-skill-root .pp-director-main { flex:1 1 auto; min-width:0; overflow-y:auto; padding:12px; }
     .eagle-director-skill-root .pp-director-section { margin-bottom:14px; }
-    .eagle-director-skill-root .pp-director-section > label { display:block; margin-bottom:6px; color:#aaa; font-size:12px; }
+    .eagle-director-skill-root .pp-director-section > label { display:block; margin-bottom:6px; color:var(--ppui-muted); font-size:12px; }
     .eagle-director-skill-root .pp-director-editor {
       width:100%; min-height:280px; resize:vertical; font-family:monospace;
-      background:#1a1a1a; color:#d4d4d4; border:1px solid #3a3a3a; border-radius:6px; padding:8px;
+      background:var(--ppui-input); color:var(--ppui-text); border:1px solid var(--ppui-border); border-radius:6px; padding:8px;
     }
     .eagle-director-skill-root .pp-filmstrip-grid {
       display:flex; flex-wrap:wrap; gap:8px; min-height:60px; padding:8px;
@@ -131,7 +163,7 @@ function loadStyles() {
       border:1px dashed #555; border-radius:6px; color:#8a8a8a; cursor:pointer; font-size:12px; text-align:center;
     }
     .eagle-director-skill-root .pp-preview-markdown {
-      background:#1a1a1a; border:1px solid #3a3a3a; border-radius:6px; padding:10px;
+      background:var(--ppui-input); border:1px solid var(--ppui-border); border-radius:6px; padding:10px;
       min-height:54px; max-height:280px; overflow:auto; line-height:1.5; overflow-wrap:anywhere;
     }
     .eagle-director-skill-root .pp-preview-markdown p { margin:0 0 8px; }
@@ -159,20 +191,20 @@ function loadStyles() {
     }
     .eagle-director-skill-root .ds-modal {
       width:min(720px,96%); max-height:calc(100% - 24px); display:flex; flex-direction:column;
-      border:1px solid #404653; border-radius:11px; background:#1b1d24; box-shadow:0 20px 55px rgba(0,0,0,.55); overflow:hidden;
+      border:1px solid var(--ppui-border); border-radius:11px; background:var(--ppui-bg); box-shadow:0 20px 55px rgba(0,0,0,.55); overflow:hidden;
     }
     .eagle-director-skill-root .ds-modal.compact { width:min(430px,94%); }
-    .eagle-director-skill-root .ds-modal-head { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid #343844; }
-    .eagle-director-skill-root .ds-modal-head h3 { margin:0; font-size:15px; color:#eef2fa; }
+    .eagle-director-skill-root .ds-modal-head { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--ppui-border); }
+    .eagle-director-skill-root .ds-modal-head h3 { margin:0; font-size:15px; color:var(--ppui-text); }
     .eagle-director-skill-root .ds-modal-head button { margin-left:auto; }
     .eagle-director-skill-root .ds-modal-body { padding:14px 16px; overflow:auto; min-height:0; }
-    .eagle-director-skill-root .ds-modal-foot { display:flex; justify-content:flex-end; gap:8px; padding:11px 16px; border-top:1px solid #343844; background:#181a20; }
-    .eagle-director-skill-root .ds-setting-card { margin-bottom:12px; padding:12px; border:1px solid #343844; border-radius:9px; background:#20222a; }
-    .eagle-director-skill-root .ds-setting-card h4 { margin:0 0 10px; color:#dce4f2; }
+    .eagle-director-skill-root .ds-modal-foot { display:flex; justify-content:flex-end; gap:8px; padding:11px 16px; border-top:1px solid var(--ppui-border); background:var(--ppui-panel); }
+    .eagle-director-skill-root .ds-setting-card { margin-bottom:12px; padding:12px; border:1px solid var(--ppui-border); border-radius:9px; background:var(--ppui-surface); }
+    .eagle-director-skill-root .ds-setting-card h4 { margin:0 0 10px; color:var(--ppui-text); }
     .eagle-director-skill-root .ds-setting-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px 12px; }
-    .eagle-director-skill-root .ds-field { min-width:0; display:flex; flex-direction:column; gap:5px; color:#aeb6c5; font-size:12px; }
+    .eagle-director-skill-root .ds-field { min-width:0; display:flex; flex-direction:column; gap:5px; color:var(--ppui-muted); font-size:12px; }
     .eagle-director-skill-root .ds-field.full { grid-column:1/-1; }
-    .eagle-director-skill-root .ds-input { width:100%; height:34px!important; min-height:34px!important; padding:6px 9px; color:#eef1f7; background:#111319; border:1px solid #3c4250; border-radius:6px; }
+    .eagle-director-skill-root .ds-input { width:100%; height:34px!important; min-height:34px!important; padding:6px 9px; color:var(--ppui-text); background:var(--ppui-input); border:1px solid var(--ppui-border); border-radius:6px; }
     .eagle-director-skill-root .ds-check { display:flex; align-items:center; gap:8px; cursor:pointer; }
     .eagle-director-skill-root .ds-message { margin-top:9px; padding:8px 10px; border-radius:6px; background:#222b38; color:#9fc5f8; white-space:pre-wrap; }
     .eagle-director-skill-root .ds-message.error { background:#3a2025; color:#ff9aa7; }
@@ -273,7 +305,7 @@ var DirectorSkillApp = {
       settingsLoading.value = true;
       settingsMessage.text = "";
       try {
-        var response = await fetch("/eaglePromptPresets/config");
+        var response = await api.fetchApi("/eaglePromptPresets/config");
         var data = await readJsonResponse(response, "读取设置");
         Object.assign(config, data.data || {});
         config.obsidian = Object.assign({
@@ -305,10 +337,10 @@ var DirectorSkillApp = {
         config.director_skills.filmstrip_megapixels = Math.min(
           10, Math.max(1, Number(config.director_skills.filmstrip_megapixels) || 1)
         );
-        var response = await fetch("/eaglePromptPresets/config", {
+        var response = await api.fetchApi("/eaglePromptPresets/config", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ config: config })
         });
-        var data = await response.json();
+        var data = await readJsonResponse(response, "保存设置");
         if (!response.ok || !data.success) throw new Error(data.error || "保存设置失败");
         settingsMessage.text = "设置已保存";
         settingsMessage.error = false;
@@ -328,10 +360,10 @@ var DirectorSkillApp = {
       settingsMessage.text = "";
       try {
         var payload = Object.assign({}, config.obsidian, { prompts_folder: config.obsidian.director_skills_folder });
-        var response = await fetch("/eaglePromptPresets/test_obsidian", {
+        var response = await api.fetchApi("/eaglePromptPresets/test_obsidian", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
         });
-        var data = await response.json();
+        var data = await readJsonResponse(response, "测试 Obsidian 连接");
         if (!response.ok || !data.success) throw new Error(data.error || "连接失败");
         settingsMessage.text = data.message || "Obsidian Vault 连接正常";
         settingsMessage.error = false;
@@ -346,8 +378,8 @@ var DirectorSkillApp = {
       settingsMessage.text = "";
       try {
         if (!await saveSettings(false)) return;
-        var response = await fetch("/eaglePromptPresets/director_skills/sync_obsidian", { method: "POST" });
-        var data = await response.json();
+        var response = await api.fetchApi("/eaglePromptPresets/director_skills/sync_obsidian", { method: "POST" });
+        var data = await readJsonResponse(response, "同步 Obsidian 技能库");
         if (!response.ok || !data.success) throw new Error(data.error || "同步失败");
         settingsMessage.text = (data.message || "同步完成") + "\n" + (data.path || "");
         settingsMessage.error = false;
@@ -376,7 +408,6 @@ var DirectorSkillApp = {
       var active = skills.value.filter(function (skill) {
         return enabledSkillIds.value.indexOf(skill.id) >= 0;
       });
-      if (!active.length && selectedSkill.value) active = [selectedSkill.value];
       return active.map(function (skill) {
         var meta = [];
         if (skill.category) meta.push("category: " + skill.category);
@@ -418,11 +449,11 @@ var DirectorSkillApp = {
       if (skillsLoading.value) return false;
       skillsLoading.value = true;
       try {
-        var resp = await fetch("/eaglePromptPresets/director_skills");
+        var resp = await api.fetchApi("/eaglePromptPresets/director_skills");
         var data = await readJsonResponse(resp, "加载技能");
         skills.value = data.data || [];
         storagePath.value = data.storage_path || storagePath.value;
-        storageSource.value = data.source || "eagle";
+        storageSource.value = data.effective_source || data.source || "eagle";
         errorMsg.value = "";
 
         if (!skills.value.length) {
@@ -434,7 +465,7 @@ var DirectorSkillApp = {
           pushToOutput();
           return true;
         }
-        infoMsg.value = "";
+        infoMsg.value = data.fallback_reason ? ("技能库已回退到 " + storageSource.value + "：" + data.fallback_reason) : "";
 
         var st = {};
         try {
@@ -445,7 +476,7 @@ var DirectorSkillApp = {
           ? st.enabledSkillIds.filter(function (id) {
               return skills.value.some(function (skill) { return skill.id === id; });
             })
-          : [];
+          : (skills.value[0] ? [skills.value[0].id] : []);
         var restoredId = st.selectedSkillId;
         if (restoredId && skills.value.some(function (s) { return s.id === restoredId; })) {
           selectSkill(skills.value.find(function (s) { return s.id === restoredId; }));
@@ -475,9 +506,16 @@ var DirectorSkillApp = {
       selectedSkillId.value = skill.id;
       skillContent.value = skill.content || "";
       skillFilmstrip.value = skill.filmstrip || [];
-      if (!enabledSkillIds.value.length) enabledSkillIds.value = [skill.id];
       pushToOutput();
       persistUiState();
+    }
+
+    function toggleSkillFromList(skill) {
+      if (!skill) return;
+      selectedSkillId.value = skill.id;
+      skillContent.value = skill.content || "";
+      skillFilmstrip.value = skill.filmstrip || [];
+      toggleSkill(skill);
     }
 
     function exportSkillsVue() {
@@ -500,10 +538,10 @@ var DirectorSkillApp = {
           var last = null;
           for (var item of list) {
             var skill = Object.assign({ category: "custom", tasks: ["script", "shots", "dialogue"], tags: [], content: "", filmstrip: [] }, item || {});
-            var response = await fetch("/eaglePromptPresets/director_skills", {
+            var response = await api.fetchApi("/eaglePromptPresets/director_skills", {
               method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ skill: skill })
             });
-            var data = await response.json();
+            var data = await readJsonResponse(response, "导入导演技能");
             if (!response.ok || !data.success) throw new Error(data.error || "导入失败");
             last = data.data.id;
           }
@@ -518,11 +556,11 @@ var DirectorSkillApp = {
     function createSkillVue() {
       openTextDialog("新建导演技能", "新技能", async function (name) {
         try {
-          var response = await fetch("/eaglePromptPresets/director_skills", {
+          var response = await api.fetchApi("/eaglePromptPresets/director_skills", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ skill: { name: name, category: "custom", tasks: ["script", "shots", "dialogue"], tags: [], content: "", filmstrip: [] } })
           });
-          var data = await response.json();
+          var data = await readJsonResponse(response, "新建导演技能");
           if (!response.ok || !data.success) throw new Error(data.error || "新建失败");
           await loadSkills();
           selectSkill(skills.value.find(function (item) { return item.id === data.data.id; }) || skills.value[0]);
@@ -539,10 +577,10 @@ var DirectorSkillApp = {
           tasks: source.tasks || ["script", "shots", "dialogue"], tags: source.tags || [],
           content: skillContent.value, filmstrip: skillFilmstrip.value
         };
-        var response = await fetch("/eaglePromptPresets/director_skills", {
+        var response = await api.fetchApi("/eaglePromptPresets/director_skills", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ skill: skill })
         });
-        var data = await response.json();
+        var data = await readJsonResponse(response, "保存导演技能");
         if (!response.ok || !data.success) throw new Error(data.error || "保存失败");
         selectedSkillId.value = data.data.id;
         await loadSkills();
@@ -556,20 +594,29 @@ var DirectorSkillApp = {
       else openTextDialog("保存导演技能", "新技能", saveSkillWithNameVue);
     }
 
-    function deleteSkillVue() {
-      if (!selectedSkill.value) return;
-      var skill = selectedSkill.value;
+    function deleteSkillVue(skill) {
+      skill = skill || selectedSkill.value;
+      if (!skill) return;
       openConfirmDialog("删除导演技能", "确定删除“" + skill.name + "”吗？", async function () {
         try {
-          var response = await fetch("/eaglePromptPresets/director_skills/delete", {
+          var response = await api.fetchApi("/eaglePromptPresets/director_skills/delete", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id: skill.id })
           });
-          var data = await response.json();
+          var data = await readJsonResponse(response, "删除导演技能");
           if (!response.ok || !data.success) throw new Error(data.error || "删除失败");
-          selectedSkillId.value = ""; skillContent.value = ""; skillFilmstrip.value = [];
-          pushToOutput(); await loadSkills(); showToast("技能已删除", false);
+          var deletedSelected = selectedSkillId.value === skill.id;
+          enabledSkillIds.value = enabledSkillIds.value.filter(function (id) { return id !== skill.id; });
+          if (deletedSelected) {
+            selectedSkillId.value = "";
+            skillContent.value = "";
+            skillFilmstrip.value = [];
+          }
+          persistUiState();
+          pushToOutput();
+          await loadSkills();
+          showToast("技能已删除", false);
         } catch (error) { showToast("删除失败：" + error.message, true); }
       });
     }
@@ -581,8 +628,8 @@ var DirectorSkillApp = {
         var body = new FormData();
         body.append("file", file, file.name || "filmstrip.png");
         body.append("megapixels", String(Math.min(10, Math.max(1, Number(config.director_skills.filmstrip_megapixels) || 1))));
-        var response = await fetch("/eaglePromptPresets/upload_filmstrip", { method: "POST", body: body });
-        var data = await response.json();
+        var response = await api.fetchApi("/eaglePromptPresets/upload_filmstrip", { method: "POST", body: body });
+        var data = await readJsonResponse(response, "上传素材胶片");
         if (!response.ok || !data.success) throw new Error(data.error || "上传失败");
         skillFilmstrip.value.push(data.path);
         showToast(data.width && data.height
@@ -621,16 +668,7 @@ var DirectorSkillApp = {
           h("h3", { style: { margin: "0 8px 0 0", fontSize: "14px" } }, "🎬 导演技能库"),
           h("button", { class: "ppui-btn ppui-btn-sm primary", onClick: createSkillVue }, "+ 新建"),
           h("button", { class: "ppui-btn", onClick: saveSkillVue }, "💾 保存"),
-          selectedSkill.value && h("button", {
-            class: ["ppui-btn", enabledSkillIds.value.indexOf(selectedSkill.value.id) >= 0 ? "primary" : ""],
-            onClick: function () { toggleSkill(selectedSkill.value); }
-          }, enabledSkillIds.value.indexOf(selectedSkill.value.id) >= 0 ? "已启用" : "启用"),
           h("span", { style: { color: "#8a8a8a", fontSize: "11px" } }, "已组合 " + enabledSkillIds.value.length + " 项"),
-          selectedSkill.value && h("button", {
-            class: "ppui-btn",
-            style: { background: "#e06c5a", color: "#fff", border: "1px solid #e06c5a" },
-            onClick: deleteSkillVue
-          }, "删除"),
           h("button", { class: "ppui-btn primary", onClick: applyToOutputVue }, "输出到端口"),
           h("span", { style: { flex: "1 1 auto" } }),
           h("button", {
@@ -658,17 +696,41 @@ var DirectorSkillApp = {
                 h("aside", { class: "pp-director-sidebar" }, [
                   h("div", { class: "pp-skills-list" },
                   skills.value.map(function (skill) {
-                    return h("button", {
-                      type: "button",
-                      class: ["pp-skill-item", selectedSkillId.value === skill.id ? "active" : ""],
-                      onClick: function () { selectSkill(skill); }
+                    var enabled = enabledSkillIds.value.indexOf(skill.id) >= 0;
+                    return h("div", {
+                      role: "button",
+                      tabindex: "0",
+                      class: [
+                        "pp-skill-item",
+                        selectedSkillId.value === skill.id ? "active" : "",
+                        enabled ? "enabled" : ""
+                      ],
+                      title: enabled ? "已启用；点击取消" : "未启用；点击加入输出",
+                      onClick: function () { toggleSkillFromList(skill); },
+                      onKeydown: function (event) {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          toggleSkillFromList(skill);
+                        }
+                      }
                     }, [
                       h("div", { class: "pp-skill-name" }, skill.name || "未命名技能"),
                       h("div", { class: "pp-skill-meta" }, [
                         (skill.filmstrip ? skill.filmstrip.length : 0) + " 个素材",
                         " · ",
                         skill.updated_at ? new Date(skill.updated_at).toLocaleDateString() : ""
-                      ])
+                      ]),
+                      h("button", {
+                        type: "button",
+                        class: "pp-skill-delete",
+                        title: "删除“" + (skill.name || "未命名技能") + "”",
+                        "aria-label": "删除“" + (skill.name || "未命名技能") + "”",
+                        onClick: function (event) {
+                          event.stopPropagation();
+                          deleteSkillVue(skill);
+                        },
+                        onKeydown: function (event) { event.stopPropagation(); }
+                      }, "×")
                     ]);
                   })
                 )

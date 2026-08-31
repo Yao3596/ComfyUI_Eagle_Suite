@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<!-- saved from url=(0042)https://go.tabbit.site/projects/uqE5cwwFoC -->
+<html lang="zh-CN"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax H3 导演台 · 功能全景面板</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#1f2430; --sub:#5b6474;
+    --blue:#2b6cb0; --blue-bg:#eef4fc; --green:#2f855a; --green-bg:#effaf3;
+    --purple:#6b46c1; --purple-bg:#f3eefc;
+    --line:#e6e9f0; --pink:#fb7299; --dark:#1f2a44;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);padding:24px 16px;}
+  .wrap{max-width:920px;margin:0 auto;}
+  .hero{background:linear-gradient(135deg,#1f2a44 0%,#2b3a63 100%);border-radius:16px;padding:26px 28px;color:#fff;margin-bottom:20px;}
+  .hero .tag{display:inline-block;font-size:12px;letter-spacing:1px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 12px;margin-bottom:12px;}
+  .hero h1{font-size:22px;font-weight:700;line-height:1.4;}
+  .hero p{margin-top:8px;font-size:13px;color:#c3cce0;line-height:1.7;}
+  .hero .meta{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;}
+  .hero .meta span{font-size:12px;background:rgba(251,114,153,.18);border:1px solid rgba(251,114,153,.45);color:#ffd3e1;border-radius:999px;padding:3px 11px;}
+  .sec-title{display:flex;align-items:center;gap:10px;margin:26px 0 12px;}
+  .sec-title .bar{width:5px;height:20px;border-radius:3px;background:var(--pink);}
+  .sec-title h2{font-size:17px;font-weight:700;}
+  .sec-title .note{margin-left:auto;font-size:12px;color:var(--sub);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:0 1px 3px rgba(31,36,48,.05);}
+  /* 段间引导流程 */
+  .chain{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin-top:6px;}
+  .chain .node{flex:1 1 170px;background:#f7f8fb;border:1px solid var(--line);border-radius:10px;padding:11px 13px;font-size:12.5px;line-height:1.65;color:#3d4657;}
+  .chain .node b{display:block;font-size:13px;color:var(--dark);margin-bottom:3px;}
+  .chain .arrow{align-self:center;color:#9aa3b5;font-size:17px;flex:0 0 auto;}
+  .chain .hot{background:var(--purple-bg);border-color:#dccdf3;}
+  .chain .hot b{color:var(--purple);}
+  .tips{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;}
+  .tip{font-size:12px;border-radius:999px;padding:4px 11px;background:#f0f2f7;border:1px solid var(--line);color:var(--sub);}
+  .tip.warn{background:#fdf6ec;border-color:#f0dcb8;color:#8a6116;}
+  /* Tab */
+  .tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+  .tab-btn{cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:600;color:var(--sub);transition:all .15s;font-family:inherit;}
+  .tab-btn:hover{border-color:#c9d4e6;color:var(--blue);}
+  .tab-btn.active{background:var(--dark);border-color:var(--dark);color:#fff;}
+  .tab-panel{display:none;}
+  .tab-panel.active{display:block;}
+  .mode-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;}
+  @media (max-width:680px){.mode-grid{grid-template-columns:1fr;}}
+  .mode-box{border:1px solid var(--line);border-radius:12px;padding:15px 17px;background:#fbfcfe;}
+  .mode-box h3{font-size:13px;font-weight:700;color:var(--blue);letter-spacing:.5px;margin-bottom:8px;}
+  .mode-box ul{list-style:none;}
+  .mode-box li{font-size:13px;line-height:1.8;color:#3d4657;padding-left:15px;position:relative;}
+  .mode-box li::before{content:"·";position:absolute;left:2px;color:var(--pink);font-weight:700;}
+  .demo{background:var(--green-bg);border:1px solid #d3ecdd;border-radius:12px;padding:15px 17px;}
+  .demo h3{font-size:13px;font-weight:700;color:var(--green);margin-bottom:8px;}
+  .demo p{font-size:13px;line-height:1.8;color:#31473a;}
+  .demo .seam{margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;}
+  .demo .seam span{font-size:11.5px;background:#fff;border:1px solid #cde7d5;border-radius:6px;padding:3px 8px;color:#2f855a;}
+  /* 采样链路 */
+  .pipe{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin-top:6px;}
+  .pipe .stage{flex:1 1 150px;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.7;}
+  .pipe .stage b{display:block;font-size:13.5px;margin-bottom:2px;}
+  .pipe .s1{background:#f7f8fb;border:1px solid var(--line);color:#3d4657;}
+  .pipe .s1 b{color:var(--dark);}
+  .pipe .s2{background:var(--blue-bg);border:1px solid #d5e4f5;color:#2a3b52;}
+  .pipe .s2 b{color:var(--blue);}
+  .pipe .s3{background:var(--purple-bg);border:1px solid #dccdf3;color:#44337a;}
+  .pipe .s3 b{color:var(--purple);}
+  .pipe .arr{align-self:center;color:#9aa3b5;font-size:17px;}
+  .bench{margin-top:12px;background:#1f2a44;border-radius:12px;padding:14px 18px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;}
+  .bench .num{font-size:22px;font-weight:800;color:#ffd3e1;}
+  .bench .lbl{font-size:12px;color:#a9b4cc;line-height:1.5;}
+  /* 外接节点 */
+  .prio{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:4px 0 14px;font-size:13px;}
+  .prio .box{border-radius:10px;padding:9px 14px;line-height:1.6;}
+  .prio .ext{background:var(--green-bg);border:1px solid #d3ecdd;color:#2f855a;font-weight:600;}
+  .prio .int{background:#f0f2f7;border:1px solid var(--line);color:var(--sub);}
+  .prio .arr{color:#9aa3b5;}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  th{background:#f0f2f7;color:var(--sub);font-weight:600;text-align:left;padding:8px 12px;border:1px solid var(--line);font-size:12px;}
+  td{padding:8px 12px;border:1px solid var(--line);color:#3d4657;line-height:1.6;}
+  td .yes{color:var(--green);font-weight:700;}
+  td .no{color:#c3c9d6;}
+  /* 导出 */
+  .ops{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  @media (max-width:680px){.ops{grid-template-columns:1fr;}}
+  .op{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#fbfcfe;}
+  .op b{display:block;font-size:13.5px;color:var(--dark);margin-bottom:5px;}
+  .op p{font-size:12.5px;line-height:1.7;color:var(--sub);}
+  .foot{margin-top:20px;background:var(--card);border:1px dashed #c9cfdb;border-radius:14px;padding:16px 22px;font-size:12.5px;color:var(--sub);line-height:1.9;}
+  .foot b{color:var(--ink);}
+  .foot a{color:var(--blue);text-decoration:none;}
+</style>\n</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <span class="tag">FEATURE OVERVIEW · 官方点名演示期 · 13:09 · 合集 16/21</span>
+    <h1>MiniMax H3 导演台 · 功能全景面板</h1>
+    <p>MiniMax 官方 8 月 12 日开源周总结文章点名推荐的 ComfyUI 插件：把分段编解码等功能整合进单一「导演台节点」，覆盖文生视频、图生视频、首尾帧、参考主体生视频与视频编辑，配合段间引导批量产出无缝长视频。</p>
+    <div class="meta">
+      <span>单节点多任务</span><span>段间引导无缝拼接</span><span>二采直出 2K</span><span>支持外接第三方节点</span>
+    </div>
+  </div>
+
+  <div class="sec-title"><span class="bar"></span><h2>核心机制：段间引导</h2><span class="note">官方介绍原文引用 · 全功能的基石</span></div>
+  <div class="card">
+    <div class="chain">
+      <div class="node"><b>第 N 段生成完成</b>产出该段结尾的动作姿态与音频</div>
+      <div class="arrow">→</div>
+      <div class="node hot"><b>段间引导（核心）</b>把上一段结尾的动作和音频作为下一段的生成上下文</div>
+      <div class="arrow">→</div>
+      <div class="node"><b>第 N+1 段生成</b>从上段结尾状态自然延续</div>
+      <div class="arrow">→</div>
+      <div class="node"><b>无缝拼接</b>镜头之间保持连续性，看不出接缝</div>
+    </div>
+    <div class="tips">
+      <span class="tip warn">必须开启段间引导，多段视频才会连续</span>
+      <span class="tip">批次运行前逐段检查接缝位置（10s / 20s / 30s）</span>
+      <span class="tip">同时破除模型单次生成的时长限制</span>
+    </div>
+  </div>
+
+  <div class="sec-title"><span class="bar"></span><h2>四大任务模式</h2><span class="note">点击标签切换查看</span></div>
+  <div class="tabs" role="tablist" aria-label="任务模式">
+    <button type="button" role="tab" aria-selected="true" aria-controls="p-t2v" class="tab-btn active" data-target="p-t2v">T2V 文生视频</button>
+    <button type="button" role="tab" aria-selected="false" aria-controls="p-i2v" class="tab-btn" data-target="p-i2v">I2V 图生视频</button>
+    <button type="button" role="tab" aria-selected="false" aria-controls="p-r2v" class="tab-btn" data-target="p-r2v">R2V 参考主体生视频</button>
+    <button type="button" role="tab" aria-selected="false" aria-controls="p-v2v" class="tab-btn" data-target="p-v2v">V2V / RV2V 视频编辑</button>
+  </div>
+
+  <div class="card">
+    <div class="tab-panel active" id="p-t2v" role="tabpanel">
+      <div class="mode-grid">
+        <div class="mode-box">
+          <h3>功能与用法</h3>
+          <ul>
+            <li>添加任意组提示词组，每组独立编写剧情描述</li>
+            <li>每组单独设置时长（如每组 10 秒）</li>
+            <li>开启段间引导后点击运行，自动按序生成并拼接</li>
+            <li>拼接成一条无接缝的长视频</li>
+          </ul>
+        </div>
+        <div class="demo">
+          <h3>视频演示实例</h3>
+          <p>4 组提示词 × 每组 10 秒，拼成连续 40 秒的小故事。逐个检查第 10、20、30 秒接缝位置，均流畅衔接、看不出断裂。</p>
+          <div class="seam"><span>✓ 10s 接缝流畅</span><span>✓ 20s 接缝流畅</span><span>✓ 30s 接缝流畅</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="p-i2v" role="tabpanel">
+      <div class="mode-grid">
+        <div class="mode-box">
+          <h3>三种生成方式</h3>
+          <ul>
+            <li>首帧生成：上传一张首帧图 + 提示词 + 时长</li>
+            <li>尾帧生成：上传一张尾帧图，从尾帧反推生成</li>
+            <li>首尾帧生成：同时上传首帧与尾帧，生成中间过渡</li>
+            <li>外接节点模式下同样支持这三种组合</li>
+          </ul>
+        </div>
+        <div class="demo">
+          <h3>定位</h3>
+          <p>从静态画面出发驱动视频生成：角色定妆图、场景概念图、上一段落的截帧，都可以作为起点；首尾帧模式还能精确控制一段画面的起止状态。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="p-r2v" role="tabpanel">
+      <div class="mode-grid">
+        <div class="mode-box">
+          <h3>功能与用法</h3>
+          <ul>
+            <li>「公共参数」区上传角色参考图并写主题定义</li>
+            <li>设置好后，下方所有素材组自动引用公共参数</li>
+            <li>每组只需写该段的剧情与动作提示词</li>
+            <li>各组时长独立设置，支持任意组数</li>
+          </ul>
+        </div>
+        <div class="demo">
+          <h3>视频演示实例</h3>
+          <p>三个角色图 + 主体定义 → 第 1 段：角色一在夜景露台举杯（10 秒）→ 第 2 段：小猴子（角色二）跑进来互动（5 秒）。第 10→11 秒过渡流畅，角色形象跨段保持一致，无接缝感。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="p-v2v" role="tabpanel">
+      <div class="mode-grid">
+        <div class="mode-box">
+          <h3>V2V 直接改视频</h3>
+          <ul>
+            <li>上传视频后均分或智能分割（按分镜切段）</li>
+            <li>分段模式：每段给单独编辑指令（换发色、换衣裤等）</li>
+            <li>全局模式：所有分段共用同一套提示词</li>
+            <li>声音三选：模型生成新音频 / 保留原声 / 静音</li>
+          </ul>
+        </div>
+        <div class="mode-box">
+          <h3>RV2V 参考素材改视频</h3>
+          <ul>
+            <li>智能分割后逐段编辑，每段可挂参考图 + 参考音频</li>
+            <li>替换式指令：黑衣男子换成参考图动漫美女、人物换成三视图卡通猴子、全体戴口罩</li>
+            <li>三视图可用配套 I2I 编辑工作流一键生成</li>
+            <li>支持选择运行：勾选部分分段单独执行</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-title"><span class="bar"></span><h2>高清采样链路：二采 / 无限采</h2><span class="note">Refine 节点 · 直出 1080P 长视频</span></div>
+  <div class="card">
+    <div class="pipe">
+      <div class="stage s1"><b>一采</b>约 400 万像素<br>864 × 480</div>
+      <div class="arr">→</div>
+      <div class="stage s2"><b>Refine · H3 latent 放大</b>选择 latent 放大模型；基本调度器控制步数与降噪幅度；加速模块可拆卸，不接 refine model 也能用同一套流程二采</div>
+      <div class="arr">→</div>
+      <div class="stage s3"><b>二采直出 2K</b>1920 × 1088<br>支持三采乃至无限次采样</div>
+    </div>
+    <div class="bench">
+      <div><div class="num">748 秒</div><div class="lbl">实测直出耗时</div></div>
+      <div><div class="num">2K · 15s</div><div class="lbl">输出规格</div></div>
+      <div><div class="num">开段间引导</div><div class="lbl">测试条件</div></div>
+      <div><div class="num">明显提升</div><div class="lbl">一采 vs 二采画质对比</div></div>
+    </div>
+  </div>
+
+  <div class="sec-title"><span class="bar"></span><h2>外接节点架构</h2><span class="note">单节点之外的开放扩展 · 灵活性等同官方工作流</span></div>
+  <div class="card">
+    <div class="prio">
+      <span class="box ext">接了外接参数 → 优先取外接参数</span>
+      <span class="arr">⇄</span>
+      <span class="box int">未接 → 自动回退到导演台节点内部数据</span>
+    </div>
+    <table>
+      <tbody><tr><th>外接 I2V 节点 · 参数组合</th><th>首帧</th><th>尾帧</th><th>生成行为</th></tr>
+      <tr><td>组合一</td><td><span class="yes">✓ 传入</span></td><td><span class="yes">✓ 传入</span></td><td>首尾帧生成视频</td></tr>
+      <tr><td>组合二</td><td><span class="yes">✓ 传入</span></td><td><span class="no">—</span></td><td>图生视频</td></tr>
+      <tr><td>组合三</td><td><span class="no">—</span></td><td><span class="yes">✓ 传入</span></td><td>尾帧生成视频</td></tr>
+      <tr><td>组合四</td><td><span class="no">—</span></td><td><span class="no">—</span></td><td>文生视频（仅提示词 + 时长）</td></tr>
+    </tbody></table>
+    <div class="tips">
+      <span class="tip">四参数：首帧 / 尾帧 / 提示词 / 生成时长</span>
+      <span class="tip">支持接入任意多组，加一段即自动追加一路预览</span>
+      <span class="tip">可串接第三方节点：提示词增强、图片处理等</span>
+      <span class="tip">附 I2V 与 R2V 两个示例工作流</span>
+    </div>
+  </div>
+
+  <div class="sec-title"><span class="bar"></span><h2>运行与导出</h2></div>
+  <div class="card">
+    <div class="ops">
+      <div class="op"><b>选择运行</b>勾选任意分段单独执行，不必整批重跑，迭代调优省时间</div>
+      <div class="op"><b>全部运行</b>一键按序生成所有分段并拼接成完整长视频，批量出片</div>
+      <div class="op"><b>分段导出</b>每一段单独导出为小视频，方便逐段审片与二次剪辑</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>插件获取：</b><a href="https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director">GitHub · AIMixer/ComfyUI_MiniMaxH3_Director</a>；简介区另附仙宫云 / 千里云镜像、RunningHub 在线工作流与夸克 / 百度网盘整合包。<br>
+    <b>一句话定位：</b>官方评价它“把分段编解码等功能整合到一个导演台节点里”，配套的加速 LoRA、实时监控、双语 UI 等能力见同合集后续各期。
+  </div>
+
+</div>
+<script>
+  document.querySelectorAll('.tab-btn').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active');b.setAttribute('aria-selected','false');});
+      document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});
+      btn.classList.add('active');
+      btn.setAttribute('aria-selected','true');
+      var target = document.getElementById(btn.dataset.target);
+      if (target) target.classList.add('active');
+    });
+  });
+</script>
+</body>
+</html>

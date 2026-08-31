@@ -6,7 +6,6 @@
 """
 
 import os
-import base64
 import json
 import numpy as np
 import torch
@@ -18,14 +17,15 @@ import hashlib
 from datetime import datetime
 import tempfile
 import time
-import zlib
 import shutil
 import re
 import av
+from comfy_api.input_impl import VideoFromFile
 
 from .eagle_client import eagle_client
 from .utils import parse_tags
 from .logger import logger
+from .workflow_metadata import build_workflow_bundle, embed_workflow_in_media, persist_workflow_for_media
 
 
 class EagleAdvancedVideoSaver:
@@ -140,7 +140,7 @@ class EagleAdvancedVideoSaver:
         }
 
     
-    RETURN_TYPES = ("VIDEO", "IMAGE", "AUDIO", "STRING", "STRING", "STRING")
+    RETURN_TYPES = ("VIDEO", "VIDEO", "AUDIO", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("video", "video_passthrough", "audio_passthrough", "file_path", "metadata_json", "save_result")
     FUNCTION = "save_video"
     OUTPUT_NODE = True
@@ -349,9 +349,14 @@ class EagleAdvancedVideoSaver:
             enable_interpolation, prompt, extra_pnginfo
         )
         
-        # === 7.1 工作流双重保存：嵌入视频 + 同名 JSON ===
-        workflow_bundle = self._build_workflow_bundle(prompt, extra_pnginfo)
-        embed_result = self._embed_workflow_in_video(final_path, workflow_bundle)
+        # === 7.1 工作流保存：优先原生容器标签，失败/AVI 时生成同名工作流 PNG ===
+        workflow_storage = persist_workflow_for_media(
+            final_path, prompt, extra_pnginfo, self._media_tool("ffmpeg"),
+            force_companion=final_path.suffix.lower() == ".avi",
+        )
+        workflow_bundle = workflow_storage["bundle"]
+        embed_result = workflow_storage["embedded"]
+        workflow_png = workflow_storage["companion_path"]
 
         # 嵌入完成后重新读取实际文件大小，并把保存状态写入 JSON 元数据。
         file_size = final_path.stat().st_size
@@ -359,11 +364,12 @@ class EagleAdvancedVideoSaver:
         metadata["file_size"] = file_size
         json_path = final_path.with_suffix('.json')
         metadata["workflow_storage"] = {
-            "mode": "embedded+json",
+            "mode": "native+json" if embed_result["success"] else "png+json",
             "embedded": embed_result["success"],
-            "embedding_format": "zlib+base64",
-            "video_tag": "comment",
+            "embedding_format": "comfyui-native-json-tags",
+            "video_tags": ["workflow", "prompt", "extra_pnginfo"],
             "json_path": str(json_path),
+            "workflow_png": workflow_png,
             "workflow_present": bool(workflow_bundle.get("workflow")),
             "message": embed_result["message"],
         }
@@ -391,6 +397,15 @@ class EagleAdvancedVideoSaver:
                 final_path, folder_id, base_name,
                 eagle_tags, eagle_rating, eagle_annotation, metadata
             )
+            if workflow_png:
+                workflow_tags = ",".join(filter(None, [eagle_tags, "ComfyUI工作流"]))
+                companion_result = self._save_to_eagle(
+                    Path(workflow_png), folder_id, base_name + "_workflow",
+                    workflow_tags, eagle_rating,
+                    (eagle_annotation + "\n" if eagle_annotation else "") + f"对应媒体: {filename}",
+                    {"related_media": filename, "workflow_companion": True},
+                )
+                eagle_result += f"；工作流 PNG: {companion_result}"
             logger.info(eagle_result)
         
         # === 9. 生成视频预览 ===
@@ -408,29 +423,52 @@ class EagleAdvancedVideoSaver:
             save_result += f"🦅 Eagle: {eagle_result}{folder_correction}\n"
         if save_to_local:
             save_result += f"📁 本地: {local_save_path}\n"
-        save_result += f"🧩 工作流嵌入: {'成功' if embed_result['success'] else '失败（JSON 备份可用）'}\n"
+        save_result += f"🧩 视频内工作流: {'成功，可直接由支持视频元数据的 ComfyUI 读取' if embed_result['success'] else '该格式不可靠，已使用 PNG 伴随文件'}\n"
+        if workflow_png:
+            save_result += f"🖼️ 工作流 PNG: {workflow_png}\n"
         save_result += f"📄 工作流 JSON: {json_path}\n"
         save_result += f"💾 大小: {file_size_mb:.2f} MB | ⏱️ 时长: {duration:.2f}s | 🎞️ 帧率: {actual_fps} fps"
         
         logger.info(save_result)
         
         # === 12. 返回 VIDEO 输出 ===
-        video_output = str(final_path)
+        # VIDEO 端口必须返回 ComfyUI 原生 VideoInput，路径另由 file_path 输出。
+        video_output = VideoFromFile(str(final_path))
 
         # 确保穿透输出不为 None
-        passthrough_images = images if images is not None else torch.zeros((1, 64, 64, 3))
+        passthrough_video = (
+            video
+            if video is not None and (hasattr(video, "get_components") or hasattr(video, "save_to"))
+            else video_output
+        )
         passthrough_audio = audio  # audio 可以是 None（ComfyUI 支持）
 
         return {
             "ui": ui_result,
             "result": (
-                video_output,           # VIDEO：文件路径
-                passthrough_images,     # IMAGE：原始图像（或空张量）
+                video_output,           # VIDEO：ComfyUI 原生视频对象
+                passthrough_video,      # VIDEO：原始视频；图像生成时穿透生成结果
                 passthrough_audio,      # AUDIO：原始音频（或 None）
                 str(final_path),        # STRING：文件路径
                 metadata_json,          # STRING：元数据 JSON
                 save_result             # STRING：保存结果摘要
             )
+        }
+
+    @staticmethod
+    def _error_result(message):
+        """Return a type-correct result for validation failures."""
+        logger.error(message)
+        return {
+            "ui": {},
+            "result": (
+                None,
+                None,
+                None,
+                "",
+                "",
+                str(message),
+            ),
         }
 
 
@@ -638,81 +676,11 @@ class EagleAdvancedVideoSaver:
 
     def _build_workflow_bundle(self, prompt, extra_pnginfo):
         """构建可独立恢复的 ComfyUI 工作流包。"""
-        workflow = {}
-        extra = extra_pnginfo if isinstance(extra_pnginfo, dict) else {}
-        if isinstance(extra.get("workflow"), dict):
-            workflow = extra["workflow"]
-
-        api_prompt = prompt if isinstance(prompt, dict) else {}
-        return {
-            "schema": "comfyui.workflow.bundle.v1",
-            "created_at": datetime.now().isoformat(),
-            "workflow": workflow,
-            "prompt": api_prompt,
-            "extra_pnginfo": {
-                key: value for key, value in extra.items() if key != "workflow"
-            },
-        }
-
-    @staticmethod
-    def _escape_ffmetadata(value):
-        """转义 FFmetadata 文件中的保留字符。"""
-        return str(value).replace("\\", "\\\\").replace("=", "\\=").replace(";", "\\;").replace("#", "\\#").replace("\n", "\\\n")
+        return build_workflow_bundle(prompt, extra_pnginfo)
 
     def _embed_workflow_in_video(self, video_path, workflow_bundle):
-        """将压缩工作流写入容器 comment 标签；验证成功后原子替换视频。"""
-        if not workflow_bundle.get("workflow") and not workflow_bundle.get("prompt"):
-            return {"success": False, "message": "当前执行未提供可嵌入的工作流或 prompt；JSON 仍已保存"}
-
-        try:
-            raw = json.dumps(workflow_bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            encoded = base64.b64encode(zlib.compress(raw, level=9)).decode("ascii")
-            marker = "COMFYUI_WORKFLOW_ZLIB_BASE64:"
-            payload = marker + encoded
-
-            video_path = Path(video_path)
-            temp_dir = video_path.parent
-            metadata_fd, metadata_name = tempfile.mkstemp(prefix="comfy_workflow_", suffix=".ffmeta", dir=temp_dir)
-            embedded_fd, embedded_name = tempfile.mkstemp(prefix="comfy_embedded_", suffix=video_path.suffix, dir=temp_dir)
-            os.close(metadata_fd)
-            os.close(embedded_fd)
-            metadata_path = Path(metadata_name)
-            embedded_path = Path(embedded_name)
-            metadata_path.write_text(
-                ";FFMETADATA1\ncomment=" + self._escape_ffmetadata(payload) + "\n",
-                encoding="utf-8",
-            )
-
-            cmd = [
-                self._media_tool("ffmpeg"), "-y", "-i", str(video_path),
-                "-f", "ffmetadata", "-i", str(metadata_path),
-                "-map", "0", "-map_metadata", "1", "-c", "copy", str(embedded_path),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
-            if result.returncode != 0 or not embedded_path.is_file() or embedded_path.stat().st_size == 0:
-                detail = (result.stderr or "FFmpeg 未生成有效文件").strip().splitlines()[-1]
-                return {"success": False, "message": f"视频容器写入失败: {detail}"}
-
-            with av.open(str(embedded_path), mode="r") as container:
-                embedded_comment = str(container.metadata.get("comment", ""))
-            if embedded_comment != payload:
-                return {"success": False, "message": "视频写入后回读校验失败"}
-
-            os.replace(embedded_path, video_path)
-            return {
-                "success": True,
-                "message": f"已嵌入并校验工作流（原始 {len(raw)} 字节，压缩编码 {len(encoded)} 字符）",
-            }
-        except Exception as error:
-            logger.warning(f"工作流嵌入视频失败，保留 JSON 备份: {error}")
-            return {"success": False, "message": str(error)}
-        finally:
-            for temp_path in (locals().get("metadata_path"), locals().get("embedded_path")):
-                if temp_path:
-                    try:
-                        Path(temp_path).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+        """兼容旧调用：写入 ComfyUI 原生视频元数据标签。"""
+        return embed_workflow_in_media(video_path, workflow_bundle, self._media_tool("ffmpeg"))
     
     @staticmethod
     def _video_mime_type(ext: str) -> str:

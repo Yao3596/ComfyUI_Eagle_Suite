@@ -4,6 +4,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, onMounted, onBeforeUnmount } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 // ============================================================
 // 文件夹树（复用 Eagle Gallery 逻辑）
@@ -86,6 +87,9 @@ var LoraGallery = {
 
     var selectedIds = ref([]);
     var weights = ref({});
+    // “已选择”与“本次应用”是两个独立状态。关闭后仍保留顺序、权重和触发词，
+    // 便于临时做 LoRA A/B，而不是只能把模型从列表中删除。
+    var enabledMap = ref({});
     var selectedItems = ref({}); // id -> item 全局缓存，已选项跨文件夹保持可见
     var sortBy = ref("name");
     var sortDir = ref("asc");
@@ -210,6 +214,7 @@ var LoraGallery = {
       if (!item || selectedIds.value.indexOf(item.id) >= 0) return;
       selectedIds.value.push(item.id);
       if (!(item.id in weights.value)) weights.value[item.id] = 1.0;
+      enabledMap.value[item.id] = true;
       selectedItems.value[item.id] = item;
       syncSelection();
     }
@@ -298,10 +303,12 @@ var LoraGallery = {
       if (idx >= 0) {
         selectedIds.value.splice(idx, 1);
         delete weights.value[item.id];
+        delete enabledMap.value[item.id];
         delete selectedItems.value[item.id];
       } else {
         selectedIds.value.push(item.id);
         if (!(item.id in weights.value)) weights.value[item.id] = 1.0;
+        enabledMap.value[item.id] = true;
         // 缓存完整 item，使右侧已选面板跨文件夹可见
         selectedItems.value[item.id] = item;
       }
@@ -313,10 +320,16 @@ var LoraGallery = {
       syncSelection();
     }
 
+    function toggleEnabled(id) {
+      enabledMap.value[id] = enabledMap.value[id] === false;
+      syncSelection();
+    }
+
     function removeSelected(id) {
       var idx = selectedIds.value.indexOf(id);
       if (idx >= 0) selectedIds.value.splice(idx, 1);
       delete weights.value[id];
+      delete enabledMap.value[id];
       delete selectedItems.value[id];
       syncSelection();
     }
@@ -324,6 +337,7 @@ var LoraGallery = {
     function clearSelection() {
       selectedIds.value = [];
       weights.value = {};
+      enabledMap.value = {};
       selectedItems.value = {};
       syncSelection();
     }
@@ -336,18 +350,19 @@ var LoraGallery = {
         var item = selectedItems.value[id] || items.value.find(function(it) { return it.id === id; });
         return {
           id: id,
-          weight: weights.value[id] || 1.0,
+          weight: weights.value[id] !== undefined ? weights.value[id] : 1.0,
+          enabled: enabledMap.value[id] !== false,
           name: item ? item.name : "",
         };
       });
 
-      var payload = { selections: sels, weights: weights.value };
+      var payload = { selections: sels, weights: weights.value, enabled: enabledMap.value };
       var payloadStr = JSON.stringify(payload);
 
       fetch("/lora_gallery/cache_selection", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ node_id: nodeId, selections: sels, weights: weights.value })
+        body: JSON.stringify({ node_id: nodeId, selections: sels, weights: weights.value, enabled: enabledMap.value })
       }).catch(function() {});
 
       try {
@@ -381,6 +396,7 @@ var LoraGallery = {
           sels.forEach(function(s) {
             ids.push(s.id);
             if (s.weight !== undefined) weights.value[s.id] = s.weight;
+            enabledMap.value[s.id] = s.enabled !== false && (!data.enabled || data.enabled[s.id] !== false);
             if (s.name) selectedItems.value[s.id] = s;
           });
           selectedIds.value = ids;
@@ -396,6 +412,7 @@ var LoraGallery = {
             d.selections.forEach(function(s) {
               ids.push(s.id);
               if (s.weight !== undefined) weights.value[s.id] = s.weight;
+              enabledMap.value[s.id] = s.enabled !== false && (!d.enabled || d.enabled[s.id] !== false);
               // 恢复时尽量保留 name，若后端未返回则从当前 items 查找
               if (s.name) {
                 selectedItems.value[s.id] = s;
@@ -743,7 +760,12 @@ var LoraGallery = {
         // 优先从全局已选缓存取，其次从当前 items 查找
         var item = selectedItems.value[id] || items.value.find(function(it) { return it.id === id; });
         if (!item) return;
-        selectedList.push(h("div", { class: "lg-sel-item", key: id }, [
+        var enabled = enabledMap.value[id] !== false;
+        selectedList.push(h("div", {
+          class: "lg-sel-item" + (enabled ? " enabled" : " disabled"), key: id,
+          title: enabled ? "已启用；点击条目临时忽略此 LoRA" : "已忽略；点击条目重新启用此 LoRA",
+          onClick: function() { toggleEnabled(id); }
+        }, [
           h("img", { src: thumbUrl(id), class: "lg-sel-thumb", loading: "lazy", decoding: "async" }),
           h("div", { class: "lg-sel-info" }, [
             h("div", { class: "lg-sel-name", title: item.name }, item.name),
@@ -1062,7 +1084,7 @@ var LoraGallery = {
       }, [
         !galleryCollapsed.value ? h("div", { class: "lg-resizer-right", onMousedown: makeDragHandler("x", selectedWidth, 160, 360, true), title: "拖拽调整宽度" }) : null,
         h("div", { class: "lg-sel-hd" }, [
-          h("span", "已选 LoRA (" + selectedIds.value.length + ")"),
+          h("span", "已选 LoRA (" + selectedIds.value.length + " / 启用 " + selectedIds.value.filter(function(id) { return enabledMap.value[id] !== false; }).length + ")"),
           galleryCollapsed.value ? h("span", { class: "lg-sel-hd-tip" }, "画廊已折叠，可用顶部模型树继续添加") : null
         ]),
         h("div", { class: "lg-sel-manual" }, [
@@ -1245,7 +1267,12 @@ var CSS = [
   ".lg-sel-empty{padding:20px 10px;color:#666;text-align:center;font-size:11px}",
   ".lg-sel-list{flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px;min-height:0}",
   ".lg-selected-full .lg-sel-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));grid-auto-rows:min-content;align-content:start;padding:12px;gap:10px}",
-  ".lg-sel-item{display:flex;align-items:center;gap:8px;padding:6px;background:#1a1a24;border-radius:6px;border:1px solid #2a2a32}",
+  ".lg-sel-item{display:flex;align-items:center;gap:8px;padding:6px;background:#1a1a24;border-radius:6px;border:1px solid #2a2a32;cursor:pointer;transition:background .15s,border-color .15s,opacity .15s}",
+  ".lg-sel-item.enabled{border-color:#3b73d1;background:#223554;box-shadow:inset 3px 0 #4a86eb}",
+  ".lg-sel-item.enabled:hover{background:#294266;border-color:#5593ef}",
+  ".lg-sel-item.disabled{opacity:.58;border-style:dashed;background:#14141a}",
+  ".lg-sel-item.disabled:hover{opacity:.78;border-color:#596173}",
+  ".lg-sel-item.disabled .lg-sel-thumb{filter:grayscale(1)}",
   ".lg-sel-thumb{width:40px;height:40px;border-radius:4px;object-fit:cover;background:#000;flex-shrink:0}",
   ".lg-sel-info{flex:1;min-width:0}",
   ".lg-sel-name{font-size:11px;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",

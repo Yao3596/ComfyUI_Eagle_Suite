@@ -10,16 +10,30 @@ import numpy as np
 import folder_paths
 from .logger import logger
 from .utils import get_cached_ffmpeg, ensure_dir
+
+
+def _resolve_video_path(video):
+    if video is None:
+        return None
+    if isinstance(video, str):
+        return video if os.path.isfile(video) else None
+    try:
+        if hasattr(video, "get_stream_source"):
+            source = video.get_stream_source()
+            if isinstance(source, (str, os.PathLike)) and os.path.isfile(source):
+                return str(source)
+    except Exception:
+        pass
+    return None
+
+
 class EagleAudioExtractor:
     """音频提取节点 - 从视频中提取音频"""
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video_path": ("STRING", {
-                    "default": "",
-                    "placeholder": "视频文件路径"
-                }),
+                "video_path": ("VIDEO",),
                 "audio_codec": (["copy(原始流)", "aac", "mp3", "wav", "flac", "ogg", "m4a"], {
                     "default": "copy(原始流)"
                 }),
@@ -37,10 +51,11 @@ class EagleAudioExtractor:
     OUTPUT_NODE = True
     FUNCTION = "extract_audio"
     CATEGORY = "🦅 Eagle/音频"
-    def extract_audio(self, video_path: str, audio_codec: str, audio_bitrate: str,
-                      extract_audio: bool, output_dir: str = ""):
+    def extract_audio(self, video_path, audio_codec: str, audio_bitrate: str,
+                       extract_audio: bool, output_dir: str = ""):
         """从视频提取音频"""
-        if not video_path or not os.path.exists(video_path):
+        video_path = _resolve_video_path(video_path)
+        if not video_path:
             empty_audio = self._empty_audio()
             return (empty_audio, "", 0.0, 44100)
         ffmpeg = get_cached_ffmpeg()

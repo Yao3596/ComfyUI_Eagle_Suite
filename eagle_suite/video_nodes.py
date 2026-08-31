@@ -17,7 +17,9 @@ import torch
 import numpy as np
 from PIL import Image
 import folder_paths
+from comfy_api.input_impl import VideoFromFile
 from .logger import logger
+from .workflow_metadata import persist_workflow_for_media
 from .utils import (
     get_cached_ffmpeg,
     is_safe_path,
@@ -89,6 +91,10 @@ def _resolve_video_path(video):
         path = video.strip()
         return path if path and os.path.isfile(path) else None
     try:
+        if hasattr(video, "get_stream_source"):
+            source = video.get_stream_source()
+            if isinstance(source, (str, Path)) and os.path.isfile(source):
+                return str(source)
         for attr in ['video_path', 'path', 'file', 'filename']:
             if hasattr(video, attr):
                 path = getattr(video, attr)
@@ -109,6 +115,26 @@ def _resolve_video_path(video):
     except Exception:
         pass
     return None
+
+
+def _native_video(path):
+    """Wrap a persistent media file in ComfyUI's native VIDEO object."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        return VideoFromFile(os.path.abspath(path))
+    except Exception as error:
+        logger.warning(f"创建原生 VIDEO 输出失败 ({path}): {error}")
+        return None
+
+
+def _coerce_native_video(video):
+    """Keep native inputs unchanged and upgrade legacy path inputs."""
+    if video is None:
+        return None
+    if hasattr(video, "get_components") or hasattr(video, "save_to"):
+        return video
+    return _native_video(_resolve_video_path(video))
 def _extract_frames(video_path, target_fps, frame_limit=0):
     """从视频提取帧"""
     cap = None
@@ -333,7 +359,7 @@ class EagleImagesToVideo:
             },
             "optional": {
                 "images":        ("IMAGE",),
-                "input_video":   ("STRING",  {"forceInput": True}),
+                "input_video":   ("VIDEO",),
                 "frame_skip":    ("INT",     {
                     "default": 0, "min": 0, "max": 100, "step": 1,
                     "tooltip": (
@@ -361,9 +387,13 @@ class EagleImagesToVideo:
                 "annotation":    ("STRING",  {"default": "", "multiline": True}),
                 "star":          (STAR_OPTIONS, {"default": "0 未评分"}),
             },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE", "STRING")
-    RETURN_NAMES = ("filepath", "info", "video_path", "images", "input_video")
+    RETURN_TYPES = ("STRING", "STRING", "VIDEO", "IMAGE", "VIDEO")
+    RETURN_NAMES = ("filepath", "info", "video", "images", "input_video")
     OUTPUT_NODE = True
     FUNCTION = "save"
     CATEGORY = "🦅 Eagle/视频"
@@ -372,35 +402,36 @@ class EagleImagesToVideo:
              images=None, input_video=None, frame_skip=0, frame_limit=0,
              mask=None, audio=None, crf=20,
              custom_width=1920, custom_height=1080,
-             tags="", annotation="", star="0 未评分"):
+             tags="", annotation="", star="0 未评分",
+             prompt=None, extra_pnginfo=None):
         _check_ffmpeg()
         star_val = _parse_star(star)
         save_to_eagle = bool(eagle_folder.strip())
         save_to_local = bool(local_save_path.strip())
         if not save_to_eagle and not save_to_local:
-            return ("", "请至少指定 Eagle 文件夹或本地保存路径", "", images, input_video)
+            return ("", "请至少指定 Eagle 文件夹或本地保存路径", None, images, _coerce_native_video(input_video))
         if input_video is not None:
             video_path = _resolve_video_path(input_video)
             if video_path:
                 images = _extract_frames(video_path, fps, frame_limit)
                 if images is None:
-                    return ("", "无法从视频提取帧", "", images, input_video)
+                    return ("", "无法从视频提取帧", None, images, _coerce_native_video(input_video))
             else:
-                return ("", "无法解析视频路径", "", images, input_video)
+                return ("", "无法解析视频路径", None, images, _coerce_native_video(input_video))
         elif images is None:
-            return ("", "请提供 images 图像序列或 input_video 视频路径", "", images, input_video)
+            return ("", "请提供 images 图像序列或 input_video 视频", None, images, _coerce_native_video(input_video))
         if not isinstance(images, torch.Tensor):
             images = torch.as_tensor(images)
         if images.ndim == 3:
             images = images.unsqueeze(0)
         if images.shape[0] == 0:
-            return ("", "图像序列为空", "", images, input_video)
+            return ("", "图像序列为空", None, images, _coerce_native_video(input_video))
         # 抽帧
         if frame_skip > 0:
             indices = list(range(0, len(images), frame_skip + 1))
             images = images[indices]
             if images.shape[0] == 0:
-                return ("", "抽帧后图像序列为空", "", images, input_video)
+                return ("", "抽帧后图像序列为空", None, images, _coerce_native_video(input_video))
             fps = fps / (frame_skip + 1)
         # 帧数上限
         if frame_limit > 0 and len(images) > frame_limit:
@@ -561,6 +592,11 @@ class EagleImagesToVideo:
                 )
         finally:
             _cleanup_temp_file(audio_path)
+        workflow_storage = persist_workflow_for_media(
+            out_path, prompt, extra_pnginfo, ffmpeg,
+            force_companion=ext in {"gif", "apng", "webp"},
+        )
+        workflow_png = workflow_storage["companion_path"]
         eagle_result = ""
         if save_to_eagle:
             val, itype = _parse_folder_input(eagle_folder)
@@ -573,6 +609,14 @@ class EagleImagesToVideo:
                     success, msg = _save_to_eagle(
                         out_path, folder_id, unique_name, tags, annotation, star_val
                     )
+                    if workflow_png:
+                        workflow_tags = ",".join(filter(None, [tags, "ComfyUI工作流"]))
+                        _save_to_eagle(
+                            workflow_png, folder_id, unique_name + "_workflow",
+                            workflow_tags,
+                            (annotation + "\n" if annotation else "") + f"对应媒体: {filename}",
+                            star_val,
+                        )
                     eagle_result = (
                         f" | Eagle: {folder_id[:8]}..."
                         if success else f" | Eagle: {msg[:30]}"
@@ -580,9 +624,13 @@ class EagleImagesToVideo:
         alpha_tag = " [含Alpha]" if use_alpha else ""
         skip_tag  = f" [抽帧1/{frame_skip+1}]" if frame_skip > 0 else ""
         file_size = os.path.getsize(out_path) / (1024 * 1024)
+        workflow_tag = (
+            " | 工作流已嵌入" if workflow_storage["embedded"]["success"]
+            else (f" | 工作流PNG: {workflow_png}" if workflow_png else " | 工作流保存失败")
+        )
         info = (f"{filename} | {frame_data.shape[0]}帧{skip_tag} | {out_w}x{out_h}"
-                f"{alpha_tag} | {file_size:.1f}MB{eagle_result}")
-        return (out_path, info, out_path, images, input_video)
+                f"{alpha_tag} | {file_size:.1f}MB{eagle_result}{workflow_tag}")
+        return (out_path, info, _native_video(out_path), images, _coerce_native_video(input_video))
     def _calc_size(self, w, h, mode, target_w, target_h):
         if mode == "original":
             return w, h
@@ -644,7 +692,7 @@ class EagleVideoConverter:
                 "resolution":      (RESOLUTION_PRESETS, {"default": "1080p (1920x1080)"}),
             },
             "optional": {
-                "video":         ("STRING",  {"forceInput": True}),
+                "video":         ("VIDEO",),
                 "images":        ("IMAGE",),
                 "fps":           ("FLOAT",   {"default": 24.0, "min": 1.0,
                                               "max": 120.0, "step": 0.5}),
@@ -661,8 +709,12 @@ class EagleVideoConverter:
                 "annotation":    ("STRING",  {"default": "", "multiline": True}),
                 "star":          (STAR_OPTIONS, {"default": "0 未评分"}),
             },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
         }
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "IMAGE")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "VIDEO", "IMAGE")
     RETURN_NAMES = ("filepath", "info", "video_path", "video", "images")
     OUTPUT_NODE = True
     FUNCTION = "convert"
@@ -671,28 +723,29 @@ class EagleVideoConverter:
                 size_mode, resolution="1080p (1920x1080)",
                 video=None, images=None, fps=24.0, frame_limit=0, speed=1.0,
                 target_fps=0, custom_width=1920, custom_height=1080,
-                tags="", annotation="", star="0 未评分"):
+                tags="", annotation="", star="0 未评分",
+                prompt=None, extra_pnginfo=None):
         _check_ffmpeg()
         star_val = _parse_star(star)
         target   = _parse_resolution(resolution, custom_width, custom_height)
         save_to_eagle = bool(eagle_folder.strip())
         save_to_local = bool(local_save_path.strip())
         if not save_to_eagle and not save_to_local:
-            return ("", "请至少指定 Eagle 文件夹或本地保存路径", "", video, images)
+            return ("", "请至少指定 Eagle 文件夹或本地保存路径", "", _coerce_native_video(video), images)
         input_path     = None
         temp_video_path = None
         try:
             if video is not None:
                 input_path = _resolve_video_path(video)
                 if not input_path:
-                    return ("", "无法解析视频路径", "", video, images)
+                    return ("", "无法解析视频路径", "", _coerce_native_video(video), images)
                 if frame_limit > 0:
                     extracted_images = _extract_frames(input_path, fps, frame_limit)
                     if extracted_images is None:
-                        return ("", "帧提取失败", "", video, images)
+                        return ("", "帧提取失败", "", _coerce_native_video(video), images)
                     temp_video_path = self._create_temp_video(extracted_images, fps)
                     if not temp_video_path:
-                        return ("", "临时视频创建失败", "", video, images)
+                        return ("", "临时视频创建失败", "", _coerce_native_video(video), images)
                     input_path = temp_video_path
             elif images is not None:
                 final_images = images
@@ -704,7 +757,7 @@ class EagleVideoConverter:
                 temp_video_path = self._create_temp_video(final_images, fps)
                 input_path = temp_video_path
             if not input_path:
-                return ("", "无法准备输入视频", "", video, images)
+                return ("", "无法准备输入视频", "", _coerce_native_video(video), images)
             # 图像序列导出
             if format.startswith("sequence-"):
                 seq_w = target[0] if target else 0
@@ -713,7 +766,7 @@ class EagleVideoConverter:
                     input_path, format, eagle_folder, local_save_path,
                     filename_prefix, size_mode, seq_w, seq_h, tags, annotation, star_val
                 )
-                return (*seq_result, video, images)
+                return (*seq_result, _coerce_native_video(video), images)
             codec, ext = self.CODEC_MAP.get(format, ("libx264", "mp4"))
             crf = {"high": "18", "medium": "23", "low": "28"}.get(quality, "23")
             unique_name = _generate_unique_filename(filename_prefix)
@@ -796,9 +849,14 @@ class EagleVideoConverter:
                     "",
                     f"转换失败: {result.stderr.decode('utf-8', errors='replace')[-300:]}",
                     "",
-                    video,
+                    _coerce_native_video(video),
                     images
                 )
+            workflow_storage = persist_workflow_for_media(
+                out_path, prompt, extra_pnginfo, ffmpeg,
+                force_companion=ext in {"gif", "apng", "webp"},
+            )
+            workflow_png = workflow_storage["companion_path"]
             eagle_result = ""
             if save_to_eagle:
                 val, itype = _parse_folder_input(eagle_folder)
@@ -811,16 +869,28 @@ class EagleVideoConverter:
                         success, msg = _save_to_eagle(
                             out_path, folder_id, unique_name, tags, annotation, star_val
                         )
+                        if workflow_png:
+                            workflow_tags = ",".join(filter(None, [tags, "ComfyUI工作流"]))
+                            _save_to_eagle(
+                                workflow_png, folder_id, unique_name + "_workflow",
+                                workflow_tags,
+                                (annotation + "\n" if annotation else "") + f"对应媒体: {filename}",
+                                star_val,
+                            )
                         eagle_result = (
                             f" | Eagle: {folder_id[:8]}..."
                             if success else f" | Eagle: {msg[:30]}"
                         )
             file_size = os.path.getsize(out_path) / (1024 * 1024)
+            workflow_tag = (
+                " | 工作流已嵌入" if workflow_storage["embedded"]["success"]
+                else (f" | 工作流PNG: {workflow_png}" if workflow_png else " | 工作流保存失败")
+            )
             info = (
                 f"{filename} | {speed if speed != 1.0 else '原始速度'}"
-                f" | {file_size:.1f}MB{eagle_result}"
+                f" | {file_size:.1f}MB{eagle_result}{workflow_tag}"
             )
-            return (out_path, info, out_path, video, images)
+            return (out_path, info, out_path, _native_video(out_path), images)
         finally:
             _cleanup_temp_file(temp_video_path)
     def _export_sequence(self, input_path, format, eagle_folder, local_save_path,

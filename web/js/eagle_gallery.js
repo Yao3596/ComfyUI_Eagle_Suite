@@ -3,6 +3,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, computed, onMounted } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 // ============================================================
 // 文件夹树

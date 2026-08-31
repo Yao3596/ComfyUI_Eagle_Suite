@@ -11,6 +11,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 // ════════════════════════════════════════════════════════════════════════════
 // 常量定义

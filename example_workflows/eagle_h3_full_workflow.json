@@ -1,0 +1,421 @@
+{
+  "id": "eagle-h3-full-native-loop-workflow",
+  "revision": 0,
+  "last_node_id": 25,
+  "last_link_id": 37,
+  "nodes": [
+    {
+      "id": 1, "type": "UNETLoader", "pos": [-2450, -820], "size": [380, 96], "flags": {}, "order": 0, "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "MODEL", "type": "MODEL", "links": [15]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "UNETLoader"},
+      "widgets_values": ["Mini Max\\minimax_h3_fl2va_pruned_int8_convrot.safetensors", "default"],
+      "title": "① MiniMax H3 FL2VA 模型"
+    },
+    {
+      "id": 2, "type": "CLIPLoader", "pos": [-2450, -670], "size": [380, 128], "flags": {}, "order": 1, "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "CLIP", "type": "CLIP", "links": [8]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "CLIPLoader"},
+      "widgets_values": ["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "minimax", "default"],
+      "title": "② H3 文本编码器"
+    },
+    {
+      "id": 3, "type": "VAELoader", "pos": [-2450, -500], "size": [380, 96], "flags": {}, "order": 2, "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [9, 27]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "VAELoader"},
+      "widgets_values": ["minimax_h3_video_vae_fp16.safetensors"],
+      "title": "③ H3 视频 VAE"
+    },
+    {
+      "id": 4, "type": "VAELoader", "pos": [-2450, -350], "size": [380, 96], "flags": {}, "order": 3, "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [29]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "VAELoader"},
+      "widgets_values": ["minimax_h3_audio_vae_fp32.safetensors"],
+      "title": "④ H3 音频 VAE"
+    },
+    {
+      "id": 5, "type": "EagleDirectorSkillNode", "pos": [-1900, -820], "size": [430, 300], "flags": {}, "order": 4, "mode": 0,
+      "inputs": [
+        {"name": "director_skill", "type": "STRING"},
+        {"name": "ui_state", "type": "STRING"}
+      ],
+      "outputs": [{"name": "director_skill", "type": "STRING", "links": [1]}],
+      "properties": {"Node name for S&R": "EagleDirectorSkillNode"},
+      "widgets_values": ["", "{}"],
+      "title": "🦅 导演技能库"
+    },
+    {
+      "id": 6, "type": "EagleAPILoader", "pos": [-1900, -440], "size": [430, 190], "flags": {}, "order": 5, "mode": 0,
+      "inputs": [{"name": "model_name", "type": "STRING"}],
+      "outputs": [
+        {"name": "api_key", "type": "STRING", "links": []},
+        {"name": "base_url", "type": "STRING", "links": []},
+        {"name": "model", "type": "STRING", "links": []},
+        {"name": "api_config", "type": "API_CONFIG", "links": [2]},
+        {"name": "model_type", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleAPILoader"},
+      "widgets_values": [""],
+      "title": "可选：导演台 AI 模型配置"
+    },
+    {
+      "id": 7, "type": "EagleH3DirectorNode", "pos": [-1360, -820], "size": [760, 520], "flags": {}, "order": 6, "mode": 0,
+      "inputs": [
+        {"name": "LLM_HINT", "type": "STRING", "shape": 7},
+        {"name": "foundation_input", "type": "STRING", "shape": 7},
+        {"name": "api_config", "type": "API_CONFIG", "shape": 7, "link": 2},
+        {"name": "local_model", "type": "EAGLE_LOCAL_LLM_MODEL", "shape": 7},
+        {"name": "director_skill", "type": "STRING", "shape": 7, "link": 1},
+        {"name": "h3_state", "type": "STRING", "widget": {"name": "h3_state"}},
+        {"name": "skill_request", "type": "STRING", "widget": {"name": "skill_request"}}
+      ],
+      "outputs": [
+        {"name": "plan", "type": "H3_CHAIN_PLAN", "links": [3]},
+        {"name": "media_bundle", "type": "H3_MEDIA_BUNDLE", "links": []},
+        {"name": "width", "type": "INT", "links": []},
+        {"name": "height", "type": "INT", "links": []},
+        {"name": "clip_count", "type": "INT", "links": []},
+        {"name": "video_blend_frames", "type": "INT", "links": []},
+        {"name": "summary", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleH3DirectorNode"},
+      "widgets_values": ["{}", "", ""],
+      "title": "🦅 H3 导演台",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 8, "type": "EagleH3PlanNode", "pos": [-1360, -220], "size": [520, 230], "flags": {}, "order": 7, "mode": 0,
+      "inputs": [
+        {"name": "plan", "type": "H3_CHAIN_PLAN", "link": 3},
+        {"name": "run_name_override", "type": "STRING"},
+        {"name": "output_dir", "type": "STRING"},
+        {"name": "resume_policy", "type": "STRING"},
+        {"name": "mode", "type": "STRING"},
+        {"name": "max_shots", "type": "INT"}
+      ],
+      "outputs": [
+        {"name": "run_state", "type": "H3_RUN_STATE", "links": [4]},
+        {"name": "summary", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleH3PlanNode"},
+      "widgets_values": ["", "", "resume", "auto", 0],
+      "title": "🦅 H3 · 计划初始化 / 恢复",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 9, "type": "EagleH3NativeLoopStartNode", "pos": [-700, -820], "size": [400, 220], "flags": {}, "order": 8, "mode": 0,
+      "inputs": [
+        {"name": "run_state", "type": "H3_RUN_STATE", "link": 4},
+        {"name": "start_index", "type": "INT"}
+      ],
+      "outputs": [
+        {"name": "flow", "type": "H3_LOOP_FLOW", "links": [5]},
+        {"name": "run_state", "type": "H3_RUN_STATE", "links": [6]},
+        {"name": "width", "type": "INT", "links": [11]},
+        {"name": "height", "type": "INT", "links": [12]},
+        {"name": "fps", "type": "INT", "links": [31]},
+        {"name": "status", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleH3NativeLoopStartNode"},
+      "widgets_values": [1],
+      "title": "🦅 H3 · 原生循环开始",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 10, "type": "EagleH3ShotContextNode", "pos": [-220, -820], "size": [460, 420], "flags": {}, "order": 9, "mode": 0,
+      "inputs": [
+        {"name": "run_state", "type": "H3_RUN_STATE", "link": 6},
+        {"name": "prev_clip", "type": "VIDEO", "shape": 7},
+        {"name": "context_frames_override", "type": "INT", "widget": {"name": "context_frames_override"}},
+        {"name": "seed_image", "type": "IMAGE", "shape": 7, "link": 7}
+      ],
+      "outputs": [
+        {"name": "run_state", "type": "H3_RUN_STATE", "links": [33]},
+        {"name": "prompt", "type": "STRING", "links": [10]},
+        {"name": "seed", "type": "INT", "links": [16]},
+        {"name": "steps", "type": "INT", "links": [20]},
+        {"name": "raw_frames", "type": "INT", "links": [13]},
+        {"name": "delivered_frames", "type": "INT", "links": []},
+        {"name": "blend_frames", "type": "INT", "links": []},
+        {"name": "continuation_mode", "type": "STRING", "links": []},
+        {"name": "shot_id", "type": "STRING", "links": []},
+        {"name": "is_first", "type": "BOOL", "links": []},
+        {"name": "context_image", "type": "IMAGE", "links": [14]},
+        {"name": "context_frames", "type": "INT", "links": []},
+        {"name": "has_context", "type": "BOOL", "links": []},
+        {"name": "summary", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleH3ShotContextNode"},
+      "widgets_values": [0],
+      "title": "🦅 H3 · 当前镜头 + 自动上下文",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 11, "type": "LoadImage", "pos": [-700, -510], "size": [400, 320], "flags": {}, "order": 10, "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [7]},
+        {"name": "MASK", "type": "MASK", "links": []}
+      ],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "LoadImage"},
+      "widgets_values": ["example.png", "image"],
+      "title": "首镜起始帧（请替换）"
+    },
+    {
+      "id": 12, "type": "MiniMaxH3ImageToVideo", "pos": [340, -820], "size": [560, 430], "flags": {}, "order": 11, "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 8},
+        {"name": "vae", "type": "VAE", "link": 9},
+        {"name": "first_frame", "type": "IMAGE", "shape": 7, "link": 14},
+        {"name": "last_frame", "type": "IMAGE", "shape": 7},
+        {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 10},
+        {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 11},
+        {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 12},
+        {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": 13}
+      ],
+      "outputs": [
+        {"name": "positive", "type": "CONDITIONING", "links": [18]},
+        {"name": "LATENT", "type": "LATENT", "links": [25]}
+      ],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "MiniMaxH3ImageToVideo"},
+      "widgets_values": ["由导演台逐场景提供提示词", 960, 544, 243],
+      "title": "MiniMax H3 FL2VA 条件",
+      "color": "#346434", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 13, "type": "MiniMaxH3SigmaShift", "pos": [340, -300], "size": [320, 120], "flags": {}, "order": 12, "mode": 0,
+      "inputs": [{"name": "model", "type": "MODEL", "link": 15}],
+      "outputs": [{"name": "MODEL", "type": "MODEL", "links": [17, 19]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "MiniMaxH3SigmaShift"},
+      "widgets_values": [12.0, 3.0],
+      "title": "MiniMax H3 Sigma Shift"
+    },
+    {
+      "id": 14, "type": "RandomNoise", "pos": [960, -780], "size": [300, 96], "flags": {}, "order": 13, "mode": 0,
+      "inputs": [{"name": "noise_seed", "type": "INT", "widget": {"name": "noise_seed"}, "link": 16}],
+      "outputs": [{"name": "NOISE", "type": "NOISE", "links": [21]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "RandomNoise"},
+      "widgets_values": [0, "fixed"],
+      "title": "逐镜头种子"
+    },
+    {
+      "id": 15, "type": "KSamplerSelect", "pos": [960, -650], "size": [300, 96], "flags": {}, "order": 14, "mode": 0,
+      "inputs": [],
+      "outputs": [{"name": "SAMPLER", "type": "SAMPLER", "links": [23]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "KSamplerSelect"},
+      "widgets_values": ["lcm"],
+      "title": "H3 采样器"
+    },
+    {
+      "id": 16, "type": "BasicGuider", "pos": [960, -510], "size": [300, 110], "flags": {}, "order": 15, "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 17},
+        {"name": "conditioning", "type": "CONDITIONING", "link": 18}
+      ],
+      "outputs": [{"name": "GUIDER", "type": "GUIDER", "links": [22]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "BasicGuider"},
+      "widgets_values": [],
+      "title": "H3 Guider"
+    },
+    {
+      "id": 17, "type": "BasicScheduler", "pos": [960, -350], "size": [300, 130], "flags": {}, "order": 16, "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 19},
+        {"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": 20}
+      ],
+      "outputs": [{"name": "SIGMAS", "type": "SIGMAS", "links": [24]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "BasicScheduler"},
+      "widgets_values": ["beta", 8, 1.0],
+      "title": "逐镜头步数"
+    },
+    {
+      "id": 18, "type": "SamplerCustomAdvanced", "pos": [1340, -780], "size": [340, 390], "flags": {}, "order": 17, "mode": 0,
+      "inputs": [
+        {"name": "noise", "type": "NOISE", "link": 21},
+        {"name": "guider", "type": "GUIDER", "link": 22},
+        {"name": "sampler", "type": "SAMPLER", "link": 23},
+        {"name": "sigmas", "type": "SIGMAS", "link": 24},
+        {"name": "latent_image", "type": "LATENT", "link": 25}
+      ],
+      "outputs": [
+        {"name": "output", "type": "LATENT", "links": [26, 28]},
+        {"name": "denoised_output", "type": "LATENT", "links": []}
+      ],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "SamplerCustomAdvanced"},
+      "widgets_values": [],
+      "title": "H3 单镜头采样"
+    },
+    {
+      "id": 19, "type": "VAEDecode", "pos": [1760, -780], "size": [280, 110], "flags": {}, "order": 18, "mode": 0,
+      "inputs": [
+        {"name": "samples", "type": "LATENT", "link": 26},
+        {"name": "vae", "type": "VAE", "link": 27}
+      ],
+      "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [30]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "VAEDecode"},
+      "widgets_values": [],
+      "title": "解码视频帧"
+    },
+    {
+      "id": 20, "type": "VAEDecodeAudio", "pos": [1760, -620], "size": [280, 110], "flags": {}, "order": 19, "mode": 0,
+      "inputs": [
+        {"name": "samples", "type": "LATENT", "link": 28},
+        {"name": "vae", "type": "VAE", "link": 29}
+      ],
+      "outputs": [{"name": "AUDIO", "type": "AUDIO", "links": [32, 35]}],
+      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "VAEDecodeAudio"},
+      "widgets_values": [],
+      "title": "解码同步音频"
+    },
+    {
+      "id": 21, "type": "EagleAdvancedVideoSaver", "pos": [2120, -820], "size": [430, 540], "flags": {}, "order": 20, "mode": 0,
+      "inputs": [
+        {"name": "eagle_folder", "type": "STRING"},
+        {"name": "local_save_path", "type": "STRING"},
+        {"name": "filename_prefix", "type": "STRING"},
+        {"name": "fps", "type": "INT", "link": 31},
+        {"name": "format", "type": "STRING"},
+        {"name": "codec", "type": "STRING"},
+        {"name": "quality", "type": "STRING"},
+        {"name": "preview", "type": "BOOLEAN"},
+        {"name": "eagle_rating", "type": "INT"},
+        {"name": "images", "type": "IMAGE", "shape": 7, "link": 30},
+        {"name": "video", "type": "VIDEO", "shape": 7},
+        {"name": "audio", "type": "AUDIO", "shape": 7, "link": 32},
+        {"name": "enable_interpolation", "type": "BOOLEAN", "shape": 7},
+        {"name": "interpolation_multiplier", "type": "INT", "shape": 7},
+        {"name": "resize_width", "type": "INT", "shape": 7},
+        {"name": "resize_height", "type": "INT", "shape": 7},
+        {"name": "audio_codec", "type": "STRING", "shape": 7},
+        {"name": "audio_bitrate", "type": "STRING", "shape": 7},
+        {"name": "pixel_format", "type": "STRING", "shape": 7},
+        {"name": "eagle_tags", "type": "STRING", "shape": 7},
+        {"name": "eagle_annotation", "type": "STRING", "shape": 7}
+      ],
+      "outputs": [
+        {"name": "video", "type": "VIDEO", "links": [34]},
+        {"name": "video_passthrough", "type": "VIDEO", "links": []},
+        {"name": "audio_passthrough", "type": "AUDIO", "links": []},
+        {"name": "file_path", "type": "STRING", "links": []},
+        {"name": "metadata_json", "type": "STRING", "links": []},
+        {"name": "save_result", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleAdvancedVideoSaver"},
+      "widgets_values": ["", "", "h3_segment", 24, "mp4", "h264", "high", true, 0],
+      "title": "生成单镜头预览视频",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 22, "type": "EagleH3CheckpointReviewNode", "pos": [2660, -820], "size": [470, 510], "flags": {}, "order": 21, "mode": 0,
+      "inputs": [
+        {"name": "run_state", "type": "H3_RUN_STATE", "link": 33},
+        {"name": "video", "type": "VIDEO", "link": 34},
+        {"name": "audio", "type": "AUDIO", "shape": 7, "link": 35},
+        {"name": "trim_start", "type": "FLOAT"},
+        {"name": "trim_end", "type": "FLOAT"},
+        {"name": "review_decision", "type": "STRING"}
+      ],
+      "outputs": [
+        {"name": "clip", "type": "VIDEO", "links": []},
+        {"name": "run_state", "type": "H3_RUN_STATE", "links": [36]},
+        {"name": "decision", "type": "STRING", "links": [37]},
+        {"name": "awaiting_review", "type": "BOOL", "links": []},
+        {"name": "approved", "type": "BOOL", "links": []},
+        {"name": "clip_path", "type": "STRING", "links": []},
+        {"name": "summary", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleH3CheckpointReviewNode"},
+      "widgets_values": [0.0, 0.0, ""],
+      "title": "🦅 H3 · 分段保存 / 裁剪 / 审片",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 23, "type": "EagleH3NativeLoopEndNode", "pos": [3240, -820], "size": [470, 310], "flags": {}, "order": 22, "mode": 0,
+      "inputs": [
+        {"name": "flow", "type": "H3_LOOP_FLOW", "link": 5},
+        {"name": "run_state", "type": "H3_RUN_STATE", "link": 36},
+        {"name": "decision", "type": "STRING", "shape": 7, "link": 37},
+        {"name": "filename", "type": "STRING"},
+        {"name": "format", "type": "STRING"},
+        {"name": "fps_override", "type": "INT"}
+      ],
+      "outputs": [
+        {"name": "run_state", "type": "H3_RUN_STATE", "links": []},
+        {"name": "video", "type": "VIDEO", "links": []},
+        {"name": "done", "type": "BOOL", "links": []},
+        {"name": "next_index", "type": "INT", "links": []},
+        {"name": "summary", "type": "STRING", "links": []}
+      ],
+      "properties": {"Node name for S&R": "EagleH3NativeLoopEndNode"},
+      "widgets_values": ["", "mp4", 0],
+      "title": "🦅 H3 · 循环结束 + 自动合成",
+      "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 24, "type": "Note", "pos": [-2450, -1100], "size": [1550, 220], "flags": {}, "order": 23, "mode": 0,
+      "inputs": [], "outputs": [],
+      "properties": {"Node name for S&R": "Note"},
+      "widgets_values": ["EAGLE H3 全套工作流\n\n1. 先确认左侧四个模型名称与本机路径一致。\n2. 在 H3 导演台添加任意数量场景，生成/编辑台本、分镜、台词与 <Picture #> 标签。\n3. 替换“首镜起始帧”；续镜会自动读取上一镜检查点，不需要手动接回。\n4. 计划节点 mode=auto：一次 Queue 自动跑完全部场景；mode=interactive：每镜头停在审片节点。\n5. 审片决定支持 approve / retry / reroll / stop；最后一镜通过后自动合成最终 MP4。"],
+      "title": "使用说明", "color": "#432f66", "bgcolor": "rgba(24,24,27,.9)"
+    },
+    {
+      "id": 25, "type": "Note", "pos": [2620, -240], "size": [1090, 210], "flags": {}, "order": 24, "mode": 0,
+      "inputs": [], "outputs": [],
+      "properties": {"Node name for S&R": "Note"},
+      "widgets_values": ["审片与恢复\n\n• auto 模式默认通过并继续，适合一次生成全部场景。\n• interactive 模式可在右侧预览后选择通过、按原提示重试、换种子重抽或停止。\n• resume_policy=resume 会从已保存检查点续跑；overwrite 会重建同名任务。\n• 最终视频从“循环结束 + 自动合成”的 video 输出取得，分镜片段与清单保存在 ComfyUI/output/h3_chains。"],
+      "title": "审片 / 重试 / 断点续跑", "color": "#432f66", "bgcolor": "rgba(24,24,27,.9)"
+    }
+  ],
+  "links": [
+    [1, 5, 0, 7, 4],
+    [2, 6, 3, 7, 2],
+    [3, 7, 0, 8, 0],
+    [4, 8, 0, 9, 0],
+    [5, 9, 0, 23, 0],
+    [6, 9, 1, 10, 0],
+    [7, 11, 0, 10, 3],
+    [8, 2, 0, 12, 0],
+    [9, 3, 0, 12, 1],
+    [10, 10, 1, 12, 4],
+    [11, 9, 2, 12, 5],
+    [12, 9, 3, 12, 6],
+    [13, 10, 4, 12, 7],
+    [14, 10, 10, 12, 2],
+    [15, 1, 0, 13, 0],
+    [16, 10, 2, 14, 0],
+    [17, 13, 0, 16, 0],
+    [18, 12, 0, 16, 1],
+    [19, 13, 0, 17, 0],
+    [20, 10, 3, 17, 1],
+    [21, 14, 0, 18, 0],
+    [22, 16, 0, 18, 1],
+    [23, 15, 0, 18, 2],
+    [24, 17, 0, 18, 3],
+    [25, 12, 1, 18, 4],
+    [26, 18, 0, 19, 0],
+    [27, 3, 0, 19, 1],
+    [28, 18, 0, 20, 0],
+    [29, 4, 0, 20, 1],
+    [30, 19, 0, 21, 9],
+    [31, 9, 4, 21, 3],
+    [32, 20, 0, 21, 11],
+    [33, 10, 0, 22, 0],
+    [34, 21, 0, 22, 1],
+    [35, 20, 0, 22, 2],
+    [36, 22, 1, 23, 1],
+    [37, 22, 2, 23, 2]
+  ],
+  "groups": [
+    {"id": 1, "title": "① 模型与 VAE", "bounding": [-2500, -900, 500, 760], "color": "#3f789e", "flags": {}},
+    {"id": 2, "title": "② 导演技能 / API / 导演台 / 计划", "bounding": [-1960, -900, 1420, 980], "color": "#744c8c", "flags": {}},
+    {"id": 3, "title": "③ H3 原生循环：场景参数与上下文", "bounding": [-760, -900, 1080, 800], "color": "#2f6b3f", "flags": {}},
+    {"id": 4, "title": "④ MiniMax H3 条件与采样", "bounding": [280, -900, 1800, 800], "color": "#8a5a2b", "flags": {}},
+    {"id": 5, "title": "⑤ 单镜保存 / 审片 / 自动合成", "bounding": [2080, -900, 1700, 910], "color": "#3f789e", "flags": {}}
+  ],
+  "config": {},
+  "extra": {"ds": {"scale": 0.64, "offset": [1200, 610]}},
+  "version": 0.4
+}

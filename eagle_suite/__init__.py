@@ -27,6 +27,9 @@ from .utils import (
 # 节点映射（供根 __init__.py 使用）
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
+# 触发 H3 制片流水线路由登记。
+from . import h3_pipeline  # noqa: F401
+
 # 延迟注册可能依赖 PromptServer.instance 的路由。
 # 原方案在模块顶层使用 @PromptServer.instance.routes 装饰器，在 ComfyUI 热重载
 # 或 PromptServer 尚未就绪的导入阶段会触发 AttributeError。现统一改为：

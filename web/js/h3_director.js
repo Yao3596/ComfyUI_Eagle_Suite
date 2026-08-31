@@ -8,6 +8,7 @@ import {
     createApp, defineComponent, reactive, computed, watch,
     ref, nextTick, provide, inject
 } from "../lib/vue.esm-browser.js";
+import "./eagle_vue_theme.js";
 
 console.log("[EagleH3Director] h3_director.js loaded");
 
@@ -16,13 +17,14 @@ console.log("[EagleH3Director] h3_director.js loaded");
 // ─────────────────────────────────────────────────────────────────
 var H3D_CSS = `
 .h3d-root{
-  --h3d-bg:#0b0c0f; --h3d-bg2:#14151b; --h3d-bg3:#1c1e26; --h3d-bg4:#242731;
-  --h3d-bd:#30333f; --h3d-bdh:#3f4352;
-  --h3d-fg:#e8ebf2; --h3d-muted:#9aa2b1;
-  --h3d-primary:#4a7de0; --h3d-primaryh:#5a8df0;
+  --h3d-theme-bg:var(--comfy-menu-bg,var(--bg-color,#0b0c0f)); --h3d-fg:var(--fg-color,#e8ebf2);
+  --h3d-bg:var(--h3d-theme-bg); --h3d-bg2:color-mix(in srgb,var(--h3d-theme-bg) 94%,var(--h3d-fg) 6%); --h3d-bg3:color-mix(in srgb,var(--h3d-theme-bg) 88%,var(--h3d-fg) 12%); --h3d-bg4:color-mix(in srgb,var(--h3d-theme-bg) 81%,var(--h3d-fg) 19%);
+  --h3d-bd:var(--border-color,color-mix(in srgb,var(--h3d-theme-bg) 68%,var(--h3d-fg) 32%)); --h3d-bdh:color-mix(in srgb,var(--h3d-theme-bg) 55%,var(--h3d-fg) 45%);
+  --h3d-muted:var(--descrip-text,color-mix(in srgb,var(--h3d-fg) 64%,var(--h3d-theme-bg) 36%));
+  --h3d-primary:var(--p-primary-color,#4a7de0); --h3d-primaryh:var(--p-primary-hover-color,#5a8df0);
   --h3d-danger:#c14b4b; --h3d-success:#4a9a62; --h3d-warn:#d4a24a;
   --h3d-radius:8px;
-  display:flex; flex-direction:column; height:100%; min-height:0;
+  display:flex; flex-direction:column; width:100%; max-width:100%; height:100%; min-height:0; min-width:0;
   background:var(--h3d-bg); color:var(--h3d-fg);
   font:13px/1.45 system-ui,"Segoe UI",sans-serif; box-sizing:border-box; overflow:hidden;
 }
@@ -72,11 +74,12 @@ var H3D_CSS = `
 /* 高亮编辑区 */
 .h3d-hl-wrap{position:relative;flex:1;min-height:60px;display:flex;flex-direction:column;background:var(--h3d-bg4);border:1px solid var(--h3d-bd);border-radius:6px;overflow:hidden;}
 .h3d-hl-wrap:focus-within{border-color:var(--h3d-primary);}
-.h3d-hl-layer,.h3d-hl-textarea{position:absolute;top:0;left:0;right:0;bottom:0;margin:0;padding:6px 8px;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;word-wrap:break-word;box-sizing:border-box;background:transparent;}
-.h3d-hl-layer{color:var(--h3d-fg);pointer-events:none;z-index:1;overflow:hidden;}
-.h3d-hl-textarea{color:transparent;caret-color:var(--h3d-fg);resize:none;outline:none;border:none;z-index:2;overflow:auto;}
-.h3d-hl-textarea::placeholder{color:transparent;}
-.h3d-hl-placeholder{color:var(--h3d-muted);pointer-events:none;}
+.h3d-atomic-editor{position:absolute;inset:0;margin:0;padding:6px 8px;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow:auto;word-break:break-word;outline:none;border:0;color:var(--h3d-fg);caret-color:var(--h3d-fg);}
+.h3d-atomic-editor:empty:before{content:attr(data-placeholder);color:var(--h3d-muted);pointer-events:none;}
+.h3d-atomic-token{display:inline-flex;align-items:center;gap:4px;max-width:92%;min-height:20px;padding:1px 6px;border-radius:5px;border:1px solid #3a5f9e;background:#1a2f4a;color:#8fc4ff;vertical-align:baseline;user-select:none;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.h3d-atomic-token.media{border-color:#3d5364;background:#172630;color:#8fc8e8}.h3d-atomic-token.video{border-color:#59436f;background:#271e34;color:#c7a6e8}.h3d-atomic-token.audio{border-color:#515864;background:#24272d;color:#cbd2dc}
+.h3d-atomic-token.ignored{filter:saturate(.2);opacity:.48;text-decoration:line-through;border-style:dashed}.h3d-atomic-token:hover{opacity:.8;box-shadow:0 0 0 1px rgba(103,159,244,.3)}
+.h3d-atomic-token .token-thumb{width:16px;height:16px;flex:0 0 16px;background-size:cover;background-position:center;border-radius:3px}.h3d-atomic-token .token-state{font:9px/1 system-ui;color:inherit;opacity:.8}
 .h3d-hl-ref{display:inline-block;background:#3a3018;color:#f3c96a;border:1px solid #7a5c1a;border-radius:4px;padding:0 4px;font-size:11px;}
 .h3d-hl-d{display:inline-block;background:#1a2f4a;color:#7ab8ff;border:1px solid #3a5f9e;border-radius:4px;padding:0 4px;font-size:11px;}
 .h3d-collapse-hd{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;color:var(--h3d-muted);font-size:11px;padding:4px 0;}
@@ -134,21 +137,40 @@ var H3D_CSS = `
 .h3d-media-add{flex:0 0 82px;height:62px;border:1px dashed #465064;border-radius:6px;background:#141720;color:var(--h3d-muted);cursor:pointer;font-size:11px}.h3d-media-add:hover{color:#fff;border-color:var(--h3d-primary)}
 .h3d-media-token{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 4px 0 2px;border-radius:4px;border:1px solid #3d5364;background:#172630;color:#8fc8e8;font-size:10px;vertical-align:baseline;}
 .h3d-media-token.video{background:#271e34;border-color:#59436f;color:#c7a6e8}.h3d-media-token.audio{background:#24272d;border-color:#515864;color:#cbd2dc}
-.h3d-media-token img{width:15px;height:15px;object-fit:cover;border-radius:3px}.h3d-media-token i{width:15px;text-align:center;font-style:normal;font-size:10px}
+.h3d-media-token .token-thumb{width:15px;height:15px;background-size:cover;background-position:center;border-radius:3px}.h3d-media-token i{width:15px;text-align:center;font-style:normal;font-size:10px}
 .h3d-media-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.h3d-media-detail{border:1px solid var(--h3d-bd);border-radius:7px;background:var(--h3d-bg2);padding:7px;min-width:0}
 .h3d-media-detail-preview{height:82px;border-radius:5px;overflow:hidden;background:#0b0d12;display:flex;align-items:center;justify-content:center;position:relative}.h3d-media-detail-preview img,.h3d-media-detail-preview video{width:100%;height:100%;object-fit:cover}.h3d-media-detail-preview .audio-icon{font-size:30px;color:#73b7ed}
+.h3d-media-missing{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:5px;text-align:center;background:#12151c;color:#8f98a8;font-size:9px}
 .h3d-media-dropzone{min-height:118px;border:2px dashed #465064;border-radius:9px;background:linear-gradient(180deg,#111722,#0e1118);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:var(--h3d-muted);cursor:pointer;transition:.15s;flex-shrink:0}
 .h3d-media-dropzone:hover{border-color:var(--h3d-primary);background:#131c2b;color:#fff}.h3d-media-dropzone .drop-icon{font-size:26px;color:#73a7ef;line-height:1}.h3d-media-dropzone .drop-title{font-size:12px;font-weight:600}.h3d-media-dropzone .drop-sub{font-size:10px;color:var(--h3d-muted)}
-.h3d-trim-overlay{position:absolute;z-index:40;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px}.h3d-trim-dialog{width:min(620px,92%);background:#171b23;border:1px solid #465064;border-radius:9px;padding:14px;box-shadow:0 14px 50px rgba(0,0,0,.55)}
+.h3d-trim-overlay{position:absolute;z-index:40;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px}.h3d-trim-dialog{width:min(760px,94%);background:#171b23;border:1px solid #465064;border-radius:9px;padding:14px;box-shadow:0 14px 50px rgba(0,0,0,.55)}
 .h3d-trim-preview{height:220px;background:#090b0f;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin:10px 0}.h3d-trim-preview video{max-width:100%;max-height:100%}.h3d-trim-preview audio{width:92%}
 .h3d-trim-ranges{display:grid;grid-template-columns:72px 1fr 70px;gap:7px;align-items:center;margin:8px 0}.h3d-trim-ranges input[type=range]{width:100%}
+.h3d-trim-timeline{margin-top:9px;border:1px solid var(--h3d-bd);border-radius:7px;background:#0d1016;overflow:hidden;user-select:none}
+.h3d-trim-ruler{position:relative;height:24px;border-bottom:1px solid var(--h3d-bd);background:#171a22;color:var(--h3d-muted);font:9px/1 ui-monospace,monospace}
+.h3d-trim-tick{position:absolute;bottom:0;height:8px;border-left:1px solid #555e6e}.h3d-trim-tick span{position:absolute;left:3px;bottom:10px;white-space:nowrap}
+.h3d-trim-track{position:relative;height:82px;cursor:pointer;overflow:hidden;background:#090b0f}
+.h3d-trim-thumbs{position:absolute;inset:0;display:flex}.h3d-trim-thumb{flex:1;min-width:0;border-right:1px solid rgba(255,255,255,.08);background:#151922;overflow:hidden}.h3d-trim-thumb img{width:100%;height:100%;object-fit:cover;display:block}.h3d-trim-thumb.empty{display:grid;place-items:center;color:var(--h3d-muted);font-size:10px}
+.h3d-trim-shade{position:absolute;top:0;bottom:0;background:rgba(4,6,10,.72);pointer-events:none;z-index:2}.h3d-trim-shade.left{left:0}.h3d-trim-shade.right{right:0}
+.h3d-trim-selection{position:absolute;top:0;bottom:0;border:2px solid var(--h3d-primary);background:rgba(74,125,224,.08);pointer-events:none;z-index:3}.h3d-trim-selection:before,.h3d-trim-selection:after{content:"";position:absolute;top:50%;width:7px;height:26px;transform:translateY(-50%);border-radius:3px;background:var(--h3d-primary);box-shadow:0 0 0 1px rgba(255,255,255,.45)}.h3d-trim-selection:before{left:-5px}.h3d-trim-selection:after{right:-5px}
+.h3d-trim-playhead{position:absolute;top:0;bottom:0;width:1px;background:#ff4e54;box-shadow:0 0 0 1px rgba(255,78,84,.18);pointer-events:none;z-index:7}.h3d-trim-playhead:before{content:"";position:absolute;top:0;left:-4px;border-left:4px solid transparent;border-right:4px solid transparent;border-top:7px solid #ff4e54}
+.h3d-trim-range{position:absolute;left:0;top:0;width:100%;height:100%;margin:0;opacity:0;pointer-events:none;z-index:5}.h3d-trim-range::-webkit-slider-thumb{width:18px;height:82px;pointer-events:auto;cursor:ew-resize}.h3d-trim-range.end{z-index:6}
+.h3d-trim-values{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-top:8px}.h3d-trim-value{padding:7px;border:1px solid var(--h3d-bd);border-radius:6px;background:var(--h3d-bg3)}.h3d-trim-value label{display:block;color:var(--h3d-muted);font-size:10px;margin-bottom:4px}.h3d-trim-value .line{display:flex;align-items:center;gap:5px}.h3d-trim-value input{width:86px}.h3d-trim-value b{font:10px/1.3 ui-monospace,monospace;color:var(--h3d-muted)}
+.h3d-trim-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:8px}.h3d-trim-tools .summary{margin-left:auto;color:var(--h3d-muted);font:10px/1.3 ui-monospace,monospace}
+.h3d-input-overlay{position:absolute;z-index:45;inset:38px 8px 8px;background:rgba(5,7,11,.82);display:flex;align-items:center;justify-content:center;padding:10px}
+.h3d-input-dialog{width:min(760px,98%);height:min(560px,98%);min-height:300px;background:#151820;border:1px solid #41495a;border-radius:9px;box-shadow:0 18px 54px rgba(0,0,0,.68);display:flex;flex-direction:column;overflow:hidden}
+.h3d-input-head{display:flex;align-items:center;gap:7px;padding:8px;border-bottom:1px solid var(--h3d-bd);background:#191c24}.h3d-input-head .h3d-inp{flex:1}
+.h3d-input-body{position:relative;display:grid;grid-template-columns:minmax(210px,42%) 1fr;flex:1;min-height:0}
+.h3d-input-preview{padding:10px;border-right:1px solid var(--h3d-bd);background:#101218;min-width:0;overflow:hidden;display:flex;flex-direction:column;gap:7px}
+.h3d-input-preview img{width:100%;flex:1;min-height:0;object-fit:contain;background:#090a0d;border-radius:6px}.h3d-input-preview .empty{margin:auto;color:var(--h3d-muted);font-size:11px;text-align:center}
+.h3d-input-list{overflow-y:auto;padding:6px}.h3d-input-item{width:100%;border:0;border-radius:5px;background:transparent;color:#c7ccd6;display:flex;align-items:center;gap:7px;padding:6px 8px;text-align:left;cursor:pointer;font:11px/1.35 system-ui}.h3d-input-item:hover,.h3d-input-item.active{background:#283043;color:#fff}.h3d-input-item .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.h3d-input-item .folder{max-width:145px;color:#747e90;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 `;
 
 // ─────────────────────────────────────────────────────────────────
 // 数据工厂
 // ─────────────────────────────────────────────────────────────────
 function createScene(id) {
-    return { id: id, title: '', defaultSeconds: 10, defaultSteps: 8, shots: [], dialogues: [], preamble: '' };
+    return { id: id, title: '', defaultSeconds: 10, defaultSteps: 8, shots: [], dialogues: [], preamble: '', disabledTokens: [] };
 }
 function createShot(id) {
     return {
@@ -173,8 +195,31 @@ function createMediaRef(data) {
         duration: duration,
         trimStart: Math.max(0, Number(data.trimStart) || 0),
         trimEnd: Number.isFinite(Number(data.trimEnd)) && Number(data.trimEnd) > 0 ? Number(data.trimEnd) : duration,
-        url: data.url || (data.filename ? '/h3_director/media?filename=' + encodeURIComponent(data.filename) : '')
+        source: data.source || (String(data.filename || '').indexOf('/') >= 0 ? 'input' : 'legacy'),
+        managed: data.managed != null ? !!data.managed : /^(?:media_|ref_)/.test(String(data.filename || '')),
+        url: data.url || ''
     };
+}
+
+function _apiUrl(path) {
+    try { return api && api.apiURL ? api.apiURL(path) : path; }
+    catch (_) { return path; }
+}
+function mediaUrl(item) {
+    if (!item) return '';
+    var rawUrl = String(item.url || '');
+    if (/^(?:https?:|data:|blob:)/i.test(rawUrl)) return rawUrl;
+    var filename = String(item.filename || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!filename) return '';
+    if (item.source === 'input' || filename.indexOf('/') >= 0) {
+        var slash = filename.lastIndexOf('/');
+        var base = slash >= 0 ? filename.slice(slash + 1) : filename;
+        var subfolder = slash >= 0 ? filename.slice(0, slash) : '';
+        return _apiUrl('/view?filename=' + encodeURIComponent(base) +
+            '&subfolder=' + encodeURIComponent(subfolder) + '&type=input');
+    }
+    if (rawUrl && rawUrl.charAt(0) === '/') return _apiUrl(rawUrl);
+    return _apiUrl('/h3_director/media?filename=' + encodeURIComponent(filename));
 }
 function migrateMediaRefs(project) {
     if (!project) return;
@@ -194,25 +239,37 @@ function migrateMediaRefs(project) {
 function defaultProject() {
     return {
         mode: 't2v', globalDuration: 7, globalSteps: 8,
-        aspect: '9:16', resolution: '720p', fps: 24, exportMode: 'all',
-        sizePreset: '9:16|720p|1080|1920',
+        // 必须与尺寸下拉框的真实 value 完全一致，否则首次打开时没有选中项。
+        aspect: '16:9', resolution: 'mp0.5', fps: 24, exportMode: 'all',
+        sizePreset: '16:9|mp0.5|960|544',
         foundation: '',
         contextLength: 22, encodeMode: 'video', anchorMode: 'head', crop: 'disabled',
         audioMode: 'generated_audio', audioContextLength: 22, baseSeed: 0, segmentCrf: 18,
         refMaxMegapixels: 1.5,
-        videoBlendFrames: 0, continuationMode: 'guide',
+        videoBlendFrames: 0, continuationMode: 'guide', referencePolicy: 'warn',
         refs: Array.from({ length: 9 }, function() { return createRef(); }),
         mediaRefs: [],
+        // 导演台内选择的技能库快照。保存到工作流，确保下次打开仍能复现生成上下文。
+        director_skill: '',
         skill: {
             tasks: [],            // ['script','shots','dialogue'] 多选
             modelPref: 'local',   // 'local' 本地优先 | 'api'
             mergeMode: 'overwrite', // 'overwrite' 覆盖 | 'append' 追加
             profile: 'balanced',
             skillPolicy: 'merge',
+            librarySkillIds: [],
             temperature: 0.7,
             hint: ''
         }
     };
+}
+function normalizeProjectEnums(project) {
+    if (!project) return;
+    if (project.encodeMode === 'image') project.encodeMode = 'frames';
+    if (project.anchorMode === 'frame' || project.anchorMode === 'tail') project.anchorMode = 'before';
+    if (project.continuationMode === 'strict' || project.continuationMode === 'free') project.continuationMode = 'guide';
+    if (project.audioMode === 'off') project.audioMode = 'generated_audio';
+    if (['off','warn','strict'].indexOf(project.referencePolicy) < 0) project.referencePolicy = 'warn';
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -230,10 +287,12 @@ function loadState(node) {
         }
     } catch(e) { console.warn('[EagleH3Director] loadState error:', e); }
     migrateMediaRefs(project);
+    normalizeProjectEnums(project);
     return { project: project, scenes: scenes };
 }
 function extractDialoguesIfNeeded(scenes) {
     (scenes || []).forEach(function(sc) {
+        if (!Array.isArray(sc.disabledTokens)) sc.disabledTokens = [];
         if (!sc.dialogues || !sc.dialogues.length) {
             var parsed = extractAllDialogues(sc);
             if (parsed.length) {
@@ -254,6 +313,7 @@ function applyStateToReactive(project, scenes, store, data) {
         project[k] = (k in savedProject) ? savedProject[k] : defProject[k];
     });
     migrateMediaRefs(project);
+    normalizeProjectEnums(project);
     // skill 配置确保字段完整（兼容旧工作流缺失字段）
     var defSkill = defProject.skill;
     if (!project.skill || typeof project.skill !== 'object') project.skill = {};
@@ -262,20 +322,23 @@ function applyStateToReactive(project, scenes, store, data) {
     });
     scenes.splice(0, scenes.length);
     if (Array.isArray(data.scenes) && data.scenes.length) {
-        data.scenes.forEach(function(s) { scenes.push(s); });
+        data.scenes.forEach(function(s) {
+            if (!Array.isArray(s.disabledTokens)) s.disabledTokens = [];
+            scenes.push(s);
+        });
     } else {
         scenes.push(createScene(1));
     }
     extractDialoguesIfNeeded(scenes);
     store.currentSceneId = (scenes[0] && scenes[0].id) || 1;
 }
-function saveState(node, project, scenes) {
+function saveState(node, project, scenes, immediate) {
     var w = (node.widgets || []).find(function(x) { return x.name === 'h3_state'; });
     if (!w) return;
-    if (node._h3SaveTimer) clearTimeout(node._h3SaveTimer);
-    node._h3SaveTimer = setTimeout(function() {
+    if (node._h3SaveTimer) { clearTimeout(node._h3SaveTimer); node._h3SaveTimer = null; }
+    var doSave = function() {
         try {
-            var clean = JSON.parse(JSON.stringify({ project: project, scenes: scenes }));
+            var clean = JSON.parse(JSON.stringify({ version: 2, project: project, scenes: scenes }));
             (clean.project.mediaRefs || []).forEach(function(r) { if (r) delete r.file; });
             // Keep a legacy image-only mirror so older workflow consumers continue to work.
             clean.project.refs = (clean.project.mediaRefs || []).filter(function(r) { return r.type === 'image'; }).map(function(r) {
@@ -286,7 +349,9 @@ function saveState(node, project, scenes) {
             if (typeof w.callback === 'function') w.callback(w.value, w, node);
             if (node.graph) node.graph.change();
         } catch(e) { console.warn('[EagleH3Director] saveState error:', e); }
-    }, 300);
+    };
+    if (immediate) doSave();
+    else node._h3SaveTimer = setTimeout(doSave, 300);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -311,6 +376,15 @@ function extractAllDialogues(scene) {
     return parseDialogues(texts.join('\n'));
 }
 function buildDTag(role, text) { return '<d>[' + role + '] ' + text + '</d>'; }
+
+function stripDisabledTokens(scene, value) {
+    var text = String(value == null ? '' : value);
+    var disabled = (scene && Array.isArray(scene.disabledTokens)) ? scene.disabledTokens : [];
+    disabled.forEach(function(token) {
+        if (token) text = text.split(token).join('');
+    });
+    return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 
 // 高亮标签：@refN 与 <d>...</d>
 function _escapeHtml(s) {
@@ -361,8 +435,8 @@ function highlightText(s, mediaItems) {
         var item = lookup[canonical];
         var icon = type.toLowerCase() === 'video' ? '▶' : (type.toLowerCase() === 'audio' ? '♪' : '▧');
         var thumb = '';
-        if (item && item.type === 'image' && item.url) {
-            thumb = '<img src="' + _escapeHtml(item.url) + '" alt="">';
+        if (item && item.type === 'image' && mediaUrl(item)) {
+            thumb = '<span class="token-thumb" style="background-image:url(&quot;' + _escapeHtml(mediaUrl(item)) + '&quot;)"></span>';
         } else {
             thumb = '<i>' + icon + '</i>';
         }
@@ -415,7 +489,8 @@ function compilePrompt(project, scene) {
     }).join('\n');
     if (ret) parts.push('retention_analysis:\n' + ret);
 
-    var preamble = (scene.preamble || '').replace(/<d>[\s\S]*?<\/d>/g,'').replace(/\n{3,}/g,'\n\n').trim();
+    var activePreamble = stripDisabledTokens(scene, scene.preamble || '');
+    var preamble = activePreamble.replace(/<d>[\s\S]*?<\/d>/g,'').replace(/\n{3,}/g,'\n\n').trim();
     var shots = scene.shots || [];
     var shotLines = shots.map(function(s, i) {
         var p = [];
@@ -432,8 +507,10 @@ function compilePrompt(project, scene) {
         return '[Shot ' + (i+1) + ': ' + (s.title||'untitled') + '] ' + p.join(' ');
     }).join('\n\n  ');
     var detailed = shots.length ? 'detailed_description:\n  ' + shotLines : '';
-    var dlgs = (scene.dialogues || []).filter(function(d) { return d && d.role && d.text; })
-        .map(function(d) { return '  ' + buildDTag(d.role, d.text); }).join('\n');
+    var disabled = Array.isArray(scene.disabledTokens) ? scene.disabledTokens : [];
+    var dlgs = (scene.dialogues || []).filter(function(d) {
+        return d && d.role && d.text && disabled.indexOf(buildDTag(d.role, d.text)) < 0;
+    }).map(function(d) { return '  ' + buildDTag(d.role, d.text); }).join('\n');
     var dialogue = dlgs ? 'Dialogue:\n' + dlgs : '';
     var body = [preamble, detailed, dialogue].filter(Boolean).join('\n\n');
     if (body) parts.push(body);
@@ -462,7 +539,16 @@ var H3DirectorApp = defineComponent({
             editorTab: 'script',
             rightTab: 'shots',
             planOpen: true,
-            dirty: false
+            dirty: false,
+            skillBatch: {
+                active: false, stopRequested: false, batchId: '', requestId: '',
+                sceneIds: [], cursor: 0, completed: 0, failed: 0,
+                currentSceneId: null, status: '', lastError: ''
+            },
+            directorLibrary: {
+                items: [], loading: false, error: '', source: 'eagle',
+                path: '', fallbackReason: ''
+            }
         });
 
         // 分辨率预设联动（提取宽高写回project）
@@ -510,7 +596,60 @@ var H3DirectorApp = defineComponent({
         });
         var maxId = function(arr) { return arr.reduce(function(m, x) { return Math.max(m, x.id || 0); }, 0); };
 
-        function markDirty() { store.dirty = true; saveState(props.node, project, scenes); }
+        function markDirty(immediate) { store.dirty = true; saveState(props.node, project, scenes, immediate); }
+
+        function compileDirectorLibrary() {
+            var ids = (store.project.skill && store.project.skill.librarySkillIds) || [];
+            var active = store.directorLibrary.items.filter(function(skill) { return ids.indexOf(skill.id) >= 0; });
+            store.project.director_skill = active.map(function(skill) {
+                var meta = [];
+                if (skill.category) meta.push('category: ' + skill.category);
+                if (Array.isArray(skill.tasks) && skill.tasks.length) meta.push('tasks: ' + skill.tasks.join(', '));
+                return [
+                    '## ' + (skill.name || 'Director Skill'),
+                    meta.length ? '> ' + meta.join(' | ') : '',
+                    String(skill.content || '').trim()
+                ].filter(Boolean).join('\n\n');
+            }).join('\n\n---\n\n');
+        }
+
+        async function loadDirectorLibrary() {
+            if (store.directorLibrary.loading) return;
+            store.directorLibrary.loading = true;
+            store.directorLibrary.error = '';
+            try {
+                var response = await api.fetchApi('/eaglePromptPresets/director_skills');
+                var text = await response.text();
+                if (!text.trim()) throw new Error('技能库接口返回空响应');
+                var data = JSON.parse(text);
+                if (!response.ok || !data.success) throw new Error(data.error || ('HTTP ' + response.status));
+                store.directorLibrary.items = Array.isArray(data.data) ? data.data : [];
+                store.directorLibrary.source = data.effective_source || data.source || 'eagle';
+                store.directorLibrary.path = data.storage_path || '';
+                store.directorLibrary.fallbackReason = data.fallback_reason || '';
+                var valid = {};
+                store.directorLibrary.items.forEach(function(skill) { valid[skill.id] = true; });
+                var ids = Array.isArray(store.project.skill.librarySkillIds) ? store.project.skill.librarySkillIds : [];
+                store.project.skill.librarySkillIds = ids.filter(function(id) { return valid[id]; });
+                compileDirectorLibrary();
+                markDirty(true);
+            } catch (error) {
+                store.directorLibrary.error = error && error.message ? error.message : String(error);
+            } finally {
+                store.directorLibrary.loading = false;
+            }
+        }
+
+        function toggleDirectorLibrarySkill(skill) {
+            if (!skill || !skill.id) return;
+            var ids = store.project.skill.librarySkillIds || (store.project.skill.librarySkillIds = []);
+            var index = ids.indexOf(skill.id);
+            if (index >= 0) ids.splice(index, 1); else ids.push(skill.id);
+            compileDirectorLibrary();
+            markDirty(true);
+        }
+
+        nextTick(function() { loadDirectorLibrary(); });
 
         // 场景操作
         function addScene() {
@@ -682,6 +821,32 @@ var H3DirectorApp = defineComponent({
                 var usedRefs = (store.project.mediaRefs || []).filter(function(r) { return r.type === 'image' && r.filename; }).length;
                 if (!usedRefs) w.push('该模式通常需要参考图。');
             }
+            var refs = (store.project.mediaRefs || []).filter(function(r) { return r && r.filename; });
+            var limits = { image:9, video:3, audio:3 };
+            var counts = { image:0, video:0, audio:0 };
+            refs.forEach(function(r) {
+                var kind = r.type || 'image';
+                if (kind in counts) counts[kind]++;
+                var duration = Number(r.duration) || 0;
+                var start = Number(r.trimStart) || 0;
+                var end = Number(r.trimEnd) || 0;
+                if (start < 0 || end < 0 || (end > 0 && end <= start) || (duration > 0 && (start >= duration || end > duration + 0.01))) {
+                    w.push('素材「' + (r.originalName || r.filename) + '」的裁剪区间无效。');
+                }
+            });
+            Object.keys(limits).forEach(function(kind) {
+                if (counts[kind] > limits[kind]) w.push(kind + ' 素材超过端口上限 ' + limits[kind] + '。');
+            });
+            if ((store.project.referencePolicy || 'warn') !== 'off') {
+                var tagCounts = { picture:counts.image, video:counts.video, audio:counts.audio };
+                var text = currentPreviewPage.value || '';
+                var tagRe = /<(Picture|Video|Audio)\s+(-?\d+)>/gi, match;
+                while ((match = tagRe.exec(text)) !== null) {
+                    var available = tagCounts[match[1].toLowerCase()] || 0;
+                    var index = Number(match[2]);
+                    if (index < 1 || index > available) w.push(match[0] + ' 无对应素材（可用 ' + available + '）。');
+                }
+            }
             return w;
         });
 
@@ -696,21 +861,57 @@ var H3DirectorApp = defineComponent({
         }
 
         var totalDuration = computed(function() {
-            return store.scenes.reduce(function(a, s) { return a + (s.defaultSeconds || 10) * Math.max(1, (s.shots || []).length); }, 0);
+            // defaultSeconds 是场景总时长；镜头只是对这段时长的内部划分。
+            return store.scenes.reduce(function(a, s) { return a + (s.defaultSeconds || 10); }, 0);
         });
 
         // ── 导演 Skill：手动「生成」按钮 ──
-        function generateSkill() {
+        function skillRequestWidget() {
+            return (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
+        }
+        function finishSkillBatch(message) {
+            var batch = store.skillBatch;
+            batch.active = false;
+            batch.currentSceneId = null;
+            batch.requestId = '';
+            batch.status = message || ('已完成 ' + batch.completed + ' 个场景');
+            flash(batch.status);
+        }
+        function submitSkillScene() {
+            var batch = store.skillBatch;
+            if (!batch.active) return;
+            if (batch.stopRequested) {
+                finishSkillBatch('已停止：完成 ' + batch.completed + '/' + batch.sceneIds.length + '，失败 ' + batch.failed);
+                return;
+            }
+            if (batch.cursor >= batch.sceneIds.length) {
+                finishSkillBatch('✓ 批量生成完成：' + batch.completed + '/' + batch.sceneIds.length + (batch.failed ? '，失败 ' + batch.failed : ''));
+                return;
+            }
+            var sceneId = batch.sceneIds[batch.cursor];
+            var scene = store.scenes.find(function(item) { return item.id === sceneId; });
+            if (!scene) {
+                batch.failed += 1; batch.cursor += 1;
+                batch.lastError = '批量期间场景已被删除: ' + sceneId;
+                submitSkillScene();
+                return;
+            }
             var sk = store.project.skill || {};
-            var tasks = sk.tasks || [];
-            if (!tasks.length) { flash('请先在「导演 Skill」选择要生成的任务（台本 / 分镜 / 台词）'); return; }
-            var w = (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
-            if (!w) { flash('skill_request 端口缺失，请重启 ComfyUI 后重试'); return; }
+            var w = skillRequestWidget();
+            if (!w) { batch.lastError = 'skill_request 端口缺失'; finishSkillBatch(batch.lastError); return; }
+            markDirty(true);
+            batch.currentSceneId = sceneId;
+            batch.requestId = batch.batchId + ':' + batch.cursor + ':' + Date.now();
+            batch.status = '正在生成场景 ' + (batch.cursor + 1) + '/' + batch.sceneIds.length + '：' + (scene.title || '未命名');
             var req = {
                 run: true,
-                sceneId: store.currentSceneId,
+                sceneId: sceneId,
+                requestId: batch.requestId,
+                batchId: batch.batchId,
+                batchIndex: batch.cursor,
+                batchTotal: batch.sceneIds.length,
                 mergeMode: sk.mergeMode || 'overwrite',
-                tasks: tasks,
+                tasks: (sk.tasks || []).slice(),
                 temperature: (sk.temperature != null ? sk.temperature : 0.7),
                 modelPref: sk.modelPref || 'local',
                 profile: sk.profile || 'balanced',
@@ -720,9 +921,42 @@ var H3DirectorApp = defineComponent({
             w.value = JSON.stringify(req);
             if (typeof w.callback === 'function') w.callback(w.value, w, props.node);
             if (props.node.graph) props.node.graph.change();
-            flash('已提交生成请求，等待模型返回…（手动触发生成）');
-            try { app.queuePrompt(); }
-            catch (err) { flash('队列失败: ' + (err && err.message ? err.message : err)); }
+            flash(batch.status);
+            try {
+                var queued = app.queuePrompt();
+                if (queued && typeof queued.catch === 'function') queued.catch(function(error) {
+                    batch.lastError = '队列失败: ' + (error && error.message ? error.message : error);
+                    batch.failed += 1; clearSkillRequest(); batch.cursor += 1;
+                    setTimeout(submitSkillScene, 0);
+                });
+            } catch (err) {
+                batch.lastError = '队列失败: ' + (err && err.message ? err.message : err);
+                batch.failed += 1; clearSkillRequest(); batch.cursor += 1;
+                setTimeout(submitSkillScene, 0);
+            }
+        }
+        function generateSkill(scope) {
+            var sk = store.project.skill || {};
+            var tasks = sk.tasks || [];
+            if (!tasks.length) { flash('请先在「导演 Skill」选择要生成的任务（台本 / 分镜 / 台词）'); return; }
+            if (store.skillBatch.active) { flash('已有生成任务进行中'); return; }
+            var ids = scope === 'all'
+                ? store.scenes.map(function(scene) { return scene.id; })
+                : [store.currentSceneId];
+            if (!ids.length) { flash('没有可生成的场景'); return; }
+            Object.assign(store.skillBatch, {
+                active:true, stopRequested:false,
+                batchId:'h3skill-' + Date.now() + '-' + Math.random().toString(16).slice(2),
+                requestId:'', sceneIds:ids, cursor:0, completed:0, failed:0,
+                currentSceneId:null, status:'', lastError:''
+            });
+            submitSkillScene();
+        }
+        function stopSkillGeneration() {
+            if (!store.skillBatch.active) return;
+            store.skillBatch.stopRequested = true;
+            store.skillBatch.status = '正在停止，当前场景返回后不再继续…';
+            flash(store.skillBatch.status);
         }
 
         // 后端生成结果回填（由 app.api 事件触发）
@@ -736,10 +970,25 @@ var H3DirectorApp = defineComponent({
         }
         function applySkillResult(data) {
             if (!data) return;
-            if (data.error) { flash('生成出错: ' + data.error); clearSkillRequest(); return; }
-            var scene = store.scenes.find(function(s) { return s.id === data.sceneId; }) || currentScene.value;
-            if (!scene) { flash('未找到目标场景'); clearSkillRequest(); return; }
-            var mode = (store.project.skill && store.project.skill.mergeMode) || 'overwrite';
+            var batch = store.skillBatch;
+            if (batch.active && data.batchId && data.batchId !== batch.batchId) return;
+            if (batch.active && data.requestId && data.requestId !== batch.requestId) return;
+            var scene = store.scenes.find(function(s) { return String(s.id) === String(data.sceneId); });
+            if (!scene) {
+                clearSkillRequest();
+                batch.lastError = '拒绝回填：返回的 sceneId 不存在（' + data.sceneId + '）';
+                if (batch.active) { batch.failed += 1; batch.cursor += 1; setTimeout(submitSkillScene, 0); }
+                else flash(batch.lastError);
+                return;
+            }
+            if (data.error) {
+                clearSkillRequest();
+                batch.lastError = '场景「' + (scene.title || data.sceneId) + '」生成出错: ' + data.error;
+                if (batch.active) { batch.failed += 1; batch.cursor += 1; setTimeout(submitSkillScene, 0); }
+                else flash(batch.lastError);
+                return;
+            }
+            var mode = data.mergeMode || ((store.project.skill && store.project.skill.mergeMode) || 'overwrite');
             if (data.preamble != null) {
                 scene.preamble = (mode === 'append' && scene.preamble)
                     ? (scene.preamble + '\n\n' + data.preamble).trim()
@@ -782,9 +1031,15 @@ var H3DirectorApp = defineComponent({
             if (data.preamble != null && data.dialogues == null) {
                 syncPreambleToDlg(scene);
             }
-            markDirty();
+            markDirty(true);
             clearSkillRequest();
-            flash('✓ 已回填（' + (data.transport === 'local' ? '本地模型' : 'API') + '）');
+            if (batch.active) {
+                batch.completed += 1; batch.cursor += 1;
+                batch.status = '✓ 已完成 ' + batch.completed + '/' + batch.sceneIds.length + '：' + (scene.title || '未命名');
+                setTimeout(submitSkillScene, 30);
+            } else {
+                flash('✓ 已回填（' + (data.transport === 'local' ? '本地模型' : 'API') + '）');
+            }
         }
         props.node._h3ApplySkillResult = applySkillResult;
 
@@ -799,7 +1054,9 @@ var H3DirectorApp = defineComponent({
             onDialogueInput: onDialogueInput, onPreambleInput: onPreambleInput,
             triggerUpload: triggerUpload, clearRef: clearRef, addRef: addRef,
             removeLastRef: removeLastRef, onRefDrop: onRefDrop,
-            generateSkill: generateSkill,
+            generateSkill: generateSkill, stopSkillGeneration: stopSkillGeneration,
+            loadDirectorLibrary: loadDirectorLibrary,
+            toggleDirectorLibrarySkill: toggleDirectorLibrarySkill,
             markDirty: markDirty, flash: flash, copyCompiled: copyCompiled, copyParams: copyParams
         });
 
@@ -877,7 +1134,7 @@ var H3DirectorApp = defineComponent({
 });
 
 // ─────────────────────────────────────────────────────────────────
-// HighlightTextarea（标签高亮编辑框）
+// HighlightTextarea（原子标签富文本编辑框）
 // ─────────────────────────────────────────────────────────────────
 var HighlightTextarea = defineComponent({
     name: 'HighlightTextarea',
@@ -886,55 +1143,175 @@ var HighlightTextarea = defineComponent({
         placeholder: { type: String, default: '' },
         minHeight: { type: String, default: '' },
         flex: { type: Boolean, default: false },
-        mediaItems: { type: Array, default: function() { return []; } }
+        mediaItems: { type: Array, default: function() { return []; } },
+        disabledTokens: { type: Array, default: function() { return []; } }
     },
-    emits: ['update:modelValue', 'input'],
+    emits: ['update:modelValue', 'input', 'toggle-token'],
     setup: function(props, ctx) {
-        var ta = ref(null);
-        var layer = ref(null);
-        var text = computed({
-            get: function() { return props.modelValue || ''; },
-            set: function(v) { ctx.emit('update:modelValue', v); ctx.emit('input', v); }
-        });
-        function syncScroll() {
-            if (!ta.value || !layer.value) return;
-            layer.value.style.top = (-ta.value.scrollTop) + 'px';
-            layer.value.style.left = (-ta.value.scrollLeft) + 'px';
+        var editor = ref(null);
+        var internalValue = null;
+        var TOKEN_RE = /<d>[\s\S]*?<\/d>|<(?:Picture|Video|Audio)\s+\d+>/gi;
+
+        function canonicalMediaToken(value) {
+            var match = /^<(Picture|Video|Audio)\s+(\d+)>$/i.exec(value || '');
+            return match ? ('<' + match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase() + ' ' + match[2] + '>') : value;
         }
-        function onInput() { nextTick(syncScroll); }
+        function mediaForToken(value) {
+            var wanted = canonicalMediaToken(value);
+            for (var i = 0; i < props.mediaItems.length; i++) {
+                if (mediaTagFor(props.mediaItems[i], props.mediaItems) === wanted) return props.mediaItems[i];
+            }
+            return null;
+        }
+        function isDisabled(value) { return (props.disabledTokens || []).indexOf(value) >= 0; }
+        function createTokenElement(value) {
+            var span = document.createElement('span');
+            var isDialogue = /^<d>/i.test(value);
+            var media = isDialogue ? null : mediaForToken(value);
+            var type = media ? media.type : ((/^<Video/i.test(value)) ? 'video' : (/^<Audio/i.test(value) ? 'audio' : 'image'));
+            span.className = 'h3d-atomic-token ' + (isDialogue ? 'dialogue' : ('media ' + type)) + (isDisabled(value) ? ' ignored' : '');
+            span.contentEditable = 'false';
+            span.dataset.h3Token = value;
+            span.title = isDisabled(value) ? '已忽略，点击启用' : '已启用，点击忽略';
+            if (media && media.type === 'image' && mediaUrl(media)) {
+                var thumb = document.createElement('i');
+                thumb.className = 'token-thumb';
+                thumb.style.backgroundImage = 'url("' + String(mediaUrl(media)).replace(/"/g, '%22') + '")';
+                span.appendChild(thumb);
+            }
+            var label = document.createElement('span');
+            label.textContent = isDialogue ? ('💬 ' + value.replace(/^<d>|<\/d>$/gi, '')) : canonicalMediaToken(value);
+            span.appendChild(label);
+            var state = document.createElement('small');
+            state.className = 'token-state';
+            state.textContent = isDisabled(value) ? '忽略' : '启用';
+            span.appendChild(state);
+            return span;
+        }
+        function appendToken(root, value) {
+            root.appendChild(createTokenElement(value));
+        }
+        function render(value) {
+            var root = editor.value;
+            if (!root) return;
+            root.replaceChildren();
+            var source = String(value == null ? '' : value);
+            var offset = 0; var match;
+            TOKEN_RE.lastIndex = 0;
+            while ((match = TOKEN_RE.exec(source)) !== null) {
+                if (match.index > offset) root.appendChild(document.createTextNode(source.slice(offset, match.index)));
+                appendToken(root, match[0]);
+                offset = match.index + match[0].length;
+            }
+            if (offset < source.length) root.appendChild(document.createTextNode(source.slice(offset)));
+        }
+        function serializeNode(node, isRoot) {
+            if (!node) return '';
+            if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+            if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return '';
+            if (node.nodeType === Node.ELEMENT_NODE && node.dataset && node.dataset.h3Token) return node.dataset.h3Token;
+            if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') return '\n';
+            var out = '';
+            Array.prototype.forEach.call(node.childNodes || [], function(child) { out += serializeNode(child, false); });
+            if (!isRoot && node.nodeType === Node.ELEMENT_NODE && /^(DIV|P)$/i.test(node.tagName) && !out.endsWith('\n')) out += '\n';
+            return out;
+        }
+        function serialize() { return serializeNode(editor.value, true).replace(/\u00a0/g, ' '); }
+        function commit() {
+            var value = serialize();
+            internalValue = value;
+            ctx.emit('update:modelValue', value);
+            ctx.emit('input', value);
+            return value;
+        }
+        function rangeInsideEditor(range) {
+            return !!(range && editor.value && editor.value.contains(range.commonAncestorContainer));
+        }
+        function insertPlain(value) {
+            var root = editor.value;
+            if (!root) return;
+            root.focus();
+            var selection = window.getSelection();
+            var range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+            if (!rangeInsideEditor(range)) {
+                range = document.createRange();
+                range.selectNodeContents(root); range.collapse(false);
+            }
+            range.deleteContents();
+            var node = document.createTextNode(String(value || ''));
+            range.insertNode(node);
+            range.setStartAfter(node); range.collapse(true);
+            selection.removeAllRanges(); selection.addRange(range);
+        }
         function insertText(value) {
-            if (!ta.value) return;
-            var start = ta.value.selectionStart == null ? text.value.length : ta.value.selectionStart;
-            var end = ta.value.selectionEnd == null ? start : ta.value.selectionEnd;
-            var before = text.value.slice(0, start);
-            var after = text.value.slice(end);
-            var leftSpace = before && !/\s$/.test(before) ? ' ' : '';
-            var rightSpace = after && !/^\s/.test(after) ? ' ' : '';
-            text.value = before + leftSpace + value + rightSpace + after;
-            var caret = start + leftSpace.length + value.length + rightSpace.length;
-            nextTick(function() {
-                ta.value.focus();
-                ta.value.setSelectionRange(caret, caret);
-                syncScroll();
-            });
+            if (!editor.value) return;
+            var selection = window.getSelection();
+            var range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+            var serialized = serialize();
+            var leftSpace = serialized && !/\s$/.test(serialized) ? ' ' : '';
+            if (rangeInsideEditor(range)) {
+                var before = range.cloneRange();
+                before.selectNodeContents(editor.value); before.setEnd(range.startContainer, range.startOffset);
+                var prior = serializeNode(before.cloneContents(), true);
+                leftSpace = prior && !/\s$/.test(prior) ? ' ' : '';
+            }
+            editor.value.focus();
+            if (!rangeInsideEditor(range)) {
+                range = document.createRange();
+                range.selectNodeContents(editor.value); range.collapse(false);
+            }
+            range.deleteContents();
+            var fragment = document.createDocumentFragment();
+            if (leftSpace) fragment.appendChild(document.createTextNode(leftSpace));
+            fragment.appendChild(createTokenElement(value));
+            var tail = document.createTextNode(' ');
+            fragment.appendChild(tail);
+            range.insertNode(fragment);
+            range.setStartAfter(tail); range.collapse(true);
+            selection.removeAllRanges(); selection.addRange(range);
+            commit();
         }
-        ctx.expose({ insertText: insertText, focus: function() { if (ta.value) ta.value.focus(); } });
-        var html = computed(function() { return highlightText(text.value, props.mediaItems); });
+        function onInput() { commit(); }
+        function onBeforeInput(event) {
+            if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+                event.preventDefault(); insertPlain('\n'); commit();
+            }
+        }
+        function onPaste(event) {
+            event.preventDefault();
+            insertPlain((event.clipboardData && event.clipboardData.getData('text/plain')) || '');
+            commit();
+        }
+        function onTokenClick(event) {
+            var token = event.target && event.target.closest ? event.target.closest('[data-h3-token]') : null;
+            if (!token || !editor.value.contains(token)) return;
+            event.preventDefault(); event.stopPropagation();
+            ctx.emit('toggle-token', token.dataset.h3Token || '');
+        }
+        function onBlur() { render(props.modelValue || serialize()); }
+
+        nextTick(function() { render(props.modelValue || ''); });
+        watch(function() { return props.modelValue; }, function(value) {
+            if (internalValue === value) { internalValue = null; return; }
+            nextTick(function() { render(value || ''); });
+        });
+        watch(function() { return [props.mediaItems, props.disabledTokens]; }, function() {
+            nextTick(function() { render(props.modelValue || ''); });
+        }, { deep:true });
+        ctx.expose({ insertText: insertText, focus: function() { if (editor.value) editor.value.focus(); } });
         var wrapStyle = computed(function() {
             var s = {};
             if (props.minHeight) s.minHeight = props.minHeight;
             if (props.flex) s.flex = '1';
             return s;
         });
-        return { text: text, html: html, ta: ta, layer: layer, syncScroll: syncScroll, onInput: onInput, wrapStyle: wrapStyle };
+        return { editor:editor, onInput:onInput, onBeforeInput:onBeforeInput, onPaste:onPaste, onTokenClick:onTokenClick, onBlur:onBlur, wrapStyle:wrapStyle };
     },
     template: `
 <div class="h3d-hl-wrap" :style="wrapStyle">
-  <div class="h3d-hl-layer" ref="layer">
-    <div v-if="!text" class="h3d-hl-placeholder">{{ placeholder }}</div>
-    <div v-html="html"></div>
-  </div>
-  <textarea class="h3d-hl-textarea" ref="ta" v-model="text" :placeholder="placeholder" @scroll="syncScroll" @input="onInput" @keydown.stop @paste.stop spellcheck="false"></textarea>
+  <div class="h3d-atomic-editor" ref="editor" contenteditable="true" :data-placeholder="placeholder"
+       @input="onInput" @beforeinput="onBeforeInput" @paste="onPaste" @click="onTokenClick"
+       @blur="onBlur" @keydown.stop spellcheck="false"></div>
 </div>`
 });
 
@@ -949,11 +1326,11 @@ var PlanPanel = defineComponent({
         var planOpen = ref(true);
 
         function sceneDuration(s) {
-            return (s.defaultSeconds || 10) * Math.max(1, (s.shots || []).length);
+            return (s.defaultSeconds || 10);
         }
         function timeBarPct(s) {
             var d = sceneDuration(s);
-            var cap = (store.project.globalDuration || 7) * Math.max(1, (s.shots || []).length);
+            var cap = (store.project.globalDuration || 7);
             return Math.min(100, Math.round(d / cap * 100));
         }
         function estTokens(s) {
@@ -980,17 +1357,18 @@ var PlanPanel = defineComponent({
       </div>
       <div v-show="planOpen" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">context_length</span><input class="h3d-inp" v-model.number="store.project.contextLength" type="number" style="width:70px"></div>
-        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">encode_mode</span><select class="h3d-sel" v-model="store.project.encodeMode"><option>video</option><option>image</option></select></div>
-        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">anchor_mode</span><select class="h3d-sel" v-model="store.project.anchorMode"><option>head</option><option>frame</option><option>tail</option></select></div>
+        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">encode_mode</span><select class="h3d-sel" v-model="store.project.encodeMode"><option value="video">video</option><option value="frames">frames</option></select></div>
+        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">anchor_mode</span><select class="h3d-sel" v-model="store.project.anchorMode"><option value="head">head</option><option value="before">before</option></select></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">crop</span><select class="h3d-sel" v-model="store.project.crop"><option value="disabled">disabled</option><option value="center">center</option></select></div>
-        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">audio_mode</span><select class="h3d-sel" v-model="store.project.audioMode"><option value="generated_audio">generated_audio</option><option value="off">off</option></select></div>
+        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">audio_mode</span><select class="h3d-sel" v-model="store.project.audioMode"><option value="generated_audio">generated_audio</option><option value="source_track">source_track</option><option value="source_plus_timeline">source_plus_timeline</option></select></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">music_context_length</span><input class="h3d-inp" v-model.number="store.project.audioContextLength" type="number" style="width:70px"></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">default_duration_seconds</span><input class="h3d-inp" v-model.number="store.project.globalDuration" type="number" step="0.5" style="width:70px"></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">default_steps</span><input class="h3d-inp" v-model.number="store.project.globalSteps" type="number" style="width:70px"></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">base_seed</span><input class="h3d-inp" v-model.number="store.project.baseSeed" type="number" style="width:70px"></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">segment_crf</span><input class="h3d-inp" v-model.number="store.project.segmentCrf" type="number" style="width:70px"></div>
         <div class="h3d-row"><span class="h3d-label" style="min-width:130px">ref_max_megapixels</span><input class="h3d-inp" v-model.number="store.project.refMaxMegapixels" type="number" step="0.1" min="0.1" max="10" style="width:70px"></div>
-        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">continuation</span><select class="h3d-sel" v-model="store.project.continuationMode"><option value="guide">guide</option><option value="strict">strict</option><option value="free">free</option></select></div>
+        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">continuation</span><select class="h3d-sel" v-model="store.project.continuationMode"><option value="guide">guide</option><option value="masked_av">masked_av</option></select></div>
+        <div class="h3d-row"><span class="h3d-label" style="min-width:130px">素材标签预检</span><select class="h3d-sel" v-model="store.project.referencePolicy"><option value="warn">警告</option><option value="strict">严格阻止</option><option value="off">关闭</option></select></div>
       </div>
     </div>
     <div class="h3d-card">
@@ -1047,14 +1425,55 @@ var EditorPanel = defineComponent({
         var trimPlayer = ref(null);
         var dragIndex = ref(-1);
         var trimOpen = ref(false);
-        var trimDraft = reactive({ id:'', type:'', filename:'', originalName:'', url:'', duration:0, start:0, end:0 });
+        var trimDraft = reactive({ id:'', type:'', filename:'', originalName:'', url:'', duration:0, start:0, end:0, current:0 });
+        var trimFrames = ref([]);
+        var trimFramesLoading = ref(false);
+        var trimThumbRun = 0;
+        var trimFps = computed(function() { return Math.max(1, Number(store.project.fps) || 24); });
+        var trimFrameStep = computed(function() { return trimDraft.type === 'video' ? 1 / trimFps.value : 0.01; });
+        var trimStartPct = computed(function() { return trimDraft.duration > 0 ? Math.max(0, Math.min(100, trimDraft.start / trimDraft.duration * 100)) : 0; });
+        var trimEndPct = computed(function() { return trimDraft.duration > 0 ? Math.max(0, Math.min(100, trimDraft.end / trimDraft.duration * 100)) : 100; });
+        var trimPlayheadPct = computed(function() { return trimDraft.duration > 0 ? Math.max(0, Math.min(100, trimDraft.current / trimDraft.duration * 100)) : 0; });
+        var trimSelectedSeconds = computed(function() { return Math.max(0, trimDraft.end - trimDraft.start); });
+        var trimStartFrame = computed(function() { return Math.round(trimDraft.start * trimFps.value); });
+        var trimEndFrame = computed(function() { return Math.round(trimDraft.end * trimFps.value); });
+        var trimSelectedFrames = computed(function() { return Math.max(0, trimEndFrame.value - trimStartFrame.value); });
+        var trimRulerMarks = computed(function() {
+            var marks = [];
+            var count = 6;
+            for (var i = 0; i <= count; i++) {
+                var seconds = trimDraft.duration * i / count;
+                marks.push({ pct:i / count * 100, label:formatTrimTime(seconds) });
+            }
+            return marks;
+        });
         var mediaItems = computed(function() { return store.project.mediaRefs || []; });
+        var mediaErrors = reactive({});
+        var inputPickerOpen = ref(false);
+        var inputImages = ref([]);
+        var inputQuery = ref('');
+        var inputLoading = ref(false);
+        var inputError = ref('');
+        var inputHover = ref(null);
+        var filteredInputImages = computed(function() {
+            var query = inputQuery.value.trim().toLowerCase();
+            var values = query ? inputImages.value.filter(function(item) {
+                return String(item.path || '').toLowerCase().indexOf(query) >= 0;
+            }) : inputImages.value;
+            return values.slice(0, 500);
+        });
 
         function formatDuration(value) {
             value = Math.max(0, Number(value) || 0);
             var minutes = Math.floor(value / 60);
             var seconds = value - minutes * 60;
             return minutes ? (minutes + ':' + seconds.toFixed(1).padStart(4, '0')) : (seconds.toFixed(1) + 's');
+        }
+        function formatTrimTime(value) {
+            value = Math.max(0, Number(value) || 0);
+            var minutes = Math.floor(value / 60);
+            var seconds = value - minutes * 60;
+            return String(minutes).padStart(2, '0') + ':' + seconds.toFixed(2).padStart(5, '0');
         }
         function selectedDuration(item) {
             if (!item || item.type === 'image') return 0;
@@ -1067,7 +1486,60 @@ var EditorPanel = defineComponent({
             scriptEditor.value.insertText(tag);
             actions.flash('已插入 ' + tag);
         }
+        function toggleAtomicToken(token) {
+            if (!scene.value || !token) return;
+            var disabled = scene.value.disabledTokens || (scene.value.disabledTokens = []);
+            var index = disabled.indexOf(token);
+            if (index >= 0) {
+                disabled.splice(index, 1);
+                actions.flash('已启用标签 ' + token);
+            } else {
+                disabled.push(token);
+                actions.flash('已忽略标签 ' + token);
+            }
+            actions.markDirty(true);
+        }
         function openMediaPicker() { if (mediaFileInput.value) mediaFileInput.value.click(); }
+        function loadInputImages(force) {
+            if (inputLoading.value || (inputImages.value.length && !force)) return Promise.resolve();
+            inputLoading.value = true; inputError.value = '';
+            return api.fetchApi('/h3_director/input_images').then(function(response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.json();
+            }).then(function(data) {
+                if (!data.success) throw new Error(data.error || '读取 input 失败');
+                inputImages.value = Array.isArray(data.items) ? data.items : [];
+                inputHover.value = inputImages.value[0] || null;
+            }).catch(function(error) {
+                inputError.value = error.message || String(error);
+            }).finally(function() { inputLoading.value = false; });
+        }
+        function openInputPicker() { inputPickerOpen.value = true; loadInputImages(false); }
+        function closeInputPicker() { inputPickerOpen.value = false; inputHover.value = null; }
+        function addInputImage(inputItem) {
+            if (!inputItem || !inputItem.path) return;
+            if (!withinLimit('image')) { actions.flash('图片最多 9 张'); return; }
+            var duplicate = mediaItems.value.some(function(item) {
+                return item.type === 'image' && item.source === 'input' && item.filename === inputItem.path;
+            });
+            if (duplicate) { actions.flash('该 input 图片已在素材栏中'); return; }
+            store.project.mediaRefs.push(createMediaRef({
+                type:'image', filename:inputItem.path, originalName:inputItem.name,
+                name:'', kind:'person', retention:'fully_preserved',
+                source:'input', managed:false, duration:0, trimStart:0, trimEnd:0
+            }));
+            actions.markDirty();
+            actions.flash('已从 input 添加 ' + inputItem.name);
+        }
+        function inputPreviewUrl(inputItem) {
+            return mediaUrl(inputItem ? { filename:inputItem.path, source:'input' } : null);
+        }
+        function formatBytes(value) {
+            var size = Math.max(0, Number(value) || 0);
+            if (size < 1024) return size + ' B';
+            if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB';
+            return (size / 1024 / 1024).toFixed(1) + ' MB';
+        }
         function inferFileType(file) {
             var mime = (file.type || '').toLowerCase();
             if (mime.indexOf('image/') === 0) return 'image';
@@ -1083,23 +1555,74 @@ var EditorPanel = defineComponent({
             var max = type === 'image' ? 9 : 3;
             return mediaItems.value.filter(function(item) { return item.type === type; }).length < max;
         }
+        function postMediaFile(url, file) {
+            var fd = new FormData();
+            fd.append('file', file, file.name);
+            return api.fetchApi(url, { method:'POST', body:fd }).then(function(response) {
+                return response.text().then(function(text) {
+                    var data = null;
+                    try { data = text ? JSON.parse(text) : {}; }
+                    catch (parseError) {
+                        var invalid = new Error('服务器返回了非 JSON 响应（HTTP ' + response.status + '）');
+                        invalid.status = response.status;
+                        throw invalid;
+                    }
+                    if (!response.ok || !data.success) {
+                        var failed = new Error(data.error || ('HTTP ' + response.status));
+                        failed.status = response.status;
+                        throw failed;
+                    }
+                    return data;
+                });
+            });
+        }
+        function legacyImageItem(data, file) {
+            return {
+                id: 'media-' + Date.now() + '-' + Math.random().toString(16).slice(2),
+                type: 'image', filename: data.filename, originalName: file.name,
+                name: '', kind: 'person', retention: 'fully_preserved',
+                duration: 0, trimStart: 0, trimEnd: 0,
+                source: data.source || 'input', managed: data.managed !== false, url: ''
+            };
+        }
         function uploadOne(file) {
             var type = inferFileType(file);
-            if (!type) { actions.flash('不支持的素材格式: ' + file.name); return Promise.resolve(); }
-            if (!withinLimit(type)) { actions.flash(type === 'image' ? '图片最多 9 张' : (type === 'video' ? '视频最多 3 个' : '音频最多 3 个')); return Promise.resolve(); }
-            var fd = new FormData(); fd.append('file', file);
-            return fetch('/h3_director/upload_media', { method:'POST', body:fd })
-                .then(function(r) { return r.json(); })
+            if (!type) { actions.flash('不支持的素材格式: ' + file.name); return Promise.resolve(false); }
+            if (!withinLimit(type)) { actions.flash(type === 'image' ? '图片最多 9 张' : (type === 'video' ? '视频最多 3 个' : '音频最多 3 个')); return Promise.resolve(false); }
+            return postMediaFile('/h3_director/upload_media', file)
+                .catch(function(error) {
+                    // 前端资源可在不重启 ComfyUI 的情况下刷新，而新 Python 路由必须重启后才生效。
+                    // 图片在新路由尚未注册时回退到旧接口，避免新版界面与旧后端组合后完全无法上传。
+                    if (type === 'image' && (error.status === 404 || error.status === 405)) {
+                        return postMediaFile('/h3_director/upload_ref', file).then(function(data) {
+                            return { success:true, item:legacyImageItem(data, file) };
+                        });
+                    }
+                    throw error;
+                })
                 .then(function(data) {
                     if (!data.success || !data.item) throw new Error(data.error || '上传失败');
                     store.project.mediaRefs.push(createMediaRef(data.item));
                     actions.markDirty();
-                }).catch(function(err) { actions.flash('上传失败: ' + (err.message || err)); });
+                    return true;
+                }).catch(function(err) {
+                    actions.flash('上传失败 [' + file.name + ']: ' + (err.message || err));
+                    return false;
+                });
         }
         function uploadFiles(files) {
+            var selected = Array.from(files || []);
+            if (!selected.length) return Promise.resolve();
             var queue = Promise.resolve();
-            Array.from(files || []).forEach(function(file) { queue = queue.then(function() { return uploadOne(file); }); });
-            return queue.then(function() { if ((files || []).length) actions.flash('素材已添加'); });
+            var successCount = 0;
+            selected.forEach(function(file) {
+                queue = queue.then(function() { return uploadOne(file); })
+                    .then(function(success) { if (success) successCount += 1; });
+            });
+            return queue.then(function() {
+                if (successCount === selected.length) actions.flash('已添加 ' + successCount + ' 个素材');
+                else if (successCount > 0) actions.flash('已添加 ' + successCount + ' 个，失败 ' + (selected.length - successCount) + ' 个');
+            });
         }
         function onMediaFiles(e) {
             uploadFiles(e.target && e.target.files);
@@ -1122,7 +1645,12 @@ var EditorPanel = defineComponent({
             var moved = store.project.mediaRefs.splice(from, 1)[0];
             store.project.mediaRefs.splice(to, 0, moved);
             var after = mediaNumberMap(mediaItems.value);
-            store.scenes.forEach(function(sc) { sc.preamble = rewriteMediaTags(sc.preamble, before, after, ''); });
+            store.scenes.forEach(function(sc) {
+                sc.preamble = rewriteMediaTags(sc.preamble, before, after, '');
+                sc.disabledTokens = (sc.disabledTokens || []).map(function(token) {
+                    return rewriteMediaTags(token, before, after, '');
+                }).filter(Boolean);
+            });
             dragIndex.value = -1;
             actions.markDirty();
         }
@@ -1138,9 +1666,23 @@ var EditorPanel = defineComponent({
             var before = mediaNumberMap(mediaItems.value);
             store.project.mediaRefs.splice(index, 1);
             var after = mediaNumberMap(mediaItems.value);
-            store.scenes.forEach(function(sc) { sc.preamble = rewriteMediaTags(sc.preamble, before, after, item.id); });
-            if (item.filename) fetch('/h3_director/media?filename=' + encodeURIComponent(item.filename), { method:'DELETE' }).catch(function(){});
+            store.scenes.forEach(function(sc) {
+                sc.preamble = rewriteMediaTags(sc.preamble, before, after, item.id);
+                sc.disabledTokens = (sc.disabledTokens || []).map(function(token) {
+                    return rewriteMediaTags(token, before, after, item.id);
+                }).filter(Boolean);
+            });
+            if (item.filename && item.managed) api.fetchApi('/h3_director/media?filename=' + encodeURIComponent(item.filename), { method:'DELETE' }).catch(function(){});
             actions.markDirty();
+        }
+        function mediaBroken(item) { return !!(item && mediaErrors[item.id]); }
+        function onMediaError(e, item) {
+            if (item) mediaErrors[item.id] = true;
+            if (e && e.target) e.target.style.display = 'none';
+        }
+        function onMediaLoad(e, item) {
+            if (item && mediaErrors[item.id]) delete mediaErrors[item.id];
+            if (e && e.target) e.target.style.display = '';
         }
         function onLoadedMetadata(e, item) {
             var duration = Number(e.target && e.target.duration) || 0;
@@ -1153,45 +1695,150 @@ var EditorPanel = defineComponent({
             var duration = Math.max(0, Number(item.duration) || 0);
             Object.assign(trimDraft, {
                 id:item.id, type:item.type, filename:item.filename, originalName:item.originalName,
-                url:item.url || ('/h3_director/media?filename=' + encodeURIComponent(item.filename)),
+                url:mediaUrl(item),
                 duration:duration, start:Math.max(0, Number(item.trimStart) || 0),
-                end:Number(item.trimEnd) > 0 ? Number(item.trimEnd) : duration
+                end:Number(item.trimEnd) > 0 ? Number(item.trimEnd) : duration,
+                current:Math.max(0, Number(item.trimStart) || 0)
             });
+            trimFrames.value = [];
             trimOpen.value = true;
+            if (item.type === 'video' && duration > 0) {
+                nextTick(function() { generateTrimFrames(trimDraft.url, duration); });
+            }
+        }
+        function waitForVideoEvent(video, eventName, timeout) {
+            return new Promise(function(resolve, reject) {
+                var timer = setTimeout(function() { cleanup(); reject(new Error(eventName + ' timeout')); }, timeout || 5000);
+                function cleanup() { clearTimeout(timer); video.removeEventListener(eventName, done); video.removeEventListener('error', failed); }
+                function done() { cleanup(); resolve(); }
+                function failed() { cleanup(); reject(new Error('video load failed')); }
+                video.addEventListener(eventName, done, { once:true });
+                video.addEventListener('error', failed, { once:true });
+            });
+        }
+        async function generateTrimFrames(url, duration) {
+            var run = ++trimThumbRun;
+            trimFramesLoading.value = true;
+            var video = document.createElement('video');
+            video.muted = true; video.preload = 'auto'; video.playsInline = true;
+            try {
+                video.src = url;
+                if (video.readyState < 1) await waitForVideoEvent(video, 'loadedmetadata', 8000);
+                if (video.readyState < 2) await waitForVideoEvent(video, 'loadeddata', 8000);
+                var actualDuration = Number(video.duration) || duration || 0;
+                if (actualDuration <= 0) return;
+                var count = Math.max(7, Math.min(12, Math.round(actualDuration * 1.5)));
+                var canvas = document.createElement('canvas');
+                canvas.width = 150; canvas.height = 84;
+                var context = canvas.getContext('2d', { alpha:false });
+                var frames = [];
+                for (var i = 0; i < count && run === trimThumbRun; i++) {
+                    var target = Math.min(Math.max(0, actualDuration - 0.02), actualDuration * (i + 0.5) / count);
+                    if (Math.abs((Number(video.currentTime) || 0) - target) > 0.001) {
+                        var seekPromise = waitForVideoEvent(video, 'seeked', 3000);
+                        video.currentTime = target;
+                        await seekPromise;
+                    }
+                    context.fillStyle = '#090b0f'; context.fillRect(0, 0, canvas.width, canvas.height);
+                    var scale = Math.max(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+                    var width = video.videoWidth * scale, height = video.videoHeight * scale;
+                    context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+                    frames.push(canvas.toDataURL('image/jpeg', 0.58));
+                }
+                if (run === trimThumbRun) trimFrames.value = frames;
+            } catch (error) {
+                console.warn('[EagleH3Director] timeline thumbnails failed:', error);
+                if (run === trimThumbRun) trimFrames.value = [];
+            } finally {
+                video.removeAttribute('src');
+                try { video.load(); } catch (_) {}
+                if (run === trimThumbRun) trimFramesLoading.value = false;
+            }
+        }
+        function onTrimLoadedMetadata(event) {
+            var duration = Number(event.target && event.target.duration) || trimDraft.duration || 0;
+            if (duration > 0) {
+                trimDraft.duration = duration;
+                if (!trimDraft.end || trimDraft.end > duration) trimDraft.end = duration;
+                clampTrim();
+                if (trimDraft.type === 'video' && !trimFrames.value.length) generateTrimFrames(trimDraft.url, duration);
+            }
+        }
+        function snapTrimTime(value) {
+            value = Number(value) || 0;
+            if (trimDraft.type !== 'video') return Math.round(value * 100) / 100;
+            return Math.round(value * trimFps.value) / trimFps.value;
         }
         function clampTrim(which) {
-            var minGap = Math.min(0.05, trimDraft.duration || 0.05);
-            trimDraft.start = Math.max(0, Math.min(Number(trimDraft.start) || 0, Math.max(0, trimDraft.end - minGap)));
-            trimDraft.end = Math.min(trimDraft.duration, Math.max(Number(trimDraft.end) || 0, trimDraft.start + minGap));
-            if (which === 'start' && trimPlayer.value) trimPlayer.value.currentTime = trimDraft.start;
+            var minGap = Math.min(trimFrameStep.value, trimDraft.duration || trimFrameStep.value);
+            trimDraft.start = snapTrimTime(Math.max(0, Math.min(Number(trimDraft.start) || 0, Math.max(0, trimDraft.end - minGap))));
+            trimDraft.end = snapTrimTime(Math.min(trimDraft.duration, Math.max(Number(trimDraft.end) || 0, trimDraft.start + minGap)));
+            if (trimDraft.end > trimDraft.duration) trimDraft.end = trimDraft.duration;
+            if (which === 'start' && trimPlayer.value) {
+                trimPlayer.value.currentTime = trimDraft.start;
+                trimDraft.current = trimDraft.start;
+            }
         }
-        function resetTrim() { trimDraft.start = 0; trimDraft.end = trimDraft.duration; }
+        function resetTrim() { trimDraft.start = 0; trimDraft.end = trimDraft.duration; trimDraft.current = 0; if (trimPlayer.value) trimPlayer.value.currentTime = 0; }
         function previewTrim() {
             if (!trimPlayer.value) return;
             trimPlayer.value.currentTime = trimDraft.start;
+            trimDraft.current = trimDraft.start;
             var promise = trimPlayer.value.play();
             if (promise && promise.catch) promise.catch(function() {});
         }
         function onTrimTime() {
-            if (trimPlayer.value && trimPlayer.value.currentTime >= trimDraft.end) trimPlayer.value.pause();
+            if (!trimPlayer.value) return;
+            trimDraft.current = Number(trimPlayer.value.currentTime) || 0;
+            if (trimPlayer.value.currentTime >= trimDraft.end) trimPlayer.value.pause();
+        }
+        function seekTrimTimeline(event) {
+            if (!trimPlayer.value || !trimDraft.duration) return;
+            var rect = event.currentTarget.getBoundingClientRect();
+            var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+            var value = snapTrimTime(trimDraft.duration * ratio);
+            trimPlayer.value.currentTime = value;
+            trimDraft.current = value;
+        }
+        function markTrim(which) {
+            if (!trimPlayer.value) return;
+            var value = snapTrimTime(trimPlayer.value.currentTime);
+            if (which === 'start') trimDraft.start = Math.min(value, trimDraft.end - trimFrameStep.value);
+            else trimDraft.end = Math.max(value, trimDraft.start + trimFrameStep.value);
+            clampTrim(which);
         }
         function saveTrim() {
             var item = mediaItems.value.find(function(x) { return x.id === trimDraft.id; });
             if (item) { item.trimStart = trimDraft.start; item.trimEnd = trimDraft.end; actions.markDirty(); }
             trimOpen.value = false;
         }
-        function closeTrim() { if (trimPlayer.value) trimPlayer.value.pause(); trimOpen.value = false; }
+        function closeTrim() { ++trimThumbRun; if (trimPlayer.value) trimPlayer.value.pause(); trimOpen.value = false; trimFrames.value = []; trimFramesLoading.value = false; }
 
         return {
             store:store, actions:actions, scene:scene, tabs:tabs, mediaItems:mediaItems,
             scriptEditor:scriptEditor, mediaFileInput:mediaFileInput, trimPlayer:trimPlayer,
             dragIndex:dragIndex, trimOpen:trimOpen, trimDraft:trimDraft,
+            trimFrames:trimFrames, trimFramesLoading:trimFramesLoading, trimFps:trimFps,
+            trimFrameStep:trimFrameStep, trimStartPct:trimStartPct, trimEndPct:trimEndPct,
+            trimPlayheadPct:trimPlayheadPct, trimSelectedSeconds:trimSelectedSeconds,
+            trimStartFrame:trimStartFrame, trimEndFrame:trimEndFrame,
+            trimSelectedFrames:trimSelectedFrames, trimRulerMarks:trimRulerMarks,
+            inputPickerOpen:inputPickerOpen, inputImages:inputImages, inputQuery:inputQuery,
+            inputLoading:inputLoading, inputError:inputError, inputHover:inputHover,
+            filteredInputImages:filteredInputImages,
             formatDuration:formatDuration, selectedDuration:selectedDuration, mediaTagFor:mediaTagFor,
-            insertMedia:insertMedia, openMediaPicker:openMediaPicker, onMediaFiles:onMediaFiles,
+            mediaUrl:mediaUrl, mediaBroken:mediaBroken, onMediaError:onMediaError, onMediaLoad:onMediaLoad,
+            insertMedia:insertMedia, toggleAtomicToken:toggleAtomicToken,
+            openMediaPicker:openMediaPicker, openInputPicker:openInputPicker,
+            closeInputPicker:closeInputPicker, loadInputImages:loadInputImages,
+            addInputImage:addInputImage, inputPreviewUrl:inputPreviewUrl, formatBytes:formatBytes,
+            onMediaFiles:onMediaFiles,
             onMediaWheel:onMediaWheel, onExternalDrop:onExternalDrop, onDragStart:onDragStart,
             onDropAt:onDropAt, removeMedia:removeMedia, onLoadedMetadata:onLoadedMetadata,
             openTrim:openTrim, clampTrim:clampTrim, resetTrim:resetTrim, previewTrim:previewTrim,
-            onTrimTime:onTrimTime, saveTrim:saveTrim, closeTrim:closeTrim
+            onTrimLoadedMetadata:onTrimLoadedMetadata, onTrimTime:onTrimTime,
+            seekTrimTimeline:seekTrimTimeline, markTrim:markTrim, formatTrimTime:formatTrimTime,
+            saveTrim:saveTrim, closeTrim:closeTrim
         };
     },
     template: `
@@ -1221,9 +1868,10 @@ var EditorPanel = defineComponent({
                  @dragstart="onDragStart($event,i)" @dragend="dragIndex=-1"
                  @dragover.prevent @drop.stop.prevent="onDropAt($event,i)" @click="insertMedia(item)"
                  :title="'点击插入 ' + mediaTagFor(item, mediaItems)">
-              <img v-if="item.type==='image'" :src="item.url" alt="">
-              <video v-else-if="item.type==='video'" :src="item.url" muted preload="metadata" @loadedmetadata="onLoadedMetadata($event,item)"></video>
-              <div v-else class="audio-icon">♪<audio :src="item.url" preload="metadata" style="display:none" @loadedmetadata="onLoadedMetadata($event,item)"></audio></div>
+              <div v-if="item.type==='image' && mediaBroken(item)" class="h3d-media-missing">图片不可用</div>
+              <img v-if="item.type==='image' && !mediaBroken(item)" :src="mediaUrl(item)" alt="" @load="onMediaLoad($event,item)" @error="onMediaError($event,item)">
+              <video v-else-if="item.type==='video'" :src="mediaUrl(item)" muted preload="metadata" @loadedmetadata="onLoadedMetadata($event,item)" @error="onMediaError($event,item)"></video>
+              <div v-else-if="item.type==='audio'" class="audio-icon">♪<audio :src="mediaUrl(item)" preload="metadata" style="display:none" @loadedmetadata="onLoadedMetadata($event,item)" @error="onMediaError($event,item)"></audio></div>
               <span class="media-tag">{{ mediaTagFor(item, mediaItems) }}</span>
               <span v-if="item.type!=='image'" class="media-time">{{ formatDuration(selectedDuration(item)) }}</span>
               <div class="media-actions">
@@ -1232,10 +1880,13 @@ var EditorPanel = defineComponent({
               </div>
             </div>
             <button class="h3d-media-add" @click="openMediaPicker" @drop.stop.prevent="onExternalDrop">＋ 添加素材</button>
+            <button class="h3d-media-add" @click="openInputPicker">▾ input 图片</button>
           </div>
           <input ref="mediaFileInput" type="file" accept="image/*,video/*,audio/*" multiple style="display:none" @change="onMediaFiles">
-          <highlight-textarea ref="scriptEditor" v-model="scene.preamble" :media-items="mediaItems" :flex="true" min-height="120px"
-                              @input="actions.onPreambleInput" placeholder="自由文本 + [Shot N] 描述..."></highlight-textarea>
+          <highlight-textarea ref="scriptEditor" v-model="scene.preamble" :media-items="mediaItems"
+                              :disabled-tokens="scene.disabledTokens || []" :flex="true" min-height="120px"
+                              @input="actions.onPreambleInput" @toggle-token="toggleAtomicToken"
+                              placeholder="自由文本 + [Shot N] 描述..."></highlight-textarea>
         </div>
 
         <!-- 台词 -->
@@ -1257,7 +1908,7 @@ var EditorPanel = defineComponent({
         <div v-show="store.editorTab==='ref'" style="display:flex;flex-direction:column;gap:8px">
           <div class="h3d-row" style="justify-content:space-between">
             <div class="h3d-hint">与台本上方素材栏共用同一份数据；不自动排序，拖拽卡片可调整位置。图片最多9张，视频/音频各3个。</div>
-            <button class="h3d-btn sm primary" @click="openMediaPicker">＋ 添加素材</button>
+            <span style="display:flex;gap:5px"><button class="h3d-btn sm" @click="openInputPicker">▾ input 图片</button><button class="h3d-btn sm primary" @click="openMediaPicker">＋ 添加素材</button></span>
           </div>
           <div class="h3d-media-dropzone" @click="openMediaPicker" @dragover.prevent @drop.stop.prevent="onExternalDrop">
             <div class="drop-icon">⇩</div>
@@ -1269,9 +1920,10 @@ var EditorPanel = defineComponent({
                  :class="{dragging:dragIndex===i}" @dragstart="onDragStart($event,i)" @dragend="dragIndex=-1"
                  @dragover.prevent @drop.stop.prevent="onDropAt($event,i)">
               <div class="h3d-media-detail-preview">
-                <img v-if="item.type==='image'" :src="item.url" alt="">
-                <video v-else-if="item.type==='video'" :src="item.url" muted controls preload="metadata" @loadedmetadata="onLoadedMetadata($event,item)"></video>
-                <div v-else class="audio-icon">♪<audio :src="item.url" preload="metadata" style="display:none" @loadedmetadata="onLoadedMetadata($event,item)"></audio></div>
+                <div v-if="item.type==='image' && mediaBroken(item)" class="h3d-media-missing">找不到素材文件</div>
+                <img v-if="item.type==='image' && !mediaBroken(item)" :src="mediaUrl(item)" alt="" @load="onMediaLoad($event,item)" @error="onMediaError($event,item)">
+                <video v-else-if="item.type==='video'" :src="mediaUrl(item)" muted controls preload="metadata" @loadedmetadata="onLoadedMetadata($event,item)" @error="onMediaError($event,item)"></video>
+                <div v-else-if="item.type==='audio'" class="audio-icon">♪<audio :src="mediaUrl(item)" preload="metadata" style="display:none" @loadedmetadata="onLoadedMetadata($event,item)" @error="onMediaError($event,item)"></audio></div>
                 <span class="h3d-tag" style="position:absolute;left:4px;top:4px">{{ mediaTagFor(item, mediaItems) }}</span>
               </div>
               <input class="h3d-inp sm" v-model="item.name" :placeholder="item.originalName || '素材名称'" @input="actions.markDirty" style="width:100%;margin-top:6px">
@@ -1355,22 +2007,115 @@ var EditorPanel = defineComponent({
                 </select>
               </div>
             </div>
+            <div style="border:1px solid var(--h3d-bd);border-radius:6px;padding:7px;margin-bottom:8px;background:var(--h3d-bg2)">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                <b style="font-size:11px">导演技能库</b>
+                <span class="h3d-mini">已启用 {{ store.project.skill.librarySkillIds.length }} 项</span>
+                <button class="h3d-btn sm" style="margin-left:auto" :disabled="store.directorLibrary.loading" @click="actions.loadDirectorLibrary">
+                  {{ store.directorLibrary.loading ? '读取中…' : '刷新' }}
+                </button>
+              </div>
+              <div v-if="store.directorLibrary.error" class="h3d-mini" style="color:var(--h3d-danger);margin-bottom:5px">{{ store.directorLibrary.error }}</div>
+              <div v-else-if="store.directorLibrary.fallbackReason" class="h3d-mini" style="color:#d5a84b;margin-bottom:5px">已回退到 {{ store.directorLibrary.source }}：{{ store.directorLibrary.fallbackReason }}</div>
+              <div v-if="store.directorLibrary.items.length" style="display:flex;flex-wrap:wrap;gap:5px">
+                <button v-for="skill in store.directorLibrary.items" :key="skill.id" class="h3d-btn sm"
+                        :class="{primary:store.project.skill.librarySkillIds.includes(skill.id)}"
+                        :title="(skill.category || 'custom') + (skill.tasks && skill.tasks.length ? ' · ' + skill.tasks.join('/') : '')"
+                        @click="actions.toggleDirectorLibrarySkill(skill)">
+                  {{ store.project.skill.librarySkillIds.includes(skill.id) ? '✓ ' : '' }}{{ skill.name }}
+                </button>
+              </div>
+              <div v-else-if="!store.directorLibrary.loading && !store.directorLibrary.error" class="h3d-mini">技能库为空，可在“导演技能库”节点中新建。</div>
+              <div v-if="store.directorLibrary.path" class="h3d-mini" :title="store.directorLibrary.path" style="margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ store.directorLibrary.source }} · {{ store.directorLibrary.path }}</div>
+            </div>
             <textarea class="h3d-textarea" style="min-height:60px;margin-bottom:8px" v-model="store.project.skill.hint" placeholder="给模型的额外指令（如：风格偏赛博朋克、主角 Nali 是龙女仆）"></textarea>
-            <button class="h3d-btn primary" @click="actions.generateSkill" style="width:100%">🎬 生成（手动）</button>
+            <div v-if="store.skillBatch.active || store.skillBatch.status" style="margin:0 0 7px">
+              <div class="h3d-row" style="justify-content:space-between"><span class="h3d-mini">{{ store.skillBatch.status }}</span><span class="h3d-mini">{{ store.skillBatch.completed }}/{{ store.skillBatch.sceneIds.length }}</span></div>
+              <div class="h3d-bar"><i :style="{width:((store.skillBatch.completed + store.skillBatch.failed) / Math.max(1,store.skillBatch.sceneIds.length) * 100)+'%'}"></i></div>
+              <div v-if="store.skillBatch.lastError" class="h3d-mini" style="color:var(--h3d-danger);margin-top:3px">{{ store.skillBatch.lastError }}</div>
+            </div>
+            <div class="h3d-row" style="gap:6px">
+              <button class="h3d-btn" :disabled="store.skillBatch.active" @click="actions.generateSkill('current')" style="flex:1">🎬 生成当前</button>
+              <button v-if="!store.skillBatch.active" class="h3d-btn primary" @click="actions.generateSkill('all')" style="flex:1">🎬 生成全部 {{ store.scenes.length }} 场景</button>
+              <button v-else class="h3d-btn danger" @click="actions.stopSkillGeneration" style="flex:1">■ 生成后停止</button>
+            </div>
           </div>
         </div>
       </div>
     </template>
   </div>
+  <div v-if="inputPickerOpen" class="h3d-input-overlay" @click.self="closeInputPicker">
+    <div class="h3d-input-dialog">
+      <div class="h3d-input-head">
+        <b>ComfyUI/input 图片</b>
+        <input class="h3d-inp" v-model="inputQuery" placeholder="搜索图片名称或文件夹...">
+        <button class="h3d-btn sm" @click="loadInputImages(true)">刷新</button>
+        <button class="h3d-btn sm" @click="closeInputPicker">×</button>
+      </div>
+      <div class="h3d-input-body">
+        <div class="h3d-input-preview">
+          <template v-if="inputHover">
+            <img :src="inputPreviewUrl(inputHover)" alt="">
+            <b style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="inputHover.name">{{ inputHover.name }}</b>
+            <span class="h3d-mini" :title="inputHover.path">{{ inputHover.subfolder || 'input 根目录' }} · {{ formatBytes(inputHover.size) }}</span>
+          </template>
+          <div v-else class="empty">将鼠标移到右侧图片名称上查看预览</div>
+        </div>
+        <div class="h3d-input-list">
+          <div v-if="inputLoading" class="h3d-empty">正在读取 ComfyUI/input…</div>
+          <div v-else-if="inputError" class="h3d-empty" style="color:var(--h3d-danger)">{{ inputError }}</div>
+          <button v-for="item in filteredInputImages" :key="item.path" class="h3d-input-item"
+                  :class="{active:inputHover && inputHover.path===item.path}"
+                  @mouseenter="inputHover=item" @focus="inputHover=item" @click="addInputImage(item)">
+            <span>▧</span><span class="name">{{ item.name }}</span><span class="folder">{{ item.subfolder || 'input' }}</span><span>＋</span>
+          </button>
+          <div v-if="!inputLoading && !inputError && !filteredInputImages.length" class="h3d-empty">没有匹配图片</div>
+          <div v-if="filteredInputImages.length>=500" class="h3d-mini" style="padding:6px;text-align:center">仅显示前500项，请继续输入关键词</div>
+        </div>
+      </div>
+    </div>
+  </div>
   <div v-if="trimOpen" class="h3d-trim-overlay" @click.self="closeTrim">
     <div class="h3d-trim-dialog">
       <div class="h3d-row" style="justify-content:space-between"><b>{{ trimDraft.type==='video' ? '视频裁剪' : '音频裁剪' }}</b><button class="h3d-btn sm" @click="closeTrim">×</button></div>
       <div class="h3d-trim-preview">
-        <video v-if="trimDraft.type==='video'" ref="trimPlayer" :src="trimDraft.url" controls @timeupdate="onTrimTime"></video>
-        <audio v-else ref="trimPlayer" :src="trimDraft.url" controls @timeupdate="onTrimTime"></audio>
+        <video v-if="trimDraft.type==='video'" ref="trimPlayer" :src="trimDraft.url" controls @loadedmetadata="onTrimLoadedMetadata" @timeupdate="onTrimTime"></video>
+        <audio v-else ref="trimPlayer" :src="trimDraft.url" controls @loadedmetadata="onTrimLoadedMetadata" @timeupdate="onTrimTime"></audio>
       </div>
-      <div class="h3d-trim-ranges"><span>开始</span><input type="range" min="0" :max="trimDraft.duration" step="0.01" v-model.number="trimDraft.start" @input="clampTrim('start')"><b>{{ trimDraft.start.toFixed(2) }}s</b></div>
-      <div class="h3d-trim-ranges"><span>结束</span><input type="range" min="0" :max="trimDraft.duration" step="0.01" v-model.number="trimDraft.end" @input="clampTrim('end')"><b>{{ trimDraft.end.toFixed(2) }}s</b></div>
+      <template v-if="trimDraft.type==='video'">
+        <div class="h3d-trim-timeline">
+          <div class="h3d-trim-ruler">
+            <i v-for="mark in trimRulerMarks" :key="mark.pct" class="h3d-trim-tick" :style="{left:mark.pct+'%'}"><span>{{ mark.label }}</span></i>
+          </div>
+          <div class="h3d-trim-track" @click="seekTrimTimeline">
+            <div class="h3d-trim-thumbs">
+              <div v-if="trimFramesLoading && !trimFrames.length" class="h3d-trim-thumb empty">正在抽取时间轴缩略帧…</div>
+              <div v-else-if="!trimFrames.length" class="h3d-trim-thumb empty">视频预览可用，缩略帧暂不可用</div>
+              <div v-for="(frame,index) in trimFrames" :key="index" class="h3d-trim-thumb"><img :src="frame" alt=""></div>
+            </div>
+            <div class="h3d-trim-shade left" :style="{width:trimStartPct+'%'}"></div>
+            <div class="h3d-trim-selection" :style="{left:trimStartPct+'%',width:Math.max(0,trimEndPct-trimStartPct)+'%'}"></div>
+            <div class="h3d-trim-shade right" :style="{width:(100-trimEndPct)+'%'}"></div>
+            <div class="h3d-trim-playhead" :style="{left:trimPlayheadPct+'%'}"></div>
+            <input class="h3d-trim-range start" type="range" min="0" :max="trimDraft.duration" :step="trimFrameStep" v-model.number="trimDraft.start" @input.stop="clampTrim('start')">
+            <input class="h3d-trim-range end" type="range" min="0" :max="trimDraft.duration" :step="trimFrameStep" v-model.number="trimDraft.end" @input.stop="clampTrim('end')">
+          </div>
+        </div>
+        <div class="h3d-trim-values">
+          <div class="h3d-trim-value"><label>入点</label><div class="line"><input class="h3d-inp time" type="number" min="0" :max="trimDraft.end" :step="trimFrameStep" v-model.number="trimDraft.start" @change="clampTrim('start')"><b>{{ trimStartFrame }} 帧</b></div></div>
+          <div class="h3d-trim-value"><label>出点</label><div class="line"><input class="h3d-inp time" type="number" :min="trimDraft.start" :max="trimDraft.duration" :step="trimFrameStep" v-model.number="trimDraft.end" @change="clampTrim('end')"><b>{{ trimEndFrame }} 帧</b></div></div>
+          <div class="h3d-trim-value"><label>选区</label><div class="line"><strong>{{ trimSelectedSeconds.toFixed(2) }}s</strong><b>{{ trimSelectedFrames }} 帧</b></div></div>
+        </div>
+        <div class="h3d-trim-tools">
+          <button class="h3d-btn sm" @click="markTrim('start')">[ 设当前为入点</button>
+          <button class="h3d-btn sm" @click="markTrim('end')">设当前为出点 ]</button>
+          <span class="summary">播放头 {{ formatTrimTime(trimDraft.current) }} · {{ trimFps }} FPS</span>
+        </div>
+      </template>
+      <template v-else>
+        <div class="h3d-trim-ranges"><span>开始</span><input type="range" min="0" :max="trimDraft.duration" step="0.01" v-model.number="trimDraft.start" @input="clampTrim('start')"><b>{{ trimDraft.start.toFixed(2) }}s</b></div>
+        <div class="h3d-trim-ranges"><span>结束</span><input type="range" min="0" :max="trimDraft.duration" step="0.01" v-model.number="trimDraft.end" @input="clampTrim('end')"><b>{{ trimDraft.end.toFixed(2) }}s</b></div>
+      </template>
       <div class="h3d-row" style="justify-content:space-between;margin-top:12px">
         <span><button class="h3d-btn" @click="previewTrim">▶ 播放选区</button> <button class="h3d-btn" @click="resetTrim">恢复全部</button></span>
         <span><button class="h3d-btn" @click="closeTrim">取消</button> <button class="h3d-btn primary" @click="saveTrim">保存</button></span>
@@ -1481,7 +2226,10 @@ app.registerExtension({
             if (this._h3Init) return;
             this._h3Init = true;
 
-            this.setSize([1300, 860]);
+            // 新节点默认落在左栏首个场景卡片下方；已有工作流尺寸由 onConfigure 恢复。
+            if (!this.size || this.size[0] < 760 || this.size[1] < 560) {
+                this.setSize([1300, 1080]);
+            }
 
             var node = this;
             setTimeout(function() { if (!hideWidgets(node)) setTimeout(function() { hideWidgets(node); }, 500); }, 300);
@@ -1494,19 +2242,28 @@ app.registerExtension({
             }
 
             var el = document.createElement('div');
-            el.style.cssText = 'width:100%;overflow:hidden;position:relative;';
+            el.style.cssText = 'display:block;min-width:0;max-width:100%;overflow:hidden;position:relative;box-sizing:border-box;';
 
             var widget = this.addDOMWidget('h3_director_ui', 'div', el, { serialize: false });
 
-            var applyHeight = function(nodeHeight) {
-                var h = Math.max(420, (nodeHeight || 860) - 150);
+            var applySize = function(size) {
+                size = size || node.size || [1300, 1080];
+                var w = Math.max(700, Number(size[0] || 1300) - 20);
+                // 内容区域可以缩小并在三栏内部滚动，不再反向把 LiteGraph 节点撑高。
+                var h = Math.max(220, Number(size[1] || 1080) - 150);
+                el.style.width = w + 'px';
+                el.style.maxWidth = w + 'px';
                 el.style.height = h + 'px';
-                return h;
+                widget.lastHeight = h;
+                widget.computedHeight = h;
+                return [w, h];
             };
-            applyHeight(this.size ? this.size[1] : 800);
-
-            // 不设置 computeSize，避免高度反馈循环（参考 lora_gallery）
-            // ComfyUI 的 DOM widget 高度由 onResize 回调主动同步
+            widget.computeSize = function(width) {
+                var current = node.size || [width || 1300, 1080];
+                // 这里只声明最小占位；实际高度始终由用户的节点尺寸与 onResize 决定。
+                return [Math.max(700, Number(width || current[0]) - 20), 220];
+            };
+            applySize(this.size);
 
             console.log('[EagleH3Director] mounting Vue on node', this.id);
             try {
@@ -1548,8 +2305,9 @@ app.registerExtension({
             var onResize = this.onResize;
             this.onResize = function(size) {
                 if (onResize) onResize.apply(this, arguments);
-                applyHeight(size[1]);
+                applySize(size);
             };
+            this._h3ApplyNodeSize = applySize;
         };
 
         var onConfigure = nodeType.prototype.onConfigure;
@@ -1570,6 +2328,9 @@ app.registerExtension({
                 }
             }
             doReload();
+            requestAnimationFrame(function() {
+                if (node._h3ApplyNodeSize) node._h3ApplyNodeSize(node.size);
+            });
         };
 
         var onRemoved = nodeType.prototype.onRemoved;
@@ -1577,6 +2338,7 @@ app.registerExtension({
             if (this._h3SaveTimer) { clearTimeout(this._h3SaveTimer); this._h3SaveTimer = null; }
             if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
             this._h3ReloadState = null;
+            this._h3ApplyNodeSize = null;
             if (onRemoved) onRemoved.apply(this, arguments);
         };
     }

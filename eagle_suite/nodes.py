@@ -22,7 +22,11 @@ from .danbooru_search import DanbooruVueSearchNode
 from .text_switch_node import EagleTextSwitchMulti
 from .unified_media_browser import UnifiedMediaBrowser
 from .video_preview_node import EagleVideoGifPreviewNode
-from .h3_director_node import EagleH3DirectorNode
+from .h3_director_node import EagleH3DirectorNode, EagleH3MediaPortsNode
+from .h3_pipeline import (
+    NODE_CLASS_MAPPINGS_H3PIPELINE,
+    NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE,
+)
 from .director_skill_node import EagleDirectorSkillNode
 
 # ── 工具节点 ─────────────────────────────────────────────
@@ -72,6 +76,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleLoraGalleryNode": EagleLoraGalleryNode,
     "UnifiedMediaBrowser": UnifiedMediaBrowser,
     "EagleH3DirectorNode": EagleH3DirectorNode,
+    "EagleH3MediaPortsNode": EagleH3MediaPortsNode,
     "EagleDirectorSkillNode": EagleDirectorSkillNode,
 
     # Danbooru
@@ -87,6 +92,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleStringRows":      EagleStringRows,
 }
 NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_TEXT)
+NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_H3PIPELINE)
 
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -127,6 +133,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleLoraGalleryNode": "🦅 LoRA Gallery",
     "UnifiedMediaBrowser": "🦅 统一媒体浏览器",
     "EagleH3DirectorNode": "🦅 H3 导演台",
+    "EagleH3MediaPortsNode": "🦅 H3 媒体集成端口",
     "EagleDirectorSkillNode": "🦅 导演技能库",
     # Danbooru
     "DanbooruVueSearchNode": "🦅 Danbooru 标签搜索",
@@ -141,12 +148,26 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleStringRows":    "🦅 行数统计",
 }
 NODE_DISPLAY_NAME_MAPPINGS.update(NODE_DISPLAY_NAME_MAPPINGS_TEXT)
+NODE_DISPLAY_NAME_MAPPINGS.update(NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE)
 
 
 # ── 菜单层级 ──
 # 各实现文件仍可以保留自身 CATEGORY 作为独立调试默认值，
 # 但插件正常加载时以这里为唯一的最终分类，避免节点散落到多个根菜单。
 MENU_ROOT = "🦅 Eagle Suite"
+
+_H3_CORE_KEYS = (
+    "EagleH3PlanNode",
+    "EagleH3NativeLoopStartNode",
+    "EagleH3ShotContextNode",
+    "EagleH3CheckpointReviewNode",
+    "EagleH3NativeLoopEndNode",
+)
+_H3_TOOL_KEYS = (
+    "EagleH3ExportPNGSequenceNode",
+    "EagleH3SeamProbeNode",
+    "EagleH3SmartSplitNode",
+)
 
 _CATEGORY_GROUPS = {
     f"{MENU_ROOT}/Eagle": (
@@ -198,7 +219,14 @@ _CATEGORY_GROUPS = {
     ),
     f"{MENU_ROOT}/H3 导演台": (
         EagleH3DirectorNode,
+        EagleH3MediaPortsNode,
         EagleDirectorSkillNode,
+    ),
+    f"{MENU_ROOT}/H3 导演台/核心流程": tuple(
+        NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_CORE_KEYS
+    ),
+    f"{MENU_ROOT}/H3 导演台/工具": tuple(
+        NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_TOOL_KEYS
     ),
 }
 
@@ -206,6 +234,6 @@ for _category, _node_classes in _CATEGORY_GROUPS.items():
     for _node_class in _node_classes:
         _node_class.CATEGORY = _category
 
-del _category, _node_classes, _node_class
+del _category, _node_classes, _node_class, _H3_CORE_KEYS, _H3_TOOL_KEYS
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

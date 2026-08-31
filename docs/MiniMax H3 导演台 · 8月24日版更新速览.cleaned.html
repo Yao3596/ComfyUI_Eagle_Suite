@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<!-- saved from url=(0042)https://go.tabbit.site/projects/24ZZZV3afo -->
+<html lang="zh-CN"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiniMax H3 导演台 · 8月24日版更新速览</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#1f2430; --sub:#5b6474;
+    --blue:#2b6cb0; --blue-bg:#eef4fc; --green:#2f855a; --green-bg:#effaf3;
+    --red:#c53030; --red-bg:#fdf0ef; --line:#e6e9f0; --pink:#fb7299;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);padding:24px 16px;}
+  .wrap{max-width:880px;margin:0 auto;}
+  .hero{background:linear-gradient(135deg,#1f2a44 0%,#2b3a63 100%);border-radius:16px;padding:26px 28px;color:#fff;margin-bottom:20px;}
+  .hero .tag{display:inline-block;font-size:12px;letter-spacing:1px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);border-radius:999px;padding:4px 12px;margin-bottom:12px;}
+  .hero h1{font-size:22px;font-weight:700;line-height:1.4;}
+  .hero p{margin-top:8px;font-size:13px;color:#c3cce0;line-height:1.6;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin-bottom:18px;box-shadow:0 1px 3px rgba(31,36,48,.05);}
+  .card-head{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .num{flex:0 0 30px;height:30px;border-radius:8px;background:var(--pink);color:#fff;font-weight:700;font-size:15px;display:flex;align-items:center;justify-content:center;}
+  .card-head h2{font-size:17px;font-weight:700;}
+  .card-head .badge{margin-left:auto;font-size:11px;border-radius:999px;padding:3px 10px;background:#fdeef3;color:#d6336c;border:1px solid #f8c9d8;white-space:nowrap;}
+  .vs{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  @media (max-width:640px){.vs{grid-template-columns:1fr;}}
+  .col{border-radius:10px;padding:14px 16px;font-size:13.5px;line-height:1.75;}
+  .col h3{font-size:12px;font-weight:700;letter-spacing:1px;margin-bottom:8px;display:flex;align-items:center;gap:6px;}
+  .before{background:var(--red-bg);border:1px solid #f3d4d1;color:#5c3a37;}
+  .before h3{color:var(--red);}
+  .after{background:var(--green-bg);border:1px solid #d3ecdd;color:#31473a;}
+  .after h3{color:var(--green);}
+  .gain{margin-top:14px;background:var(--blue-bg);border:1px solid #d5e4f5;border-radius:10px;padding:12px 16px;font-size:13.5px;line-height:1.8;color:#2a3b52;}
+  .gain b{color:var(--blue);}
+  .chips{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;}
+  .chip{font-size:12px;background:#f0f2f7;border:1px solid var(--line);border-radius:999px;padding:4px 11px;color:var(--sub);}
+  .flow{margin-top:14px;display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;font-size:12.5px;}
+  .step{background:#f7f8fb;border:1px solid var(--line);border-radius:8px;padding:9px 12px;line-height:1.6;color:#3d4657;flex:1 1 150px;}
+  .step.err{background:var(--red-bg);border-color:#f3d4d1;}
+  .step.ok{background:var(--green-bg);border-color:#d3ecdd;}
+  .arrow{align-self:center;color:#9aa3b5;font-size:16px;}
+  .quote{margin-top:14px;border-left:3px solid var(--pink);background:#fdf5f8;border-radius:0 10px 10px 0;padding:12px 16px;font-size:13px;line-height:1.8;color:#5c4450;}
+  .quote .who{font-weight:700;color:#d6336c;}
+  .foot{background:var(--card);border:1px dashed #c9cfdb;border-radius:14px;padding:18px 24px;font-size:13px;color:var(--sub);line-height:1.9;}
+  .foot b{color:var(--ink);}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--sub);margin-bottom:18px;flex-wrap:wrap;}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:1px;}
+</style>\n</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <span class="tag">UPDATE LOG · 2026-08-24 · 合集 18/21</span>
+    <h1>MiniMax H3 导演台 · 本期更新速览</h1>
+    <p>两大新功能 + 一个关键 Bug 修复：选择已有素材 · 参考图尺寸可选 · 换视频串段引用修复。升级方式：将 ComfyUI MiniMaxH3 Director 插件更新至最新版。</p>
+  </div>
+
+  <div class="legend">
+    <span><span class="dot" style="background:#c53030"></span>修复前</span>
+    <span><span class="dot" style="background:#2f855a"></span>修复后</span>
+    <span><span class="dot" style="background:#2b6cb0"></span>实际好处</span>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="num">1</div>
+      <h2>「选择已有」素材复用</h2>
+      <span class="badge">社区 PR + 维护者交互改良</span>
+    </div>
+    <div class="vs">
+      <div class="col before">
+        <h3>■ 之前</h3>
+        参考图 / 视频 / 音频每次都只能手动重新上传或拖拽导入，无法调用已经上传到 ComfyUI 里的素材；多片段、多角色项目要反复传同一批文件。
+      </div>
+      <div class="col after">
+        <h3>■ 现在</h3>
+        所有素材入口（图生视频、首尾帧、R2V、RV2V）都新增「选择已有」按钮 → 弹出素材选择框，带预览图列出已上传素材 → 双击或点「使用所选的文件」即完成引用。
+      </div>
+    </div>
+    <div class="gain"><b>好处：</b>素材一次上传、全程复用，省去重复传图的时间与误操作；预览图让挑选不再靠猜文件名。</div>
+    <div class="chips">
+      <span class="chip">适用：图片 / 视频 / 音频 全类型</span>
+      <span class="chip">设计取舍：保留「上传」为主入口，不强制弹选择框，避免每次多一步</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="num">2</div>
+      <h2>参考图尺寸可选</h2>
+      <span class="badge">R2V / RV2V 模式</span>
+    </div>
+    <div class="vs">
+      <div class="col before">
+        <h3>■ 之前</h3>
+        导演台里参考图尺寸被固定为默认「match（匹配）」，不可修改；而官方工作流本来就提供两种尺寸选项。
+      </div>
+      <div class="col after">
+        <h3>■ 现在</h3>
+        R2V（参考主体生视频）与 RV2V（参考素材改视频）两种模式下，均可像官方工作流一样自由选择参考图尺寸。
+      </div>
+    </div>
+    <div class="gain"><b>好处：</b>尺寸不再被锁死，输入分辨率可以匹配任务需求，直接影响生成速度与画质表现——这是本期含金量最高的一项。</div>
+    <div class="quote">
+      <span class="who">评论区实证 · 青离剑仙：</span>“用工作台一直生成的很慢，直到这一版更新完，终于速度正常了，<b>原来是参考图输入的尺寸问题</b>。” —— 说明此前固定 match 尺寸确实拖慢过实际生成。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="num">3</div>
+      <h2>换视频后串段引用 Bug 修复</h2>
+      <span class="badge">V2V / RV2V</span>
+    </div>
+    <div class="vs">
+      <div class="col before">
+        <h3>■ Bug 场景</h3>
+        智能分割或均分后，只运行了第 3 段；随后更换一个新视频重新分成 5 段——点「选择运行」时，第 3 段仍会<b>自动引用上一个视频的产出结果</b>，新旧结果串用，直接产出废片。
+      </div>
+      <div class="col after">
+        <h3>■ 修复后</h3>
+        更换视频重新分割后，各分段正确绑定当前视频的结果引用；V2V 与 RV2V 两处同源问题一并修复。
+      </div>
+    </div>
+    <div class="flow">
+      <div class="step">视频 A · 分割 7 段<br>运行第 3 段</div>
+      <div class="arrow">→</div>
+      <div class="step">换视频 B · 重新均分 5 段</div>
+      <div class="arrow">→</div>
+      <div class="step err">✗ 修复前：第 3 段误引视频 A 的结果</div>
+      <div class="step ok">✓ 修复后：正确引用视频 B</div>
+    </div>
+    <div class="gain"><b>好处：</b>保证结果正确性——分段编辑、挑选运行的迭代流程里不再混入旧素材，避免整批废片重跑。</div>
+  </div>
+
+  <div class="foot">
+    <b>遗留问题（评论区仍在反馈）：</b>二采速度偏慢（有人 3 步跑 1 小时）、素材过多时内存溢出（Linux 环境生成 4 段 15 秒即 OOM）、多镜头缓存体积大（30 镜头约 50G）、音画同步偶发延迟。<br>
+    <b>值得注意的更新模式：</b>「选择已有」来自网友 PR，UP 主保留主入口、只加侧按钮做交互改良——社区贡献 + 维护者 review 的开源协作，是这个插件两天一更仍能保持体验不劣化的原因。
+  </div>
+
+</div>
+</body>
+</html>

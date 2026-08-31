@@ -66,6 +66,29 @@ def _atomic_write_text(path: Path, content: str) -> None:
 def _atomic_write_json(path: Path, data) -> None:
     _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
+
+async def _read_json_request(request, label: str):
+    """Read a JSON object without depending on the browser's Content-Type header.
+
+    Some ComfyUI frontends/proxies strip the request Content-Type header, while a
+    stale cached frontend can issue a POST with no body at all.  aiohttp's
+    request.json() turns both cases into an opaque JSONDecodeError/ContentTypeError.
+    Return a user-facing validation error instead of escalating them to HTTP 500.
+    """
+    try:
+        raw = await request.text()
+    except Exception as error:
+        return None, f"{label}请求体读取失败: {error}"
+    if not str(raw or "").strip():
+        return None, f"{label}请求体为空，请刷新浏览器页面后重试"
+    try:
+        body = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        return None, f"{label}请求不是有效 JSON: {error}"
+    if not isinstance(body, dict):
+        return None, f"{label}请求必须是 JSON 对象"
+    return body, None
+
 # 默认配置
 DEFAULT_CONFIG = {
     "obsidian": {
@@ -195,6 +218,7 @@ def save_config(config: dict):
         _atomic_write_json(CONFIG_FILE, config)
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
+        raise
 
 
 def _markdown_front_matter(content: str):
@@ -807,18 +831,39 @@ async def get_config(request):
 async def update_config(request):
     """更新配置"""
     try:
-        body = await request.json()
-        new_config = body.get("config")
+        body, request_error = await _read_json_request(request, "保存设置")
+        if request_error:
+            logger.warning(request_error)
+            return web.json_response({"success": False, "error": request_error}, status=400)
+
+        # 兼容当前 {config: {...}} 与旧版直接发送配置对象两种格式。
+        new_config = body.get("config") if "config" in body else body
 
         current_config = load_config()
-        if not isinstance(new_config, dict) or not isinstance(new_config.get('obsidian'), dict):
+        if not isinstance(new_config, dict):
             return web.json_response({"success": False, "error": "配置结构无效"}, status=400)
-        if new_config['obsidian'].get('api_key') == '***':
-            new_config['obsidian']['api_key'] = current_config['obsidian']['api_key']
 
-        save_config(new_config)
+        # 旧版面板可能只提交部分字段；与当前配置深度合并，避免清空新增设置。
+        merged_config = copy.deepcopy(current_config)
+        merged_config.update({
+            key: value for key, value in new_config.items()
+            if key not in {"obsidian", "director_skills"}
+        })
+        for section in ("obsidian", "director_skills"):
+            incoming = new_config.get(section)
+            if incoming is not None and not isinstance(incoming, dict):
+                return web.json_response({"success": False, "error": f"配置项 {section} 结构无效"}, status=400)
+            if isinstance(incoming, dict):
+                merged_config.setdefault(section, {}).update(incoming)
+        if merged_config['obsidian'].get('api_key') == '***':
+            merged_config['obsidian']['api_key'] = current_config['obsidian']['api_key']
 
-        return web.json_response({"success": True, "data": new_config})
+        save_config(merged_config)
+
+        safe_config = copy.deepcopy(merged_config)
+        if safe_config.get("obsidian", {}).get("api_key"):
+            safe_config["obsidian"]["api_key"] = "***"
+        return web.json_response({"success": True, "data": safe_config})
     except Exception as e:
         logger.error(f"update_config 错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -1051,6 +1096,48 @@ def resolve_director_skills_file(config: Optional[dict] = None):
     return DIRECTOR_SKILLS_FILE
 
 
+def director_skill_storage_status(config: Optional[dict] = None) -> Dict:
+    """返回技能库真实读写位置；配置无效时明确说明为何回退到 Eagle。"""
+    cfg = config or load_config()
+    configured = _director_skill_source(cfg)
+    effective = configured
+    fallback_reason = ""
+
+    if configured == "obsidian":
+        target = _director_obsidian_file(cfg)
+        if target is None:
+            effective = "eagle"
+            target = DIRECTOR_SKILLS_FILE
+            fallback_reason = "Obsidian Vault 路径为空、无效或技能目录越界"
+    elif configured == "custom":
+        raw = str((cfg.get("director_skills") or {}).get("custom_path") or "").strip()
+        if not raw:
+            effective = "eagle"
+            target = DIRECTOR_SKILLS_FILE
+            fallback_reason = "自定义技能库路径为空"
+        else:
+            target = resolve_director_skills_file(cfg)
+    else:
+        target = DIRECTOR_SKILLS_FILE
+
+    target = Path(target).expanduser().resolve()
+    parent = target.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        writable = os.access(str(parent), os.W_OK)
+    except OSError:
+        writable = False
+    return {
+        "source": configured,
+        "configured_source": configured,
+        "effective_source": effective,
+        "storage_path": str(target),
+        "storage_exists": target.is_file(),
+        "storage_writable": bool(writable),
+        "fallback_reason": fallback_reason,
+    }
+
+
 def _load_skill_json(path: Path) -> Dict:
     if not path or not path.is_file():
         return {}
@@ -1165,6 +1252,7 @@ def save_director_skills(skills: Dict):
         _atomic_write_json(Path(path), skills)
     except Exception as e:
         logger.error(f"保存导演技能失败: {e}")
+        raise
 
 
 def _director_obsidian_file(config: dict) -> Optional[Path]:
@@ -1445,13 +1533,11 @@ async def get_director_skills(request):
     try:
         skills = load_director_skills()
         config = load_config()
+        storage = director_skill_storage_status(config)
         return web.json_response({
             "success": True,
             "data": list(skills.values()),
-            "storage_path": str(_director_obsidian_file(config) or resolve_director_skills_file(config))
-                if _director_skill_source(config) == "obsidian"
-                else str(resolve_director_skills_file(config)),
-            "source": _director_skill_source(config)
+            **storage,
         })
     except Exception as e:
         logger.error(f"get_director_skills 错误: {e}")
@@ -1462,11 +1548,18 @@ async def get_director_skills(request):
 async def save_director_skill(request):
     """保存单个导演技能"""
     try:
-        body = await request.json()
-        skill = body.get("skill")
+        body, request_error = await _read_json_request(request, "保存导演技能")
+        if request_error:
+            logger.warning(request_error)
+            return web.json_response({"success": False, "error": request_error}, status=400)
+
+        # 兼容当前 {skill: {...}} 与旧版直接发送技能对象两种格式。
+        skill = body.get("skill") if "skill" in body else body
         
-        if not skill or not skill.get("name"):
+        if not isinstance(skill, dict) or not str(skill.get("name") or "").strip():
             return web.json_response({"success": False, "error": "缺少技能名称"}, status=400)
+        skill = copy.deepcopy(skill)
+        skill["name"] = str(skill["name"]).strip()
         
         if not skill.get("id"):
             skill["id"] = str(uuid.uuid4())
@@ -1482,7 +1575,11 @@ async def save_director_skill(request):
         skills[skill["id"]] = skill
         save_director_skills(skills)
         
-        return web.json_response({"success": True, "data": skill})
+        return web.json_response({
+            "success": True,
+            "data": skill,
+            **director_skill_storage_status(),
+        })
     except Exception as e:
         logger.error(f"save_director_skill 错误: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -1531,7 +1628,9 @@ async def sync_director_skills_obsidian(request):
 async def delete_director_skill(request):
     """删除导演技能"""
     try:
-        body = await request.json()
+        body, request_error = await _read_json_request(request, "删除导演技能")
+        if request_error:
+            return web.json_response({"success": False, "error": request_error}, status=400)
         skill_id = str(body.get("id") or "")
         skills = load_director_skills()
         
