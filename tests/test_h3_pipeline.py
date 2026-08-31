@@ -38,11 +38,14 @@ from eagle_suite_test_package.eagle_suite.h3_pipeline.nodes import (
     EagleH3NativeLoopEndNode,
     EagleH3CurrentShotNode,
     EagleH3ShotContextNode,
+    EagleH3ReferenceConditionNode,
     EagleH3EndNode,
     EagleH3AssembleNode,
     EagleH3ContextNode,
     EagleH3CheckpointReviewNode,
     EagleH3FinalizeNode,
+    _limit_reference_short_edge,
+    _prepare_reference_condition,
 )
 from eagle_suite_test_package.eagle_suite.h3_director_node import compile_h3_params
 
@@ -210,7 +213,97 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(6, shot["duration_seconds"])
         self.assertNotIn("<d>[Nali] 不要这句</d>", shot["scene_prompt"])
         self.assertNotIn("Use <Picture 1>", shot["scene_prompt"])
+        self.assertEqual(["<Picture 1>"], shot["disabled_reference_tags"])
+        self.assertEqual([], shot["scene_reference_tags"])
         self.assertIn("reference_fingerprint", plan["compatibility"])
+
+    def test_reference_condition_routes_scene_media_without_grid_or_batch_collapse(self):
+        image_a = torch.zeros((1, 8, 8, 3), dtype=torch.float32)
+        image_b = torch.ones((1, 8, 8, 3), dtype=torch.float32)
+        video = torch.ones((5, 8, 8, 3), dtype=torch.float32)
+        audio = {"waveform": torch.zeros((1, 1, 1600)), "sample_rate": 16000}
+        paired = {"waveform": torch.zeros((1, 1, 1600)), "sample_rate": 16000}
+        mapping = [
+            {"type": "image", "filename": "one.png", "name": "one"},
+            {"type": "image", "filename": "two.png", "name": "two"},
+            {"type": "video", "filename": "motion.mp4", "name": "motion"},
+            {"type": "audio", "filename": "voice.wav", "name": "voice"},
+        ]
+        bundle = {
+            "ref_images": [image_a, image_b],
+            "video_slots": [video, None, None],
+            "video_audio_slots": [paired, None, None],
+            "audio_slots": [audio, None, None],
+            "media_mapping": json.dumps(mapping),
+        }
+        prompt = (
+            "subject_definitions:\n"
+            "  <Picture 1> is ignored.\n"
+            "  <Picture 2> is hero.\n"
+            "  <Video 1> is motion.\n"
+            "  <Audio 1> is voice.\n\n"
+            "Use <Picture 2>, <Video 1>, and <Audio 1>."
+        )
+        state = {
+            "current_index": 0,
+            "plan": {"shots": [{
+                "scene_prompt": "Use <Picture 2>, <Video 1>, and <Audio 1>.",
+                "scene_reference_tags": ["<Picture 2>", "<Video 1>", "<Audio 1>"],
+                "disabled_reference_tags": ["<Picture 1>"],
+            }]},
+        }
+        compiled, grouped, report = _prepare_reference_condition(
+            state, bundle, prompt, reference_scope="scene_tags"
+        )
+        self.assertEqual([image_b], [item["value"] for item in grouped["image"]])
+        self.assertEqual(1, len(grouped["video"]))
+        self.assertEqual(1, len(grouped["audio"]))
+        self.assertNotIn("is ignored", compiled)
+        self.assertIn("<Picture 1> is hero", compiled)
+        self.assertIn("<Audio 2> is voice", compiled)
+        self.assertEqual(1, report["paired_audio_count"])
+        self.assertTrue(any(item["reason"] == "ignored_in_director" for item in report["skipped"]))
+
+    def test_reference_condition_node_contract(self):
+        inputs = EagleH3ReferenceConditionNode.INPUT_TYPES()
+        self.assertEqual("H3_MEDIA_BUNDLE", inputs["required"]["media_bundle"][0])
+        self.assertIn("run_state", inputs["required"])
+        self.assertEqual(("CONDITIONING", "LATENT"), EagleH3ReferenceConditionNode.RETURN_TYPES[:2])
+
+    def test_custom_reference_short_edge_is_adjustable_and_downscale_only(self):
+        large = torch.ones((1, 1600, 2400, 3), dtype=torch.float32)
+        resized = _limit_reference_short_edge(large, 768)
+        self.assertEqual((1, 768, 1152, 3), tuple(resized.shape))
+        small = torch.ones((1, 512, 768, 3), dtype=torch.float32)
+        self.assertIs(small, _limit_reference_short_edge(small, 1024))
+        inputs = EagleH3ReferenceConditionNode.INPUT_TYPES()
+        self.assertIn("custom", inputs["required"]["ref_image_size"][0])
+        self.assertEqual(768, inputs["optional"]["ref_short_edge"][1]["default"])
+
+    def test_reference_router_enforces_official_autogrow_limits(self):
+        images = [torch.ones((1, 8, 8, 3), dtype=torch.float32) for _ in range(10)]
+        mapping = [
+            {"type": "image", "filename": f"{index}.png", "name": str(index)}
+            for index in range(1, 11)
+        ]
+        bundle = {
+            "ref_images": images,
+            "video_slots": [],
+            "video_audio_slots": [],
+            "audio_slots": [],
+            "media_mapping": json.dumps(mapping),
+        }
+        prompt = "\n".join(f"<Picture {index}> is ref {index}." for index in range(1, 11))
+        state = {"current_index": 0, "plan": {"shots": [{}]}}
+        compiled, grouped, report = _prepare_reference_condition(
+            state, bundle, prompt, reference_scope="all"
+        )
+        self.assertEqual(9, len(grouped["image"]))
+        self.assertNotIn("<Picture 10>", compiled)
+        self.assertTrue(any(
+            item["tag"] == "<Picture 10>" and item["reason"] == "official_slot_limit"
+            for item in report["skipped"]
+        ))
 
     def test_scene_chain_settings_inherit_global_and_allow_explicit_overrides(self):
         project = {"fps": 24, "width": 960, "height": 544,
@@ -418,6 +511,9 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual("VIDEO", EagleH3CheckpointReviewNode.INPUT_TYPES()["required"]["video"][0])
         self.assertEqual("VIDEO", EagleH3CheckpointReviewNode.RETURN_TYPES[0])
         self.assertEqual("VIDEO", EagleH3NativeLoopEndNode.RETURN_TYPES[1])
+        optional = EagleH3NativeLoopEndNode.INPUT_TYPES()["optional"]
+        self.assertIn("local_save_path", optional)
+        self.assertIn("eagle_folder", optional)
 
 
 if __name__ == "__main__":

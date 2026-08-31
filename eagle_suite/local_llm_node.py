@@ -206,6 +206,87 @@ def unload_local_models() -> int:
     return count
 
 
+def release_local_model_handle(handle=None, clear_cuda_cache=True) -> dict:
+    """Release Eagle-owned transformers/llama.cpp objects, including a linked handle.
+
+    Clearing only ``_MODEL_CACHE`` is insufficient when ComfyUI's execution cache
+    still owns the loader output.  Mutating the linked handle removes that final
+    strong reference and marks it for safe lazy reload on the next use.
+    """
+    cached = len(_MODEL_CACHE)
+    released_handle = 0
+    if isinstance(handle, dict):
+        backend = str(handle.get("backend") or "")
+        if backend == "llama.cpp":
+            llm = handle.get("llm")
+            if llm is not None:
+                close = getattr(llm, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception as error:
+                        logger.warning(f"[LocalLLM] llama.cpp close 失败: {error}")
+                handle["llm"] = None
+                released_handle = 1
+        elif backend == "transformers":
+            if handle.get("model") is not None or handle.get("processor") is not None:
+                handle["model"] = None
+                handle["processor"] = None
+                released_handle = 1
+        handle["released"] = True
+    _MODEL_CACHE.clear()
+    gc.collect()
+    if clear_cuda_cache and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    total = cached + released_handle
+    logger.info(f"[LocalLLM] 已释放 {total} 个本地模型句柄/缓存")
+    return {"released": total, "cached": cached, "handle": released_handle}
+
+
+def ensure_local_model_handle(handle):
+    """Lazy-reload an Eagle model handle that was released after a director batch.
+
+    The loader node output may remain cached by ComfyUI.  Rehydrating the same dict
+    keeps existing graph links valid and prevents a second Queue from receiving an
+    empty ``llm``/``model`` reference.
+    """
+    if not isinstance(handle, dict) or not handle.get("released"):
+        return handle
+    backend = str(handle.get("backend") or "")
+    if backend == "transformers":
+        model, processor = _load_local_model(
+            handle.get("path", ""), handle.get("device", "auto"), handle.get("dtype", "bf16")
+        )
+        handle["model"] = model
+        handle["processor"] = processor
+    elif backend == "llama.cpp":
+        params = handle.get("params") or {}
+        restored = _create_llamacpp_handle(
+            handle.get("path", ""), handle.get("mmproj") or "",
+            n_ctx=int(params.get("n_ctx", 8192) or 8192),
+            n_gpu_layers=int(params.get("n_gpu_layers", -1)),
+            kv_cache_type_k=params.get("cache_type_k", "默认(F16)"),
+            kv_cache_type_v=params.get("cache_type_v", "默认(F16)"),
+            thinking=bool(handle.get("thinking", False)),
+            thinking_budget=int(handle.get("thinking_budget", 4096) or 4096),
+            model_series=handle.get("model_series", "Auto"),
+            keep_history_think=bool(handle.get("keep_history_think", False)),
+            moe_experts_on_cpu=bool(handle.get("moe_experts_on_cpu", False)),
+            first_n_layers_on_cpu=int(handle.get("first_n_layers_on_cpu", 0) or 0),
+            qwen38_reasoning_effort=handle.get("qwen38_reasoning_effort", "xhigh"),
+        )
+        handle.update(restored)
+    else:
+        raise RuntimeError(f"未知的本地模型后端，无法重新加载: {backend}")
+    handle["released"] = False
+    logger.info(f"[LocalLLM] 已按需重新加载 {backend} 句柄")
+    return handle
+
+
 def _get_comfy_models_dir() -> str:
     """获取 ComfyUI models 目录。优先 folder_paths，否则回退。"""
     try:
@@ -1058,6 +1139,11 @@ class EagleLocalLLMNode:
                 image_7=None, image_8=None, image_9=None):
 
         # 1. 解析并加载模型：优先使用外部加载器传入的模型句柄（双后端）
+        if isinstance(model, dict) and model.get("released"):
+            try:
+                ensure_local_model_handle(model)
+            except Exception as error:
+                return ("", f"❌ 已释放模型重新加载失败: {error}", history)
         backend = "transformers"
         thinking = False
         thinking_budget = 4096

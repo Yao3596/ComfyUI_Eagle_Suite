@@ -28,6 +28,7 @@ from .h3_pipeline import (
     NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE,
 )
 from .director_skill_node import EagleDirectorSkillNode
+from .memory_node import EagleMemoryReleaseNode
 
 # ── 工具节点 ─────────────────────────────────────────────
 from ..nodes.audio_browser import EagleAudioList
@@ -78,6 +79,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleH3DirectorNode": EagleH3DirectorNode,
     "EagleH3MediaPortsNode": EagleH3MediaPortsNode,
     "EagleDirectorSkillNode": EagleDirectorSkillNode,
+    "EagleMemoryReleaseNode": EagleMemoryReleaseNode,
 
     # Danbooru
     "DanbooruVueSearchNode": DanbooruVueSearchNode,
@@ -135,6 +137,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleH3DirectorNode": "🦅 H3 导演台",
     "EagleH3MediaPortsNode": "🦅 H3 媒体集成端口",
     "EagleDirectorSkillNode": "🦅 导演技能库",
+    "EagleMemoryReleaseNode": "🦅 模型显存释放",
     # Danbooru
     "DanbooruVueSearchNode": "🦅 Danbooru 标签搜索",
 
@@ -167,6 +170,9 @@ _H3_TOOL_KEYS = (
     "EagleH3ExportPNGSequenceNode",
     "EagleH3SeamProbeNode",
     "EagleH3SmartSplitNode",
+)
+_H3_REFERENCE_KEYS = (
+    "EagleH3ReferenceConditionNode",
 )
 
 _CATEGORY_GROUPS = {
@@ -216,6 +222,7 @@ _CATEGORY_GROUPS = {
     f"{MENU_ROOT}/工具": (
         EaglePromptPresets,
         EagleStringRows,
+        EagleMemoryReleaseNode,
     ),
     f"{MENU_ROOT}/H3 导演台": (
         EagleH3DirectorNode,
@@ -224,6 +231,9 @@ _CATEGORY_GROUPS = {
     ),
     f"{MENU_ROOT}/H3 导演台/核心流程": tuple(
         NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_CORE_KEYS
+    ),
+    f"{MENU_ROOT}/H3 导演台/参考条件": tuple(
+        NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_REFERENCE_KEYS
     ),
     f"{MENU_ROOT}/H3 导演台/工具": tuple(
         NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_TOOL_KEYS
@@ -234,6 +244,6 @@ for _category, _node_classes in _CATEGORY_GROUPS.items():
     for _node_class in _node_classes:
         _node_class.CATEGORY = _category
 
-del _category, _node_classes, _node_class, _H3_CORE_KEYS, _H3_TOOL_KEYS
+del _category, _node_classes, _node_class, _H3_CORE_KEYS, _H3_REFERENCE_KEYS, _H3_TOOL_KEYS
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

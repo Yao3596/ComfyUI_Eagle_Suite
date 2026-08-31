@@ -41,6 +41,9 @@ const H3C_CSS = `
 .h3c-btn.danger:hover{border-color:var(--h3c-danger); color:var(--h3c-danger);}
 .h3c-btn:disabled{opacity:.5; cursor:not-allowed;}
 .h3c-video{width:100%; border-radius:6px; background:#000;}
+.h3c-root.compact{padding:5px;}
+.h3c-root.compact .h3c-card{padding:7px;gap:4px;}
+.h3c-root.review .h3c-video{display:block;max-height:220px;object-fit:contain;}
 .h3c-bar{height:6px; background:#262a33; border-radius:3px; overflow:hidden; margin-top:4px;}
 .h3c-bar>i{display:block; height:100%; background:var(--h3c-primary); transition:width .3s;}
 .h3c-preview-img{max-width:100%; max-height:180px; border-radius:6px; border:1px solid var(--h3c-bd);}
@@ -62,6 +65,25 @@ function getWidget(node, name) {
 function setWidgetValue(node, name, value) {
   const w = getWidget(node, name);
   if (w) w.value = value;
+}
+
+function repairNativeEndWidgets(node) {
+  const filename = getWidget(node, "filename");
+  const format = getWidget(node, "format");
+  const fps = getWidget(node, "fps_override");
+  const formats = ["mp4", "mov", "mkv"];
+  if (format && !formats.includes(String(format.value || "").toLowerCase())) {
+    const shifted = filename && formats.includes(String(filename.value || "").toLowerCase())
+      ? String(filename.value).toLowerCase()
+      : "mp4";
+    format.value = shifted;
+    if (filename && formats.includes(String(filename.value || "").toLowerCase())) filename.value = "";
+  }
+  if (fps && !Number.isFinite(Number(fps.value))) fps.value = 0;
+  const localPath = getWidget(node, "local_save_path");
+  const eagleFolder = getWidget(node, "eagle_folder");
+  if (localPath && localPath.value == null) localPath.value = "";
+  if (eagleFolder && eagleFolder.value == null) eagleFolder.value = "";
 }
 
 function buildViewUrl(filePath) {
@@ -288,15 +310,15 @@ function createSeamPanel() {
 // ═══════════════════════════════════════════════════════════════════════════
 // 通用挂载：DOM Widget + Vue
 // ═══════════════════════════════════════════════════════════════════════════
-function mountVueWidget(node, componentFactory, key) {
+function mountVueWidget(node, componentFactory, key, options = {}) {
   injectCSS();
   const el = document.createElement("div");
-  el.className = "h3c-root";
+  el.className = "h3c-root" + (options.className ? " " + options.className : "");
   const vueApp = createApp(componentFactory(node));
   vueApp.mount(el);
   const widget = node.addDOMWidget(`h3c_${key}_ui`, "div", el, { serialize: false });
   widget.computeSize = function (width) {
-    return [Math.max(280, width || (node.size && node.size[0]) || 320), 190];
+    return [Math.max(280, width || (node.size && node.size[0]) || 320), options.height || 190];
   };
   const oldResize = node.onResize;
   node.onResize = function (size) {
@@ -304,6 +326,16 @@ function mountVueWidget(node, componentFactory, key) {
     el.style.width = Math.max(260, (size && size[0] ? size[0] : 300) - 20) + "px";
   };
   node.onResize(node.size || [320, 260]);
+  if (options.fitHeight) {
+    setTimeout(() => {
+      const width = Math.max(options.minWidth || 360, (node.size && node.size[0]) || 360);
+      const current = (node.size && node.size[1]) || options.fitHeight;
+      if (current > options.fitHeight + 80 || current < options.fitHeight - 40) {
+        node.setSize([width, options.fitHeight]);
+        node.graph?.setDirtyCanvas(true, true);
+      }
+    }, 0);
+  }
   const oldRemoved = node.onRemoved;
   node.onRemoved = function () {
     try { vueApp.unmount(); } catch (_) {}
@@ -452,8 +484,20 @@ app.registerExtension({
       const _created = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function () {
         const r = _created ? _created.apply(this, arguments) : undefined;
-        const vueApp = mountVueWidget(this, createEndPanel, "native_end");
+        repairNativeEndWidgets(this);
+        const vueApp = mountVueWidget(this, createEndPanel, "native_end", {
+          height: 82, fitHeight: 330, minWidth: 390, className: "compact",
+        });
         this._h3cVueApp = vueApp;
+        return r;
+      };
+      const _configured = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function () {
+        const r = _configured ? _configured.apply(this, arguments) : undefined;
+        setTimeout(() => {
+          repairNativeEndWidgets(this);
+          if (this.size && this.size[1] > 410) this.setSize([Math.max(390, this.size[0]), 330]);
+        }, 0);
         return r;
       };
       const _exec = nodeType.prototype.onExecuted;
@@ -470,7 +514,9 @@ app.registerExtension({
       const _created = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function () {
         const r = _created ? _created.apply(this, arguments) : undefined;
-        const vueApp = mountVueWidget(this, () => createReviewPanel(this), "review");
+        const vueApp = mountVueWidget(this, () => createReviewPanel(this), "review", {
+          height: 270, fitHeight: 500, minWidth: 430, className: "review",
+        });
         this._h3cVueApp = vueApp;
         // 隐藏原始 review_decision 文本框
         const w = getWidget(this, "review_decision");

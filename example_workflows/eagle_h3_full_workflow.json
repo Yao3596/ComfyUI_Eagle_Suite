@@ -2,7 +2,7 @@
   "id": "eagle-h3-full-native-loop-workflow",
   "revision": 0,
   "last_node_id": 25,
-  "last_link_id": 37,
+  "last_link_id": 41,
   "nodes": [
     {
       "id": 1, "type": "UNETLoader", "pos": [-2450, -820], "size": [380, 96], "flags": {}, "order": 0, "mode": 0,
@@ -31,7 +31,7 @@
     {
       "id": 4, "type": "VAELoader", "pos": [-2450, -350], "size": [380, 96], "flags": {}, "order": 3, "mode": 0,
       "inputs": [],
-      "outputs": [{"name": "VAE", "type": "VAE", "links": [29]}],
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [29, 38]}],
       "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "VAELoader"},
       "widgets_values": ["minimax_h3_audio_vae_fp32.safetensors"],
       "title": "④ H3 音频 VAE"
@@ -74,12 +74,13 @@
       ],
       "outputs": [
         {"name": "plan", "type": "H3_CHAIN_PLAN", "links": [3]},
-        {"name": "media_bundle", "type": "H3_MEDIA_BUNDLE", "links": []},
+        {"name": "media_bundle", "type": "H3_MEDIA_BUNDLE", "links": [39]},
         {"name": "width", "type": "INT", "links": []},
         {"name": "height", "type": "INT", "links": []},
         {"name": "clip_count", "type": "INT", "links": []},
         {"name": "video_blend_frames", "type": "INT", "links": []},
-        {"name": "summary", "type": "STRING", "links": []}
+        {"name": "summary", "type": "STRING", "links": []},
+        {"name": "plan_json", "type": "STRING", "links": []}
       ],
       "properties": {"Node name for S&R": "EagleH3DirectorNode"},
       "widgets_values": ["{}", "", ""],
@@ -133,7 +134,7 @@
         {"name": "seed_image", "type": "IMAGE", "shape": 7, "link": 7}
       ],
       "outputs": [
-        {"name": "run_state", "type": "H3_RUN_STATE", "links": [33]},
+        {"name": "run_state", "type": "H3_RUN_STATE", "links": [33, 40]},
         {"name": "prompt", "type": "STRING", "links": [10]},
         {"name": "seed", "type": "INT", "links": [16]},
         {"name": "steps", "type": "INT", "links": [20]},
@@ -145,7 +146,7 @@
         {"name": "is_first", "type": "BOOL", "links": []},
         {"name": "context_image", "type": "IMAGE", "links": [14]},
         {"name": "context_frames", "type": "INT", "links": []},
-        {"name": "has_context", "type": "BOOL", "links": []},
+        {"name": "has_context", "type": "BOOL", "links": [41]},
         {"name": "summary", "type": "STRING", "links": []}
       ],
       "properties": {"Node name for S&R": "EagleH3ShotContextNode"},
@@ -165,24 +166,34 @@
       "title": "首镜起始帧（请替换）"
     },
     {
-      "id": 12, "type": "MiniMaxH3ImageToVideo", "pos": [340, -820], "size": [560, 430], "flags": {}, "order": 11, "mode": 0,
+      "id": 12, "type": "EagleH3ReferenceConditionNode", "pos": [340, -820], "size": [620, 520], "flags": {}, "order": 11, "mode": 0,
       "inputs": [
         {"name": "clip", "type": "CLIP", "link": 8},
         {"name": "vae", "type": "VAE", "link": 9},
-        {"name": "first_frame", "type": "IMAGE", "shape": 7, "link": 14},
-        {"name": "last_frame", "type": "IMAGE", "shape": 7},
+        {"name": "audio_vae", "type": "VAE", "link": 38},
+        {"name": "media_bundle", "type": "H3_MEDIA_BUNDLE", "link": 39},
+        {"name": "run_state", "type": "H3_RUN_STATE", "link": 40},
         {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 10},
         {"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 11},
         {"name": "height", "type": "INT", "widget": {"name": "height"}, "link": 12},
-        {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": 13}
+        {"name": "length", "type": "INT", "widget": {"name": "length"}, "link": 13},
+        {"name": "reference_scope", "type": "STRING"},
+        {"name": "ref_image_size", "type": "STRING"},
+        {"name": "use_context_guide", "type": "BOOLEAN"},
+        {"name": "context_image", "type": "IMAGE", "shape": 7, "link": 14},
+        {"name": "has_context", "type": "BOOLEAN", "shape": 7, "link": 41},
+        {"name": "ref_short_edge", "type": "INT"}
       ],
       "outputs": [
         {"name": "positive", "type": "CONDITIONING", "links": [18]},
-        {"name": "LATENT", "type": "LATENT", "links": [25]}
+        {"name": "latent", "type": "LATENT", "links": [25]},
+        {"name": "compiled_prompt", "type": "STRING", "links": []},
+        {"name": "active_references", "type": "STRING", "links": []},
+        {"name": "summary", "type": "STRING", "links": []}
       ],
-      "properties": {"cnr_id": "comfy-core", "ver": "0.30.0", "Node name for S&R": "MiniMaxH3ImageToVideo"},
-      "widgets_values": ["由导演台逐场景提供提示词", 960, 544, 243],
-      "title": "MiniMax H3 FL2VA 条件",
+      "properties": {"Node name for S&R": "EagleH3ReferenceConditionNode"},
+      "widgets_values": ["", 960, 544, 124, "scene_tags", "match", true, false, 768],
+      "title": "🦅 H3 · 参考条件路由",
       "color": "#346434", "bgcolor": "rgba(24,24,27,.9)"
     },
     {
@@ -340,7 +351,9 @@
         {"name": "decision", "type": "STRING", "shape": 7, "link": 37},
         {"name": "filename", "type": "STRING"},
         {"name": "format", "type": "STRING"},
-        {"name": "fps_override", "type": "INT"}
+        {"name": "fps_override", "type": "INT"},
+        {"name": "local_save_path", "type": "STRING"},
+        {"name": "eagle_folder", "type": "STRING"}
       ],
       "outputs": [
         {"name": "run_state", "type": "H3_RUN_STATE", "links": []},
@@ -350,7 +363,7 @@
         {"name": "summary", "type": "STRING", "links": []}
       ],
       "properties": {"Node name for S&R": "EagleH3NativeLoopEndNode"},
-      "widgets_values": ["", "mp4", 0],
+      "widgets_values": ["", "", "mp4", 0, "", ""],
       "title": "🦅 H3 · 循环结束 + 自动合成",
       "color": "#2d4a2d", "bgcolor": "rgba(24,24,27,.9)"
     },
@@ -358,7 +371,7 @@
       "id": 24, "type": "Note", "pos": [-2450, -1100], "size": [1550, 220], "flags": {}, "order": 23, "mode": 0,
       "inputs": [], "outputs": [],
       "properties": {"Node name for S&R": "Note"},
-      "widgets_values": ["EAGLE H3 全套工作流\n\n1. 先确认左侧四个模型名称与本机路径一致。\n2. 在 H3 导演台添加任意数量场景，生成/编辑台本、分镜、台词与 <Picture #> 标签。\n3. 替换“首镜起始帧”；续镜会自动读取上一镜检查点，不需要手动接回。\n4. 计划节点 mode=auto：一次 Queue 自动跑完全部场景；mode=interactive：每镜头停在审片节点。\n5. 审片决定支持 approve / retry / reroll / stop；最后一镜通过后自动合成最终 MP4。"],
+      "widgets_values": ["EAGLE H3 全套工作流\n\n1. 先确认左侧四个模型名称与本机路径一致。\n2. 在 H3 导演台添加任意数量场景，并添加图片/视频/音频参考。\n3. media_bundle 只需一条线接入“参考条件路由”；它会按当前场景标签拆成官方 H3 Autogrow 插槽，不要把参考图拼成宫格。\n4. 替换“首镜起始帧”；续镜会自动读取上一镜检查点并作为 Guide 注入。\n5. 导演 Skill 默认使用英文画面模板 + 中文台词；生成全部场景完成后才进入视频链。\n6. mode=auto 一次 Queue 跑完全部场景；interactive 每镜停留审片。\n7. 最后一镜通过后自动合成，可同时复制到本地目录并导入 Eagle 文件夹。"],
       "title": "使用说明", "color": "#432f66", "bgcolor": "rgba(24,24,27,.9)"
     },
     {
@@ -379,11 +392,11 @@
     [7, 11, 0, 10, 3],
     [8, 2, 0, 12, 0],
     [9, 3, 0, 12, 1],
-    [10, 10, 1, 12, 4],
-    [11, 9, 2, 12, 5],
-    [12, 9, 3, 12, 6],
-    [13, 10, 4, 12, 7],
-    [14, 10, 10, 12, 2],
+    [10, 10, 1, 12, 5],
+    [11, 9, 2, 12, 6],
+    [12, 9, 3, 12, 7],
+    [13, 10, 4, 12, 8],
+    [14, 10, 10, 12, 12],
     [15, 1, 0, 13, 0],
     [16, 10, 2, 14, 0],
     [17, 13, 0, 16, 0],
@@ -406,7 +419,11 @@
     [34, 21, 0, 22, 1],
     [35, 20, 0, 22, 2],
     [36, 22, 1, 23, 1],
-    [37, 22, 2, 23, 2]
+    [37, 22, 2, 23, 2],
+    [38, 4, 0, 12, 2],
+    [39, 7, 1, 12, 3],
+    [40, 10, 0, 12, 4],
+    [41, 10, 12, 12, 13]
   ],
   "groups": [
     {"id": 1, "title": "① 模型与 VAE", "bounding": [-2500, -900, 500, 760], "color": "#3f789e", "flags": {}},

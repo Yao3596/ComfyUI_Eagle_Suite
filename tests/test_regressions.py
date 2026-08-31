@@ -127,8 +127,10 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("EagleH3MediaPortsNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3PlanNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3ShotContextNode", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertIn("EagleH3ReferenceConditionNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3CheckpointReviewNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3NativeLoopEndNode", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertIn("EagleMemoryReleaseNode", PACKAGE.NODE_CLASS_MAPPINGS)
         hidden_implementation_nodes = {
             "EagleH3PreflightNode", "EagleH3LoadManifestNode", "EagleH3StartNode",
             "EagleH3CurrentShotNode", "EagleH3ContextNode", "EagleH3TrimNode",
@@ -144,6 +146,10 @@ class RegressionTests(unittest.TestCase):
             "🦅 Eagle Suite/H3 导演台/工具",
             PACKAGE.NODE_CLASS_MAPPINGS["EagleH3SeamProbeNode"].CATEGORY,
         )
+        self.assertEqual(
+            "🦅 Eagle Suite/H3 导演台/参考条件",
+            PACKAGE.NODE_CLASS_MAPPINGS["EagleH3ReferenceConditionNode"].CATEGORY,
+        )
         for name, node in PACKAGE.NODE_CLASS_MAPPINGS.items():
             returns = tuple(getattr(node, "RETURN_TYPES", ()))
             names = tuple(getattr(node, "RETURN_NAMES", returns))
@@ -152,6 +158,58 @@ class RegressionTests(unittest.TestCase):
             if output_is_list is not None:
                 self.assertEqual(len(returns), len(output_is_list), name)
 
+    def test_director_skill_queue_is_silently_blocked_before_h3_downstream(self):
+        from comfy_execution.graph_utils import ExecutionBlocker
+        from eagle_suite_test_package.eagle_suite import h3_director_node
+
+        state = {"project": {}, "scenes": [{"id": 1, "title": "one"}]}
+        request = {"run": True, "sceneId": 1, "tasks": ["script"], "blockDownstream": True}
+        fake_result = {
+            "scene_id": 1, "sceneId": 1, "preamble": "done", "shots": [],
+            "dialogues": [], "transport": "api", "error": None,
+        }
+        node = h3_director_node.EagleH3DirectorNode()
+        with mock.patch.object(h3_director_node, "run_director_skill", return_value=fake_result), \
+             mock.patch.object(h3_director_node, "compile_h3_params") as compile_plan:
+            outputs = node.execute(
+                h3_state=json.dumps(state), skill_request=json.dumps(request), node_id="test"
+            )
+        self.assertEqual(8, len(outputs))
+        self.assertTrue(all(isinstance(value, ExecutionBlocker) for value in outputs))
+        compile_plan.assert_not_called()
+
+    def test_eagle_local_llm_release_drops_cache_and_linked_handle_refs(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        model, processor = object(), object()
+        local_llm_node._MODEL_CACHE["test"] = (model, processor)
+        handle = {"backend": "transformers", "model": model, "processor": processor, "path": "x"}
+        released = local_llm_node.release_local_model_handle(handle, clear_cuda_cache=False)
+        self.assertGreaterEqual(released["released"], 1)
+        self.assertFalse(local_llm_node._MODEL_CACHE)
+        self.assertIsNone(handle["model"])
+        self.assertIsNone(handle["processor"])
+        self.assertTrue(handle["released"])
+
+    def test_eagle_local_llm_rehydrates_released_transformers_handle(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        handle = {
+            "backend": "transformers", "model": None, "processor": None,
+            "path": "x", "device": "cpu", "dtype": "fp32", "released": True,
+        }
+        restored_model, restored_processor = object(), object()
+        with mock.patch.object(
+            local_llm_node, "_load_local_model",
+            return_value=(restored_model, restored_processor),
+        ) as loader:
+            returned = local_llm_node.ensure_local_model_handle(handle)
+        self.assertIs(returned, handle)
+        self.assertIs(handle["model"], restored_model)
+        self.assertIs(handle["processor"], restored_processor)
+        self.assertFalse(handle["released"])
+        loader.assert_called_once_with("x", "cpu", "fp32")
+
     def test_director_media_ports_are_split(self):
         from eagle_suite_test_package.eagle_suite.h3_director_node import (
             EagleH3DirectorNode,
@@ -159,9 +217,25 @@ class RegressionTests(unittest.TestCase):
             H3_MEDIA_BUNDLE_TYPE,
         )
         self.assertEqual(H3_MEDIA_BUNDLE_TYPE, EagleH3DirectorNode.RETURN_TYPES[1])
-        self.assertEqual(7, len(EagleH3DirectorNode.RETURN_TYPES))
+        self.assertEqual(8, len(EagleH3DirectorNode.RETURN_TYPES))
         self.assertTrue(EagleH3MediaPortsNode.OUTPUT_IS_LIST[0])
         self.assertEqual("REF_IMAGES", EagleH3MediaPortsNode.RETURN_NAMES[0])
+
+    def test_director_context_loop_plan_json_does_not_duplicate_shared_prompt(self):
+        from eagle_suite_test_package.eagle_suite.h3_director_node import export_context_loop_plan_json
+
+        payload = json.loads(export_context_loop_plan_json({
+            "prompt_prefix": "shared world",
+            "defaults": {"duration_seconds": 6, "steps": 8},
+            "shots": [{
+                "id": "scene_01", "scene_prompt": "scene-only prompt",
+                "prompt": "shared world\n\nscene-only prompt", "raw_frames": 124,
+                "seed": 42, "steps": 8,
+            }],
+        }))
+        self.assertEqual("shared world", payload["prompt_prefix"])
+        self.assertEqual("scene-only prompt", payload["shots"][0]["prompt"])
+        self.assertNotIn("shared world", payload["shots"][0]["prompt"])
 
     def test_director_skill_prompts_use_scene_duration_without_size_duplication(self):
         from eagle_suite_test_package.eagle_suite.h3_director_node import _build_skill_prompts
@@ -182,6 +256,21 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("不要套用固定的 10 秒单镜头假设", script)
         _system, shots = _build_skill_prompts("shots", project, scene, "", request={})
         self.assertIn("estSeconds 之和约等于 18 秒", shots)
+
+    def test_director_skill_separates_visual_and_dialogue_languages(self):
+        from eagle_suite_test_package.eagle_suite.h3_director_node import _build_skill_prompts
+
+        scene = {"title": "雨夜", "defaultSeconds": 6, "preamble": ""}
+        request = {"promptLanguage": "en", "dialogueLanguage": "Chinese"}
+        _system, script = _build_skill_prompts("script", {}, scene, "", request=request)
+        self.assertIn("统一使用 English", script)
+        self.assertIn("台词文本使用 Chinese", script)
+        self.assertIn("[Tracking shot]", script)
+        _system, chinese = _build_skill_prompts(
+            "shots", {}, scene, "", request={"promptLanguage": "zh", "dialogueLanguage": "Japanese"}
+        )
+        self.assertIn("统一使用 简体中文", chinese)
+        self.assertIn("台词文本使用 Japanese", chinese)
 
     def test_chained_skill_tasks_keep_scene_metadata(self):
         from eagle_suite_test_package.eagle_suite import h3_director_node

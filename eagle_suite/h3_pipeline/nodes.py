@@ -34,7 +34,8 @@ except Exception:  # 兼容不带动态图 API 的旧版 ComfyUI
             and isinstance(value[1], (int, float))
         )
 
-from ..h3_director_node import H3_PLAN_TYPE
+from ..h3_director_node import H3_MEDIA_BUNDLE_TYPE, H3_PLAN_TYPE
+from ..eagle_client import eagle_client
 from ..logger import logger
 from ..utils import ensure_dir, generate_unique_filename, get_cached_ffmpeg
 
@@ -552,6 +553,324 @@ class EagleH3ShotContextNode:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 5. Reference conditioning router
+# ══════════════════════════════════════════════════════════════════════════════
+
+_REFERENCE_TAG_RE = re.compile(r"<(Picture|Video|Audio)\s+(\d+)>", re.IGNORECASE)
+_REFERENCE_TAG_KIND = {"picture": "image", "video": "video", "audio": "audio"}
+_REFERENCE_TAG_LABEL = {"image": "Picture", "video": "Video", "audio": "Audio"}
+_REFERENCE_SLOT_LIMIT = {"image": 9, "video": 3, "audio": 3}
+
+
+def _canonical_reference_tag(label, index):
+    kind = _REFERENCE_TAG_KIND[str(label).lower()]
+    return f"<{_REFERENCE_TAG_LABEL[kind]} {int(index)}>"
+
+
+def _reference_media_entries(bundle):
+    """Pair media_mapping rows with their loaded tensor/audio slots."""
+    raw = bundle.get("media_mapping", "[]") if isinstance(bundle, dict) else "[]"
+    try:
+        mapping = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+    except Exception:
+        mapping = []
+    images = list((bundle or {}).get("ref_images") or [])
+    videos = list((bundle or {}).get("video_slots") or [])
+    video_audios = list((bundle or {}).get("video_audio_slots") or [])
+    audios = list((bundle or {}).get("audio_slots") or [])
+    slots = {"image": images, "video": videos, "audio": audios}
+    counters = {"image": 0, "video": 0, "audio": 0}
+    result = []
+    for row in mapping if isinstance(mapping, list) else []:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("type") or "image").lower()
+        if kind not in counters:
+            continue
+        slot = counters[kind]
+        counters[kind] += 1
+        value = slots[kind][slot] if slot < len(slots[kind]) else None
+        paired_audio = (
+            video_audios[slot]
+            if kind == "video" and slot < len(video_audios)
+            else None
+        )
+        item = dict(row)
+        item.update({
+            "kind": kind,
+            "source_index": slot + 1,
+            "source_tag": f"<{_REFERENCE_TAG_LABEL[kind]} {slot + 1}>",
+            "value": value,
+            "paired_audio": paired_audio,
+        })
+        result.append(item)
+    return result
+
+
+def _is_usable_reference(kind, value):
+    if kind in ("image", "video"):
+        return bool(
+            torch.is_tensor(value)
+            and value.ndim == 4
+            and int(value.shape[0]) >= (5 if kind == "video" else 1)
+            and int(value.shape[1]) > 1
+            and int(value.shape[2]) > 1
+            and int(value.shape[-1]) >= 3
+        )
+    return isinstance(value, dict) and value.get("waveform") is not None
+
+
+def _limit_reference_short_edge(image, target_short_edge):
+    """Downscale an NHWC reference to a configurable short-edge ceiling."""
+    if not _is_usable_reference("image", image):
+        return image
+    target = max(640, min(2048, int(target_short_edge or 768)))
+    height, width = int(image.shape[1]), int(image.shape[2])
+    short_edge = min(height, width)
+    if short_edge <= target:
+        return image
+    scale = target / float(short_edge)
+    out_width = max(32, int(round(width * scale / 32.0)) * 32)
+    out_height = max(32, int(round(height * scale / 32.0)) * 32)
+    nchw = image.movedim(-1, 1)
+    resized = torch.nn.functional.interpolate(
+        nchw, size=(out_height, out_width), mode="bilinear", align_corners=False
+    )
+    return resized.movedim(1, -1)
+
+
+def _compact_reference_prompt(prompt, active_tag_map, all_source_tags):
+    """Drop inactive definition rows and compact native H3 reference numbers."""
+    active_lower = {key.lower(): value for key, value in active_tag_map.items()}
+    known_lower = {tag.lower() for tag in all_source_tags}
+    lines = []
+    for line in str(prompt or "").splitlines():
+        matches = list(_REFERENCE_TAG_RE.finditer(line))
+        # subject_definitions / retention_analysis rows become invalid if their
+        # source is inactive, so remove the whole metadata row instead of leaving
+        # an orphaned "is a reference" fragment.
+        stripped = line.lstrip()
+        if matches and stripped.startswith("<"):
+            row_tags = {
+                _canonical_reference_tag(match.group(1), match.group(2)).lower()
+                for match in matches
+            }
+            if row_tags and not any(tag in active_lower for tag in row_tags):
+                continue
+
+        def replace(match):
+            source = _canonical_reference_tag(match.group(1), match.group(2))
+            lowered = source.lower()
+            if lowered in active_lower:
+                return active_lower[lowered]
+            if lowered in known_lower:
+                return ""
+            return match.group(0)
+
+        lines.append(_REFERENCE_TAG_RE.sub(replace, line))
+    text = "\n".join(lines)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _prepare_reference_condition(run_state, media_bundle, prompt, reference_scope="scene_tags"):
+    """Resolve the current scene into concrete official H3 Autogrow bindings."""
+    state = run_state if isinstance(run_state, dict) else {}
+    plan = state.get("plan") or {}
+    shots = plan.get("shots") or []
+    index = int(state.get("current_index", 0) or 0)
+    shot = shots[index] if 0 <= index < len(shots) and isinstance(shots[index], dict) else {}
+    entries = _reference_media_entries(media_bundle if isinstance(media_bundle, dict) else {})
+    all_tags = {entry["source_tag"] for entry in entries}
+    disabled = {
+        _canonical_reference_tag(match.group(1), match.group(2))
+        for token in shot.get("disabled_reference_tags") or []
+        for match in _REFERENCE_TAG_RE.finditer(str(token))
+    }
+    scene_tags = {
+        _canonical_reference_tag(match.group(1), match.group(2))
+        for token in (shot.get("scene_reference_tags") or [])
+        for match in _REFERENCE_TAG_RE.finditer(str(token))
+    }
+    if not scene_tags:
+        scene_text = str(shot.get("scene_prompt") or "")
+        scene_tags = {
+            _canonical_reference_tag(match.group(1), match.group(2))
+            for match in _REFERENCE_TAG_RE.finditer(scene_text)
+        }
+    use_all = reference_scope == "all" or not scene_tags
+
+    active = []
+    skipped = []
+    for entry in entries:
+        tag = entry["source_tag"]
+        if tag in disabled:
+            skipped.append({"tag": tag, "reason": "ignored_in_director"})
+        elif not use_all and tag not in scene_tags:
+            skipped.append({"tag": tag, "reason": "not_used_in_scene"})
+        elif not _is_usable_reference(entry["kind"], entry.get("value")):
+            skipped.append({"tag": tag, "reason": "missing_or_invalid_media"})
+        else:
+            active.append(entry)
+
+    grouped = {"image": [], "video": [], "audio": []}
+    for entry in active:
+        grouped[entry["kind"]].append(entry)
+    for kind, limit in _REFERENCE_SLOT_LIMIT.items():
+        overflow = grouped[kind][limit:]
+        skipped.extend(
+            {"tag": entry["source_tag"], "reason": "official_slot_limit"}
+            for entry in overflow
+        )
+        grouped[kind] = grouped[kind][:limit]
+    # The public active list must describe only values that will actually be
+    # wired into the stock node.  Its order also mirrors Ref2VA presentation.
+    active = [entry for kind in ("image", "video", "audio") for entry in grouped[kind]]
+
+    active_tag_map = {}
+    for kind in ("image", "video"):
+        for target_index, entry in enumerate(grouped[kind], start=1):
+            active_tag_map[entry["source_tag"]] = (
+                f"<{_REFERENCE_TAG_LABEL[kind]} {target_index}>"
+            )
+            entry["target_index"] = target_index
+
+    # Stock H3 numbers a reference video's paired soundtrack before standalone
+    # audios. Offset standalone <Audio N> tags so director semantics remain exact.
+    paired_audio_count = sum(
+        1 for entry in grouped["video"]
+        if _is_usable_reference("audio", entry.get("paired_audio"))
+    )
+    for target_index, entry in enumerate(grouped["audio"], start=1):
+        native_index = paired_audio_count + target_index
+        active_tag_map[entry["source_tag"]] = f"<Audio {native_index}>"
+        entry["target_index"] = target_index
+        entry["native_audio_index"] = native_index
+
+    compiled = _compact_reference_prompt(prompt, active_tag_map, all_tags)
+    public_active = [
+        {
+            "type": entry["kind"],
+            "source": entry["source_tag"],
+            "native": active_tag_map.get(entry["source_tag"], entry["source_tag"]),
+            "name": entry.get("name") or entry.get("filename") or "",
+            "paired_audio": bool(
+                entry["kind"] == "video"
+                and _is_usable_reference("audio", entry.get("paired_audio"))
+            ),
+        }
+        for entry in active
+    ]
+    report = {
+        "scene_index": index + 1,
+        "scope": "all" if use_all else "scene_tags",
+        "active": public_active,
+        "skipped": skipped,
+        "paired_audio_count": paired_audio_count,
+    }
+    return compiled, grouped, report
+
+
+class EagleH3ReferenceConditionNode:
+    """Director media bundle -> stock MiniMax H3 Ref2VA + optional context guide."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
+                "audio_vae": ("VAE",),
+                "media_bundle": (H3_MEDIA_BUNDLE_TYPE,),
+                "run_state": (H3_RUN_STATE,),
+                "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
+                "width": ("INT", {"default": 960, "min": 32, "max": 4096, "step": 32}),
+                "height": ("INT", {"default": 544, "min": 32, "max": 4096, "step": 32}),
+                "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17}),
+                "reference_scope": (["scene_tags", "all"], {"default": "scene_tags"}),
+                "ref_image_size": (["match", "custom", "max"], {"default": "match"}),
+                "use_context_guide": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "context_image": ("IMAGE",),
+                "has_context": ("BOOLEAN", {"default": False}),
+                "ref_short_edge": ("INT", {
+                    "default": 768, "min": 640, "max": 2048, "step": 64,
+                    "tooltip": "ref_image_size=custom 时的参考图短边上限；只缩小，不放大。",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "LATENT", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("positive", "latent", "compiled_prompt", "active_references", "summary")
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台/参考条件"
+
+    def execute(self, clip, vae, audio_vae, media_bundle, run_state, prompt,
+                width, height, length, reference_scope="scene_tags",
+                ref_image_size="match", use_context_guide=True,
+                context_image=None, has_context=False, ref_short_edge=768):
+        if GraphBuilder is None:
+            raise RuntimeError("H3 参考条件路由需要 ComfyUI GraphBuilder")
+        compiled, grouped, report = _prepare_reference_condition(
+            run_state, media_bundle, prompt, reference_scope=reference_scope
+        )
+        graph = GraphBuilder()
+        ref2va = graph.node("MiniMaxH3ReferenceToVideo", "EagleH3Ref2VA")
+        for key, value in (
+            ("clip", clip), ("vae", vae), ("audio_vae", audio_vae),
+            ("prompt", compiled), ("width", int(width)),
+            ("height", int(height)), ("length", int(length)),
+            ("ref_image_size", "max" if ref_image_size == "custom" else ref_image_size),
+        ):
+            ref2va.set_input(key, value)
+        for offset, entry in enumerate(grouped["image"]):
+            image = entry["value"]
+            if ref_image_size == "custom":
+                image = _limit_reference_short_edge(image, ref_short_edge)
+            ref2va.set_input(f"ref_images.ref_image_{offset}", image)
+        for offset, entry in enumerate(grouped["video"]):
+            ref2va.set_input(f"ref_videos.ref_video_{offset}", entry["value"])
+            if _is_usable_reference("audio", entry.get("paired_audio")):
+                ref2va.set_input(
+                    f"ref_video_audios.ref_video_audio_{offset}", entry["paired_audio"]
+                )
+        for offset, entry in enumerate(grouped["audio"]):
+            ref2va.set_input(f"ref_audios.ref_audio_{offset}", entry["value"])
+
+        positive = ref2va.out(0)
+        latent = ref2va.out(1)
+        context_used = bool(
+            use_context_guide and has_context
+            and _is_usable_reference("image", context_image)
+        )
+        if context_used:
+            guide = graph.node("MiniMaxH3AddGuide", "EagleH3ContextGuide")
+            guide.set_input("positive", positive)
+            guide.set_input("latent", latent)
+            guide.set_input("vae", vae)
+            guide.set_input("image", context_image)
+            guide.set_input("frame_idx", 0)
+            positive = guide.out(0)
+        report["context_guide"] = context_used
+        report["ref_image_size"] = ref_image_size
+        report["ref_short_edge"] = int(ref_short_edge) if ref_image_size == "custom" else None
+        active_json = json.dumps(report, ensure_ascii=False, indent=2)
+        summary = (
+            f"场景 {report['scene_index']} · 参考 "
+            f"{len(grouped['image'])}图/{len(grouped['video'])}视频/"
+            f"{len(grouped['audio'])}音频 · "
+            f"上下文 Guide={'开' if context_used else '关'}"
+        )
+        return {
+            "result": (positive, latent, compiled, active_json, summary),
+            "expand": graph.finalize(),
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 6. Trim 节点
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -886,6 +1205,14 @@ class EagleH3NativeLoopEndNode:
                 "filename": ("STRING", {"default": ""}),
                 "format": (["mp4", "mov", "mkv"], {"default": "mp4"}),
                 "fps_override": ("INT", {"default": 0, "min": 0, "max": 120, "step": 1}),
+                "local_save_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "最终整片额外复制到此目录；留空则只保存在 ComfyUI/output/h3_chains。",
+                }),
+                "eagle_folder": ("STRING", {
+                    "default": "",
+                    "tooltip": "最终整片导入的 Eagle 文件夹名称、层级路径、ID 或 eagle://folder/ 地址；留空不导入。",
+                }),
             },
             "hidden": {
                 "dynprompt": "DYNPROMPT",
@@ -1006,8 +1333,56 @@ class EagleH3NativeLoopEndNode:
             "expand": graph.finalize(),
         }
 
+    @staticmethod
+    def _copy_final_to_local(source_path, local_save_path):
+        value = str(local_save_path or "").strip()
+        if not value:
+            return source_path, ""
+        target_dir = Path(value).expanduser()
+        if not target_dir.is_absolute():
+            target_dir = Path(folder_paths.get_output_directory()) / target_dir
+        ensure_dir(str(target_dir))
+        destination = target_dir / Path(source_path).name
+        try:
+            if destination.resolve() == Path(source_path).resolve():
+                return source_path, f"✅ 本地整片: {destination}"
+        except OSError:
+            pass
+        if destination.exists():
+            destination = target_dir / generate_unique_filename(
+                Path(source_path).stem, Path(source_path).suffix.lstrip(".")
+            )
+        shutil.copy2(source_path, destination)
+        return str(destination), f"✅ 本地整片: {destination}"
+
+    @staticmethod
+    def _import_final_to_eagle(source_path, eagle_folder):
+        value = str(eagle_folder or "").strip()
+        if not value:
+            return ""
+        parsed, input_type = eagle_client.parse_folder_input(value)
+        if input_type == "eagle_id":
+            folder_id, _corrected = eagle_client.resolve_folder_id(parsed)
+        elif input_type == "eagle_name":
+            folder_id = eagle_client.find_folder_id_by_path(parsed)
+        else:
+            folder_id = None
+        if not folder_id:
+            return f"⚠️ Eagle 文件夹不存在或无法解析: {value}"
+        response = eagle_client.add_item_from_path(
+            source_path,
+            folder_id=folder_id,
+            name=Path(source_path).stem,
+            tags=["H3", "Eagle Suite"],
+            annotation="由 Eagle H3 导演台循环结束节点自动合成",
+        )
+        if response.get("status") == "success":
+            return f"✅ 已导入 Eagle: {value}"
+        return "⚠️ Eagle 导入失败: " + str(response.get("message") or response)
+
     def execute(self, flow, run_state, decision="", filename="", format="mp4",
-                fps_override=0, dynprompt=None, unique_id=None):
+                fps_override=0, local_save_path="", eagle_folder="",
+                dynprompt=None, unique_id=None):
         advanced = EagleH3EndNode().execute(run_state, decision=decision)
         if isinstance(advanced, dict):
             state, done, next_index, loop_again, summary = advanced["result"]
@@ -1028,6 +1403,26 @@ class EagleH3NativeLoopEndNode:
                 state, filename=filename, format=format, fps_override=fps_override
             )
             summary += "\n" + assemble_status
+            final_path = _resolve_video_path(final_video)
+            if final_path and os.path.isfile(final_path):
+                export_path = final_path
+                try:
+                    export_path, local_status = self._copy_final_to_local(
+                        final_path, local_save_path
+                    )
+                    if local_status:
+                        summary += "\n" + local_status
+                except Exception as error:
+                    logger.exception("H3 最终整片本地复制失败")
+                    summary += f"\n⚠️ 最终整片本地复制失败: {error}"
+                try:
+                    eagle_status = self._import_final_to_eagle(export_path, eagle_folder)
+                    if eagle_status:
+                        summary += "\n" + eagle_status
+                except Exception as error:
+                    logger.exception("H3 最终整片 Eagle 导入失败")
+                    summary += f"\n⚠️ 最终整片 Eagle 导入失败: {error}"
+                final_video = native_video(export_path)
         result = (state, final_video, done, next_index, summary)
         return {
             "ui": {"h3_native_loop": {
@@ -1452,6 +1847,7 @@ NODE_CLASS_MAPPINGS_H3PIPELINE = {
     "EagleH3PlanNode": EagleH3PlanNode,
     "EagleH3NativeLoopStartNode": EagleH3NativeLoopStartNode,
     "EagleH3ShotContextNode": EagleH3ShotContextNode,
+    "EagleH3ReferenceConditionNode": EagleH3ReferenceConditionNode,
     "EagleH3CheckpointReviewNode": EagleH3CheckpointReviewNode,
     "EagleH3NativeLoopEndNode": EagleH3NativeLoopEndNode,
     "EagleH3ExportPNGSequenceNode": EagleH3ExportPNGSequenceNode,
@@ -1463,6 +1859,7 @@ NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE = {
     "EagleH3PlanNode": "🦅 H3 · 计划",
     "EagleH3NativeLoopStartNode": "🦅 H3 · 循环开始",
     "EagleH3ShotContextNode": "🦅 H3 · 镜头与上下文",
+    "EagleH3ReferenceConditionNode": "🦅 H3 · 参考条件路由",
     "EagleH3CheckpointReviewNode": "🦅 H3 · 分段保存与审片",
     "EagleH3NativeLoopEndNode": "🦅 H3 · 循环结束与合成",
     "EagleH3ExportPNGSequenceNode": "🦅 H3 工具 · 导出 PNG 序列",
@@ -1479,6 +1876,7 @@ __all__ = [
     "EagleH3CurrentShotNode",
     "EagleH3ContextNode",
     "EagleH3ShotContextNode",
+    "EagleH3ReferenceConditionNode",
     "EagleH3TrimNode",
     "EagleH3SegmentCheckpointNode",
     "EagleH3ReviewGateNode",

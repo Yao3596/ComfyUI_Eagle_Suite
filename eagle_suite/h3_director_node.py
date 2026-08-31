@@ -724,6 +724,16 @@ def compile_h3_params(project, scenes, llm_hint=""):
             "reference_tags": sorted(set(
                 match.group(0) for match in _MEDIA_TAG_RE.finditer(full_prompt)
             )),
+            # full_prompt 的全局 subject_definitions 会列出全部素材；路由节点需要
+            # 单独知道本场景正文真正使用了哪些标签，以及 UI 明确忽略了哪些标签。
+            "scene_reference_tags": sorted(set(
+                match.group(0) for match in _MEDIA_TAG_RE.finditer(scene_prompt)
+            )),
+            "disabled_reference_tags": sorted(set(
+                match.group(0)
+                for token in _disabled_scene_tokens(s)
+                for match in _MEDIA_TAG_RE.finditer(token)
+            )),
         }
 
         # 仅当与全局默认值不同才写入覆盖字段
@@ -851,6 +861,41 @@ def compile_h3_params(project, scenes, llm_hint=""):
     return plan
 
 
+def export_context_loop_plan_json(plan):
+    """Return the editable JSON contract consumed by Context Loop's Plan node.
+
+    Eagle's runtime Plan contains both ``prompt_prefix`` and a resolved full
+    ``prompt`` per scene.  Passing that dict back into the third-party Plan node
+    would prepend the shared prefix twice, so the bridge intentionally exports
+    each scene's ``scene_prompt`` as its authoring prompt.
+    """
+    plan = plan if isinstance(plan, dict) else {}
+    shots = []
+    for source in plan.get("shots") or []:
+        if not isinstance(source, dict):
+            continue
+        shot = {
+            "id": source.get("id", ""),
+            "prompt": source.get("scene_prompt", source.get("prompt", "")),
+            "length": source.get("raw_frames", source.get("length")),
+            "seed": str(source.get("seed", 0)),
+            "steps": source.get("steps", 8),
+        }
+        for key in (
+            "context_length", "audio_context_length", "continuation_mode",
+            "video_blend_frames",
+        ):
+            if key in source:
+                shot[key] = source[key]
+        shots.append(shot)
+    payload = {
+        "prompt_prefix": plan.get("prompt_prefix", ""),
+        "defaults": dict(plan.get("defaults") or {}),
+        "shots": shots,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 导演 Skill（LLM 生成台本 / 分镜 / 台词）
 # ────────────────────────────────────────────────────────────────────────────
@@ -940,16 +985,16 @@ def _select_transport(api_config, local_model, pref):
         if api_ok:
             return ("api", {"key": api_key, "base": api_base, "model": api_model})
         if local_ok:
-            return ("local", {"path": local_model["path"]})
+            return ("local", {"path": local_model["path"], "handle": local_model})
     else:  # local 优先（默认）
         if local_ok:
-            return ("local", {"path": local_model["path"]})
+            return ("local", {"path": local_model["path"], "handle": local_model})
         if api_ok:
             return ("api", {"key": api_key, "base": api_base, "model": api_model})
     if api_ok:
         return ("api", {"key": api_key, "base": api_base, "model": api_model})
     if local_ok:
-        return ("local", {"path": local_model["path"]})
+        return ("local", {"path": local_model["path"], "handle": local_model})
     return (None, None)
 
 
@@ -983,7 +1028,21 @@ def _run_api(transport, system, user, temperature):
 
 
 def _run_local(transport, system, user, temperature):
-    from .local_llm_node import generate_local_text
+    from .local_llm_node import (
+        generate_local_text, _run_llamacpp_inference, ensure_local_model_handle,
+    )
+    handle = transport.get("handle") if isinstance(transport, dict) else None
+    if isinstance(handle, dict) and handle.get("released"):
+        ensure_local_model_handle(handle)
+    if isinstance(handle, dict) and handle.get("backend") == "llama.cpp" and handle.get("llm") is not None:
+        text, error, _elapsed = _run_llamacpp_inference(
+            handle["llm"], [], user, system,
+            2048, max(0.05, min(2.0, float(temperature))), 0.95, True, -1,
+            bool(handle.get("thinking", False)), int(handle.get("thinking_budget", 4096) or 4096), 1.0,
+        )
+        if error:
+            raise RuntimeError(error)
+        return text
     return generate_local_text(
         model_path=transport["path"],
         system_prompt=system,
@@ -1109,13 +1168,28 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
     if director_skill:
         director_ctx = "【导演技能库 / Director Skill】\n" + director_skill + "\n\n"
     request = request if isinstance(request, dict) else {}
+    prompt_language = str(request.get("promptLanguage") or "en").lower()
+    prompt_language = "zh" if prompt_language == "zh" else "en"
+    dialogue_language = str(request.get("dialogueLanguage") or "Chinese").strip() or "Chinese"
+    visual_language = "简体中文" if prompt_language == "zh" else "English"
+    format_rules = (
+        "【MiniMax H3 输出规范】\n"
+        f"- 所有画面、主体、动作、场景、灯光、镜头与声音描述必须统一使用 {visual_language}，不得中英混写。\n"
+        f"- <d>...</d> 内的台词文本使用 {dialogue_language}；角色名保持原设定。\n"
+        "- 每镜按 主体与动作 → 环境与光线 → 景别与构图 → 运镜 → 声音 的顺序写成自包含描述。\n"
+        "- camera 字段优先使用 MiniMax 原生运镜命令："
+        "[Truck left/right]、[Pan left/right]、[Push in]、[Pull out]、"
+        "[Pedestal up/down]、[Tilt up/down]、[Zoom in/out]、[Shake]、"
+        "[Tracking shot]、[Static shot]；不要自造方括号命令。\n"
+        "- 原生 <Picture N>/<Video N>/<Audio N> 标签必须逐字保留，不能翻译、改号或拆开。\n"
+    )
     reference_ctx = _skill_reference_context(project, scene)
     chain_ctx = str(request.get("_chainContext") or "")
     common_ctx = reference_ctx + (chain_ctx + "\n" if chain_ctx else "")
     if task == "script":
         user = (
             "【Shared prompt / 世界构建】\n" + (foundation or "(无，请自行设定统一风格)") + "\n\n"
-            + common_ctx + "\n"
+            + common_ctx + "\n" + format_rules + "\n"
             "【场景标题】" + title + "\n"
             + duration_context +
             "【用户额外指令】" + (hint or "(无)") + "\n\n"
@@ -1124,9 +1198,9 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
             f"2. 根据 {duration_label} 秒的场景总预算决定镜头数量和节奏；"
             f"各镜头时长合计约为 {duration_label} 秒，"
             "不要套用固定的 10 秒单镜头假设；\n"
-            "3. 每个镜头写英文描述（主体 / 动作 / 运镜 / 氛围）且自包含，"
+            f"3. 每个镜头写{visual_language}描述（主体 / 动作 / 运镜 / 氛围）且自包含，"
             "不得出现“如前所述”“同上”等承接语；\n"
-            "4. 角色台词用内联标签：<d>[角色名] 中文台词（≤30 字）</d>；\n"
+            f"4. 角色台词用内联标签：<d>[角色名] {dialogue_language} 台词（简洁）</d>；\n"
             "5. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
         )
         return _SKILL_SYSTEM, director_ctx + user
@@ -1134,7 +1208,7 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
         user = (
             "【场景标题】" + title + "\n"
             + duration_context +
-            common_ctx + "\n" +
+            common_ctx + "\n" + format_rules + "\n" +
             "【现有台本】\n" + (preamble or "(空)") + "\n\n"
             "请将台本拆分为镜头条目。输出 ONLY JSON：\n"
             "{\"shots\":[{\"title\":\"\",\"time\":\"00:00.000\",\"framing\":\"\","
@@ -1144,7 +1218,8 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
             "要求：time 从 00:00.000 起按顺序递增；每个 estSeconds 必须大于 0，"
             f"所有 estSeconds 之和约等于 {duration_label} 秒，且不得超出该场景预算；framing 用 "
             "extreme_close_up / close_up / medium_shot / cowboy_shot / full_body / wide_shot "
-            "之一或空；content 为英文镜头描述。"
+            f"之一或空；content、camera、action、sound 均使用 {visual_language}，"
+            "camera 中的方括号命令保持官方英文拼写。"
         )
         return _SKILL_SYSTEM, director_ctx + user
     if task == "dialogue":
@@ -1152,12 +1227,12 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
         user = (
             "【场景标题】" + title + "\n"
             + duration_context +
-            common_ctx + "\n" +
+            common_ctx + "\n" + format_rules + "\n" +
             "【现有台本】\n" + (preamble or "(空)") + "\n\n"
             "【已生成分镜】\n" + (shots_context or "[]") + "\n\n"
             "请提取 / 补全所有台词。输出 ONLY JSON：\n"
-            "{\"dialogues\":[{\"role\":\"角色名\",\"text\":\"中文台词（≤30 字）\",\"time\":\"00:00.000\"}]}\n"
-            "要求：text 为简洁中文，≤30 字；time 为该句出现的大致时间码，"
+            f"{{\"dialogues\":[{{\"role\":\"角色名\",\"text\":\"{dialogue_language} 台词\",\"time\":\"00:00.000\"}}]}}\n"
+            f"要求：text 为简洁的 {dialogue_language} 台词；time 为该句出现的大致时间码，"
             f"必须落在 0 至 {duration_label} 秒的场景范围内。"
         )
         return _SKILL_SYSTEM, director_ctx + user
@@ -1455,9 +1530,11 @@ class EagleH3DirectorNode:
 
     # 导演台只输出编排数据与一个媒体包。大量媒体插槽由独立的
     # EagleH3MediaPortsNode 展开，避免 DOM 面板被右侧端口挤压越框。
-    RETURN_TYPES = (H3_PLAN_TYPE, H3_MEDIA_BUNDLE_TYPE, "INT", "INT", "INT", "INT", "STRING")
+    RETURN_TYPES = (
+        H3_PLAN_TYPE, H3_MEDIA_BUNDLE_TYPE, "INT", "INT", "INT", "INT", "STRING", "STRING",
+    )
     RETURN_NAMES = ("plan", "media_bundle", "width", "height", "clip_count",
-                    "video_blend_frames", "summary")
+                    "video_blend_frames", "summary", "plan_json")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
 
@@ -1500,15 +1577,24 @@ class EagleH3DirectorNode:
 
         # ── 导演 Skill 生成（手动「生成」按钮触发）──
         if skill_request and skill_request.strip():
+            block_skill_queue = True
             try:
                 req = json.loads(skill_request)
                 if req.get("run"):
+                    block_skill_queue = bool(req.get("blockDownstream", True))
                     result = run_director_skill(
                         project, scenes, req, api_config=api_config, local_model=local_model,
                         director_skill=effective_director_skill
                     )
                     result["skill_layers"] = len(skill_layers)
                     result["node_id"] = node_id
+                    if req.get("releaseAfter") and result.get("transport") == "local":
+                        try:
+                            from .local_llm_node import release_local_model_handle
+                            released = release_local_model_handle(local_model)
+                            result["memory_release"] = released
+                        except Exception as e:
+                            result["memory_release_error"] = str(e)
                     try:
                         from server import PromptServer
                         ps = getattr(PromptServer, "instance", None)
@@ -1518,6 +1604,12 @@ class EagleH3DirectorNode:
                         logger.warning(f"[EagleH3Director] 推送 skill 结果失败: {e}")
             except Exception as e:
                 logger.warning(f"[EagleH3Director] skill_request 解析失败: {e}")
+            if block_skill_queue:
+                try:
+                    from comfy_execution.graph_utils import ExecutionBlocker
+                    return tuple(ExecutionBlocker(None) for _ in self.RETURN_TYPES)
+                except Exception as e:
+                    logger.warning(f"[EagleH3Director] 当前 ComfyUI 不支持静默阻断下游: {e}")
 
         # plan dict — ethanfel H3_CHAIN_PLAN 对象
         plan_data = compile_h3_params(project, scenes, LLM_HINT or "")
@@ -1593,8 +1685,9 @@ class EagleH3DirectorNode:
             "audio_slots": audio_slots,
             "media_mapping": media_mapping,
         }
+        plan_json = export_context_loop_plan_json(plan_data)
         return (plan_data, media_bundle, width_val, height_val,
-                clip_count, video_blend_frames_val, summary)
+                clip_count, video_blend_frames_val, summary, plan_json)
 
 
 class EagleH3MediaPortsNode:

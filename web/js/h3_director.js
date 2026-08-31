@@ -9,6 +9,7 @@ import {
     ref, nextTick, provide, inject
 } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
+import { EAGLE_SETTING_IDS, getEagleSetting } from "./eagle_settings.js";
 
 console.log("[EagleH3Director] h3_director.js loaded");
 
@@ -253,6 +254,8 @@ function defaultProject() {
         director_skill: '',
         skill: {
             tasks: [],            // ['script','shots','dialogue'] 多选
+            promptLanguage: 'en', // 视觉/运镜模板语言；H3 默认推荐英文
+            dialogueLanguage: 'Chinese', // <d> 台词文本语言
             modelPref: 'local',   // 'local' 本地优先 | 'api'
             mergeMode: 'overwrite', // 'overwrite' 覆盖 | 'append' 追加
             profile: 'balanced',
@@ -270,6 +273,9 @@ function normalizeProjectEnums(project) {
     if (project.continuationMode === 'strict' || project.continuationMode === 'free') project.continuationMode = 'guide';
     if (project.audioMode === 'off') project.audioMode = 'generated_audio';
     if (['off','warn','strict'].indexOf(project.referencePolicy) < 0) project.referencePolicy = 'warn';
+    project.skill = Object.assign(defaultProject().skill, project.skill || {});
+    if (['en', 'zh'].indexOf(project.skill.promptLanguage) < 0) project.skill.promptLanguage = 'en';
+    if (!project.skill.dialogueLanguage) project.skill.dialogueLanguage = 'Chinese';
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -543,7 +549,7 @@ var H3DirectorApp = defineComponent({
             skillBatch: {
                 active: false, stopRequested: false, batchId: '', requestId: '',
                 sceneIds: [], cursor: 0, completed: 0, failed: 0,
-                currentSceneId: null, status: '', lastError: ''
+                currentSceneId: null, status: '', lastError: '', finalQueueSubmitted: false
             },
             directorLibrary: {
                 items: [], loading: false, error: '', source: 'eagle',
@@ -869,13 +875,38 @@ var H3DirectorApp = defineComponent({
         function skillRequestWidget() {
             return (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
         }
-        function finishSkillBatch(message) {
+        function finishSkillBatch(message, queueDownstream) {
             var batch = store.skillBatch;
             batch.active = false;
             batch.currentSceneId = null;
             batch.requestId = '';
             batch.status = message || ('已完成 ' + batch.completed + ' 个场景');
             flash(batch.status);
+            // Skill 阶段的每次 Queue 都由 ExecutionBlocker 阻断下游。
+            // 全部场景回填后必须再 Queue 一次空 skill_request，才能正式编译
+            // Plan 并把数据交给 H3 条件/采样链。只允许一次，避免重复生成视频。
+            if (queueDownstream && !batch.finalQueueSubmitted) {
+                batch.finalQueueSubmitted = true;
+                clearSkillRequest();
+                markDirty(true);
+                batch.status += ' · 正在提交完整 Plan';
+                setTimeout(function() {
+                    try {
+                        var queued = app.queuePrompt();
+                        if (queued && typeof queued.catch === 'function') {
+                            queued.catch(function(error) {
+                                batch.lastError = '完整 Plan 提交失败: ' +
+                                    (error && error.message ? error.message : error);
+                                flash(batch.lastError);
+                            });
+                        }
+                    } catch (error) {
+                        batch.lastError = '完整 Plan 提交失败: ' +
+                            (error && error.message ? error.message : error);
+                        flash(batch.lastError);
+                    }
+                }, 60);
+            }
         }
         function submitSkillScene() {
             var batch = store.skillBatch;
@@ -885,7 +916,7 @@ var H3DirectorApp = defineComponent({
                 return;
             }
             if (batch.cursor >= batch.sceneIds.length) {
-                finishSkillBatch('✓ 批量生成完成：' + batch.completed + '/' + batch.sceneIds.length + (batch.failed ? '，失败 ' + batch.failed : ''));
+                finishSkillBatch('✓ 批量生成完成：' + batch.completed + '/' + batch.sceneIds.length + (batch.failed ? '，失败 ' + batch.failed : ''), true);
                 return;
             }
             var sceneId = batch.sceneIds[batch.cursor];
@@ -916,7 +947,12 @@ var H3DirectorApp = defineComponent({
                 modelPref: sk.modelPref || 'local',
                 profile: sk.profile || 'balanced',
                 skillPolicy: sk.skillPolicy || 'merge',
-                hint: sk.hint || ''
+                promptLanguage: sk.promptLanguage || 'en',
+                dialogueLanguage: sk.dialogueLanguage || 'Chinese',
+                hint: sk.hint || '',
+                blockDownstream: !!getEagleSetting(EAGLE_SETTING_IDS.blockSkillDownstream, true),
+                releaseAfter: !!getEagleSetting(EAGLE_SETTING_IDS.unloadAfterSkillBatch, true)
+                    && batch.cursor === batch.sceneIds.length - 1
             };
             w.value = JSON.stringify(req);
             if (typeof w.callback === 'function') w.callback(w.value, w, props.node);
@@ -948,7 +984,7 @@ var H3DirectorApp = defineComponent({
                 active:true, stopRequested:false,
                 batchId:'h3skill-' + Date.now() + '-' + Math.random().toString(16).slice(2),
                 requestId:'', sceneIds:ids, cursor:0, completed:0, failed:0,
-                currentSceneId:null, status:'', lastError:''
+                currentSceneId:null, status:'', lastError:'', finalQueueSubmitted:false
             });
             submitSkillScene();
         }
@@ -1995,6 +2031,33 @@ var EditorPanel = defineComponent({
               <label class="h3d-row" style="gap:4px;cursor:pointer;font-size:11px"><input type="checkbox" value="dialogue" v-model="store.project.skill.tasks"> 台词</label>
               <div class="h3d-row" style="gap:4px;margin-left:auto"><span class="h3d-label" style="margin:0">temp</span><input class="h3d-inp sm" v-model.number="store.project.skill.temperature" type="number" step="0.1" min="0" max="2" style="width:52px"></div>
             </div>
+            <div class="h3d-grid2" style="margin-bottom:8px">
+              <div class="h3d-row col"><label class="h3d-label">画面提示词模板</label>
+                <select class="h3d-sel" v-model="store.project.skill.promptLanguage">
+                  <option value="en">English（H3 推荐）</option>
+                  <option value="zh">中文</option>
+                </select>
+              </div>
+              <div class="h3d-row col"><label class="h3d-label">台词文本语言</label>
+                <select class="h3d-sel" v-model="store.project.skill.dialogueLanguage">
+                  <option>Chinese</option><option>Chinese,Yue</option><option>English</option>
+                  <option>Japanese</option><option>Korean</option><option>Spanish</option>
+                  <option>French</option><option>German</option><option>Portuguese</option>
+                  <option>Italian</option><option>Russian</option><option>Arabic</option>
+                  <option>Vietnamese</option><option>Thai</option><option>Indonesian</option>
+                  <option>Turkish</option><option>Dutch</option><option>Ukrainian</option>
+                  <option>Polish</option><option>Romanian</option><option>Greek</option>
+                  <option>Czech</option><option>Finnish</option><option>Hindi</option>
+                  <option>Bulgarian</option><option>Danish</option><option>Hebrew</option>
+                  <option>Malay</option><option>Persian</option><option>Slovak</option>
+                  <option>Swedish</option><option>Croatian</option><option>Filipino</option>
+                  <option>Hungarian</option><option>Norwegian</option><option>Slovenian</option>
+                  <option>Catalan</option><option>Nynorsk</option><option>Tamil</option>
+                  <option>Afrikaans</option>
+                </select>
+              </div>
+            </div>
+            <div class="h3d-hint" style="margin:-2px 0 8px">推荐：英文画面模板 + 中文台词。台词语言只控制生成文本；本地 H3 检查点的实际发音覆盖度取决于模型版本。</div>
             <div class="h3d-grid2" style="margin-bottom:8px">
               <div class="h3d-row col"><label class="h3d-label">模型优先级</label>
                 <select class="h3d-sel" v-model="store.project.skill.modelPref">
