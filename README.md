@@ -7,7 +7,9 @@
 ---
 ## ✅ 稳定版与运行环境
 
-当前稳定基线：**v1.4.0-stable（2026-08-25）**。
+最新稳定版：**v1.4.0-stable（2026-08-25）**。
+
+当前仓库开发基线：**v1.5.0-dev（2026-08-31）**，新增 H3 原生制片循环、审片恢复、完整示例工作流与 Vue 节点统一主题。
 
 本版本已在以下 Aki 环境核对：
 
@@ -52,10 +54,36 @@ pip install -r requirements.txt
 | 节点 | 类别菜单 | 说明 |
 |------|----------|------|
 | 🦅 **H3 导演台** | `🦅 Eagle Suite/H3 导演台` | MiniMax H3 专属视频导演控制台，支持场景多镜头动作编排、分镜台词整理、风格生成与 ethanfel Plan 格式导出 |
+| 🦅 **H3 媒体集成端口** | `🦅 Eagle Suite/H3 导演台` | 集中展开导演台图片、视频、原声和独立音频，避免导演台暴露大量动态端口 |
 | 🦅 **导演技能库** | `🦅 Eagle Suite/H3 导演台` | 集中管理 Markdown 导演技能文档与素材胶片，支持自定义保存路径、底部路径显示与 JSON 导出/导入 |
+| 🦅 **H3 · 计划** | `🦅 Eagle Suite/H3 导演台` | 计划预检、运行初始化、恢复策略与自动/交互模式入口，可右键创建完整 H3 核心主链 |
+| 🦅 **H3 · 循环开始** | `🦅 Eagle Suite/H3 导演台` | 原生循环入口，向当前镜头生成链提供稳定尺寸、FPS、运行状态与流程控制 |
+| 🦅 **H3 · 镜头与上下文** | `🦅 Eagle Suite/H3 导演台` | 输出当前镜头提示词、参考素材、首图/上一镜末帧和可复现 seed |
+| 🦅 **H3 · 分段保存与审片** | `🦅 Eagle Suite/H3 导演台` | 合并裁剪、分段保存、检查点、审片、通过/重试/换种/停止及恢复功能 |
+| 🦅 **H3 · 循环结束与合成** | `🦅 Eagle Suite/H3 导演台` | 推进下一个镜头并在全部场景完成后自动合成最终视频 |
 
-- **H3 导演台**：集成世界构建、镜头序列动作分解、音频/台词时间轴，支持一键编译生成 H3 提示词并连线控制下游启动节点；
+- **H3 导演台**：集成世界构建、镜头序列动作分解、音频/台词时间轴；Skill 可按“当前场景”或动态数量的“全部场景”依次生成台本 → 分镜 → 台词，并严格回填到对应场景；
+- **参考标签**：`<Picture N>`、`<Video N>`、`<Audio N>` 与 `<d>...</d>` 在台本中作为不可拆分的原子标签显示，点击即可在启用/忽略间切换，素材重排或删除时会同步改写引用；
+- **时长与比例**：每个场景的实际时长会进入台本和分镜模板，分镜 `estSeconds` 总和按场景时长约束；生成比例直接继承导演台尺寸设置，不再维护重复比例参数；
 - **导演技能库**：与提示词预设共享后端能力，支持 Markdown 实时渲染预览、素材胶片图片拖拽绑定，可配置 `local_paths` 存储目录，自带 `⬇ 导出` 与 `⬆ 导入` 功能。
+
+#### H3 推荐主链
+
+```text
+H3 导演台.plan
+  → H3 · 计划
+  → H3 · 循环开始
+  → H3 · 镜头与上下文
+  → [MiniMax H3 模型 / 采样 / 解码]
+  → H3 · 分段保存与审片
+  → H3 · 循环结束与合成
+```
+
+在 **H3 · 计划** 节点右键选择“创建 H3 核心主链”，可自动建立并连接 5 个核心承接节点；具体模型、VAE、采样和解码链放在“镜头与上下文”与“分段保存与审片”之间。自动模式会在同一次执行中推进全部场景，交互模式则在每个镜头后停留等待审片。
+
+- 可直接导入完整示例：[example_workflows/eagle_h3_full_workflow.json](example_workflows/eagle_h3_full_workflow.json)
+- 详细职责与连接说明：[docs/H3_DIRECTOR_PIPELINE.md](docs/H3_DIRECTOR_PIPELINE.md)
+- Context Loop 对齐记录：[docs/H3_CONTEXT_LOOP_ALIGNMENT_2026-08-31.md](docs/H3_CONTEXT_LOOP_ALIGNMENT_2026-08-31.md)
 
 ---
 
@@ -98,6 +126,9 @@ pip install -r requirements.txt
 | 🧬 **LoRA Gallery** | `🦅 Eagle Suite/画廊` | 在节点内浏览并加载本地 LoRA，管理多层模型树、权重、触发词、预览图和 Civitai 信息 |
 | 🦅 **统一媒体浏览器** | `🦅 Eagle Suite/媒体` | 浏览本地图片/视频，支持递归、比例筛选与顺序/随机批次输出 |
 
+- LoRA 已选列表直接集成启用/忽略状态：点击状态即可切换，忽略的 LoRA 保留配置但不会应用到模型；删除使用列表内紧凑 `×`，减少节点空间占用。
+- LoRA、Eagle、Wallhaven、Danbooru 与导演台等 Vue 节点统一使用共享主题变量：ComfyUI 默认主题下呈现深蓝色系，其他自定义主题下继承宿主背景、文字和边框色，避免主题切换后割裂。
+
 ---
 
 ### 🎬 视频与音频处理
@@ -111,7 +142,7 @@ pip install -r requirements.txt
 | 🦅 **批量视频加载** | `🦅 Eagle Suite/视频` | 批量读取视频帧与文件信息 |
 | 🦅 **视频帧提取** | `🦅 Eagle Suite/视频` | 按范围或间隔提取视频帧 |
 | 🦅 **视频信息** | `🦅 Eagle Suite/视频` | 获取时长、帧率、分辨率和编码信息 |
-| 🦅 **GIF 压缩保存** | `🦅 Eagle Suite/视频` | 优化 GIF 文件大小 |
+| 🦅 **GIF 压缩保存** | `🦅 Eagle Suite/视频` | 支持尺寸缩放、减色、抽帧加速、帧时长与可选 gifsicle 优化，在画质和体积之间进行可控压缩 |
 | 🦅 **音频提取 / 混音 / 浏览器** | `🦅 Eagle Suite/音频` | 从视频提取音频轨道、多轨道音频混合与本地音频库浏览 |
 
 ---
@@ -146,6 +177,7 @@ ComfyUI_Eagle_Suite/
 ├── eagle_suite/              # 核心节点主包
 │   ├── nodes.py              # 节点注册与菜单分配唯一入口
 │   ├── h3_director_node.py      # H3 导演台控制中心节点
+│   ├── h3_pipeline/             # H3 五节点原生循环、上下文、审片、恢复与合成
 │   ├── director_skill_node.py   # 导演技能库文档与素材胶片节点
 │   ├── danbooru_search.py       # Danbooru 语义搜索、标签与抽卡 (BGE-M3)
 │   ├── eagle_gallery.py      # Eagle Gallery 画廊后端
@@ -165,6 +197,7 @@ ComfyUI_Eagle_Suite/
 │   ├── eagle_saver.py        # Eagle 图片保存
 │   ├── local_loader.py       # 本地图片加载
 │   ├── gif_compressor.py     # GIF 压缩
+│   ├── workflow_metadata.py  # 工作流元数据提取、嵌入与旁车 JSON
 │   └── text_nodes.py         # 字符串工具节点集合
 ├── nodes/                    # 工具后端
 │   ├── prompt_presets.py     # 提示词预设 & 导演技能库数据后端
@@ -173,8 +206,10 @@ ComfyUI_Eagle_Suite/
 │   └── prompts/              # 预设模板与导演技能存储目录
 │       └── director_skills/  # 导演技能文档 (skills.json) 与素材胶片
 ├── web/                      # 前端 Vue 3 资源
-│   ├── js/                   # 各节点的 Vue 3 前端渲染与交互脚本
+│   ├── js/                   # Vue 节点脚本、H3 流水线前端与共享深蓝主题
 │   └── lib/                  # Vue 3 等内置第三方前端库
+├── example_workflows/        # 可直接导入的完整工作流示例
+├── docs/                     # H3 架构、Context Loop 对齐与生成质量评估
 ├── api_config.example.json   # 可提交的空白 API 配置示例
 ├── api_config.json           # 本地 API 配置（自动生成，Git 忽略）
 ├── requirements.txt          # Python 依赖
@@ -184,6 +219,14 @@ ComfyUI_Eagle_Suite/
 ---
 
 ## 📝 更新日志
+
+### v1.5.0-dev (2026-08-31)
+- ✨ **H3 节点重新归并**：将原本零散的计划、上下文、裁剪、检查点、审片、推进与合成功能收敛为 5 个核心节点，并支持右键一键创建主链。
+- ✨ **原生循环与恢复**：自动模式使用 ComfyUI 动态图递归推进全部场景；交互模式支持逐镜审片、重试、换种、停止、检查点恢复与最终合成。
+- ✨ **导演台生成对齐**：全部场景批量生成按实际场景数执行，台本 → 分镜 → 台词严格串联；场景时长、参考素材及原子标签与输出 Plan 一致。
+- ✨ **统一 Vue 深蓝主题**：默认 ComfyUI 主题下统一使用 Eagle 深蓝视觉，自定义主题下自动继承宿主颜色变量。
+- ✨ **媒体工具增强**：GIF 压缩增加尺寸、减色和抽帧控制；LoRA 已选项支持列表内启用/忽略；视频、音频与批处理节点补齐元数据和稳定性处理。
+- 📦 新增可直接导入的 `example_workflows/eagle_h3_full_workflow.json`、H3 架构文档和自动化回归测试。
 
 ### v1.4.0-stable (2026-08-25)
 - ✨ **新增 H3 导演台 & 导演技能库**：MiniMax H3 / 海螺 AI 专属控制台，支持场景分镜动作分解、提示词编译与 ethanfel Plan 格式导出；导演技能库支持 Markdown 编辑、胶片拖拽、多路径管理及 JSON 导入/导出。
