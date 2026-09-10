@@ -23,6 +23,7 @@ nodes/prompts/filmstrip/
 eagle_suite/danbooru_engine/tags_embedding/
 eagle_suite/danbooru_engine/bge_m3_model/
 eagle_suite/danbooru_engine/tmp_*/
+eagle_suite/danbooru_engine/library/
 
 # ── Python cache ──
 __pycache__/
@@ -66,3 +67,6 @@ web/js/pinterest_gallery.js
 
 # ── H3 导演台本地测试素材（不入库） ──
 input/
+
+# ── Local browser diagnostics / deploy backups ──
+.tmp_edge_*/

@@ -10,6 +10,9 @@ import os
 class EagleStringRows:
     """计算字符串行数（支持直接输入或从文件读取）"""
 
+    DEPRECATED = True
+    DESCRIPTION = "旧行数统计节点；新工作流请使用“智能文本工作台”的 text 与 line_count 输出。"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {

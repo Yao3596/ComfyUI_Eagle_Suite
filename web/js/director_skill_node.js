@@ -284,6 +284,31 @@ var DirectorSkillApp = {
       return data;
     }
 
+    function jsonRequest(path, payload, method) {
+      // Some recent ComfyUI frontend builds clone/normalize RequestInit inside
+      // api.fetchApi and can drop a string body for custom-node POST routes.
+      // Use the same-origin browser fetch directly for JSON mutations while
+      // retaining api.apiURL for installations mounted under a URL prefix.
+      var url = api && typeof api.apiURL === "function" ? api.apiURL(path) : path;
+      return fetch(url, {
+        method: method || "POST",
+        headers: { "Accept": "application/json", "Content-Type": "application/json;charset=UTF-8" },
+        body: JSON.stringify(payload || {}),
+        credentials: "same-origin",
+        cache: "no-store"
+      });
+    }
+
+    function getRequest(path) {
+      var url = api && typeof api.apiURL === "function" ? api.apiURL(path) : path;
+      return fetch(url, {
+        method: "GET",
+        headers: { "Accept": "application/json" },
+        credentials: "same-origin",
+        cache: "no-store"
+      });
+    }
+
     function openTextDialog(title, initialValue, action) {
       Object.assign(dialog, { visible: true, mode: "text", title: title, message: "", value: initialValue || "", confirmText: "确定", action: action });
     }
@@ -305,7 +330,7 @@ var DirectorSkillApp = {
       settingsLoading.value = true;
       settingsMessage.text = "";
       try {
-        var response = await api.fetchApi("/eaglePromptPresets/config");
+        var response = await getRequest("/eaglePromptPresets/config");
         var data = await readJsonResponse(response, "读取设置");
         Object.assign(config, data.data || {});
         config.obsidian = Object.assign({
@@ -337,9 +362,7 @@ var DirectorSkillApp = {
         config.director_skills.filmstrip_megapixels = Math.min(
           10, Math.max(1, Number(config.director_skills.filmstrip_megapixels) || 1)
         );
-        var response = await api.fetchApi("/eaglePromptPresets/config", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ config: config })
-        });
+        var response = await jsonRequest("/eaglePromptPresets/config", { config: config });
         var data = await readJsonResponse(response, "保存设置");
         if (!response.ok || !data.success) throw new Error(data.error || "保存设置失败");
         settingsMessage.text = "设置已保存";
@@ -360,9 +383,7 @@ var DirectorSkillApp = {
       settingsMessage.text = "";
       try {
         var payload = Object.assign({}, config.obsidian, { prompts_folder: config.obsidian.director_skills_folder });
-        var response = await api.fetchApi("/eaglePromptPresets/test_obsidian", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-        });
+        var response = await jsonRequest("/eaglePromptPresets/test_obsidian", payload);
         var data = await readJsonResponse(response, "测试 Obsidian 连接");
         if (!response.ok || !data.success) throw new Error(data.error || "连接失败");
         settingsMessage.text = data.message || "Obsidian Vault 连接正常";
@@ -378,7 +399,7 @@ var DirectorSkillApp = {
       settingsMessage.text = "";
       try {
         if (!await saveSettings(false)) return;
-        var response = await api.fetchApi("/eaglePromptPresets/director_skills/sync_obsidian", { method: "POST" });
+        var response = await jsonRequest("/eaglePromptPresets/director_skills/sync_obsidian", {});
         var data = await readJsonResponse(response, "同步 Obsidian 技能库");
         if (!response.ok || !data.success) throw new Error(data.error || "同步失败");
         settingsMessage.text = (data.message || "同步完成") + "\n" + (data.path || "");
@@ -401,6 +422,7 @@ var DirectorSkillApp = {
         selectedSkillId: selectedSkillId.value,
         enabledSkillIds: enabledSkillIds.value.slice()
       });
+      props.node.graph?.change?.();
       props.node.setDirtyCanvas(true, true);
     }
 
@@ -449,7 +471,7 @@ var DirectorSkillApp = {
       if (skillsLoading.value) return false;
       skillsLoading.value = true;
       try {
-        var resp = await api.fetchApi("/eaglePromptPresets/director_skills");
+        var resp = await getRequest("/eaglePromptPresets/director_skills");
         var data = await readJsonResponse(resp, "加载技能");
         skills.value = data.data || [];
         storagePath.value = data.storage_path || storagePath.value;
@@ -538,9 +560,7 @@ var DirectorSkillApp = {
           var last = null;
           for (var item of list) {
             var skill = Object.assign({ category: "custom", tasks: ["script", "shots", "dialogue"], tags: [], content: "", filmstrip: [] }, item || {});
-            var response = await api.fetchApi("/eaglePromptPresets/director_skills", {
-              method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ skill: skill })
-            });
+            var response = await jsonRequest("/eaglePromptPresets/director_skills", { skill: skill });
             var data = await readJsonResponse(response, "导入导演技能");
             if (!response.ok || !data.success) throw new Error(data.error || "导入失败");
             last = data.data.id;
@@ -556,9 +576,8 @@ var DirectorSkillApp = {
     function createSkillVue() {
       openTextDialog("新建导演技能", "新技能", async function (name) {
         try {
-          var response = await api.fetchApi("/eaglePromptPresets/director_skills", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ skill: { name: name, category: "custom", tasks: ["script", "shots", "dialogue"], tags: [], content: "", filmstrip: [] } })
+          var response = await jsonRequest("/eaglePromptPresets/director_skills", {
+            skill: { name: name, category: "custom", tasks: ["script", "shots", "dialogue"], tags: [], content: "", filmstrip: [] }
           });
           var data = await readJsonResponse(response, "新建导演技能");
           if (!response.ok || !data.success) throw new Error(data.error || "新建失败");
@@ -577,9 +596,7 @@ var DirectorSkillApp = {
           tasks: source.tasks || ["script", "shots", "dialogue"], tags: source.tags || [],
           content: skillContent.value, filmstrip: skillFilmstrip.value
         };
-        var response = await api.fetchApi("/eaglePromptPresets/director_skills", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ skill: skill })
-        });
+        var response = await jsonRequest("/eaglePromptPresets/director_skills", { skill: skill });
         var data = await readJsonResponse(response, "保存导演技能");
         if (!response.ok || !data.success) throw new Error(data.error || "保存失败");
         selectedSkillId.value = data.data.id;
@@ -599,11 +616,7 @@ var DirectorSkillApp = {
       if (!skill) return;
       openConfirmDialog("删除导演技能", "确定删除“" + skill.name + "”吗？", async function () {
         try {
-          var response = await api.fetchApi("/eaglePromptPresets/director_skills/delete", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: skill.id })
-          });
+          var response = await jsonRequest("/eaglePromptPresets/director_skills/delete", { id: skill.id });
           var data = await readJsonResponse(response, "删除导演技能");
           if (!response.ok || !data.success) throw new Error(data.error || "删除失败");
           var deletedSelected = selectedSkillId.value === skill.id;
@@ -919,11 +932,13 @@ function mountDirectorSkillNode(node) {
 
     var container = document.createElement("div");
     container.className = "eagle-director-skill-host";
-    container.style.cssText = "width:100%;max-width:100%;min-width:0;overflow:hidden;position:relative;";
+    container.style.cssText = "width:820px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;position:relative;";
     node._dsWidget = node.addDOMWidget("director_skill_ui", "div", container, {
       serialize: false,
-      hideOnZoom: false
+      hideOnZoom: false,
+      canvasOnly: true
     });
+    node._dsWidget.width = undefined;
     node._dsVueApp = createApp({
       render: function () { return h(DirectorSkillApp, { node: node }); }
     });
@@ -932,12 +947,15 @@ function mountDirectorSkillNode(node) {
 
     node._dsSyncLayout = function (size) {
       var current = size || node.size || [840, 640];
+      var width = Math.max(420, (Number(current[0]) || 840) - 20);
       var height = Math.max(360, (Number(current[1]) || 640) - 96);
+      container.style.width = width + "px";
+      container.style.maxWidth = "none";
       container.style.height = height + "px";
       var host = container.parentElement;
       if (host) {
-        host.style.width = "100%";
-        host.style.maxWidth = "100%";
+        host.style.width = width + "px";
+        host.style.maxWidth = "none";
         host.style.minWidth = "0";
         host.style.boxSizing = "border-box";
         host.style.overflow = "hidden";
@@ -949,6 +967,8 @@ function mountDirectorSkillNode(node) {
       if (previousResize) previousResize.apply(this, arguments);
       this._dsSyncLayout?.(size);
     };
+    node.onResize(node.size);
+    setTimeout(function () { node._dsSyncLayout?.(node.size); }, 250);
     var previousConfigure = node.onConfigure;
     node.onConfigure = function () {
       if (previousConfigure) previousConfigure.apply(this, arguments);
@@ -1027,12 +1047,14 @@ app.registerExtension({
 
         var container = document.createElement("div");
         container.className = "eagle-director-skill-root";
-        container.style.cssText = "width:100%;max-width:100%;min-width:0;overflow:hidden;";
+        container.style.cssText = "width:820px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
 
         var domWidget = this.addDOMWidget("preview", "div", container, {
           serialize: false,
-          hideOnZoom: false
+          hideOnZoom: false,
+          canvasOnly: true
         });
+        domWidget.width = undefined;
         this._dsWidget = domWidget;
 
         var vueApp = createApp({
@@ -1050,18 +1072,21 @@ app.registerExtension({
         var syncLayout = function (target, size) {
           if (!target || !target._dsContainer) return;
           var currentSize = size || target.size || [840, 640];
+          var nodeWidth = Math.max(440, Number(currentSize[0]) || 840);
           var nodeHeight = Math.max(440, Number(currentSize[1]) || 640);
+          var width = Math.max(420, nodeWidth - 20);
           var height = Math.max(360, nodeHeight - 96);
           var root = target._dsContainer;
-          root.style.width = "100%";
-          root.style.maxWidth = "100%";
+          root.style.width = width + "px";
+          root.style.maxWidth = "none";
           root.style.minWidth = "0";
+          root.style.boxSizing = "border-box";
           root.style.height = height + "px";
           root.style.overflow = "hidden";
           var host = root.parentElement;
           if (host) {
-            host.style.width = "100%";
-            host.style.maxWidth = "100%";
+            host.style.width = width + "px";
+            host.style.maxWidth = "none";
             host.style.minWidth = "0";
             host.style.boxSizing = "border-box";
             host.style.overflow = "hidden";
@@ -1078,6 +1103,7 @@ app.registerExtension({
         };
         this.onResize(this.size);
         requestAnimationFrame(function () { this._dsSyncLayout?.(this.size); }.bind(this));
+        setTimeout(function () { this._dsSyncLayout?.(this.size); }.bind(this), 250);
 
         var previousOnConfigure = this.onConfigure;
         this.onConfigure = function () {

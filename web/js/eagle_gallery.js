@@ -2,7 +2,7 @@
  * Eagle Gallery Vue — 无限滚动懒加载 + 已选图像预览条
  */
 import { app } from "../../../scripts/app.js";
-import { createApp, h, ref, computed, onMounted } from "../lib/vue.esm-browser.js";
+import { createApp, h, ref, computed, onMounted, onBeforeUnmount } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 
 // ============================================================
@@ -238,6 +238,10 @@ var TagFilterDialog = {
   props: { visible: Boolean, tags: Array, selectedTags: Array, onClose: Function, onChange: Function, loading: Boolean },
   setup: function(props) {
     var tagQuery = ref("");
+    var groupOrder = ["人物", "身材", "身体", "头发", "面部", "服装", "姿势", "动作", "表情", "场景", "环境", "镜头", "构图", "光照", "画风", "作品 / 版权", "艺术家", "元数据", "通用 / 未细分", "Eagle / 未归类"];
+    function tagInfo(name) {
+      return (props.tags || []).find(function(item) { return item.name === name; }) || { name: name };
+    }
     function toggleTag(tagName) {
       var sels = (props.selectedTags || []).slice();
       var idx = sels.indexOf(tagName);
@@ -250,17 +254,20 @@ var TagFilterDialog = {
       var q = (tagQuery.value || "").trim().toLowerCase();
       var list = (props.tags || []).filter(function(t) {
         if (!q) return true;
-        return (t.name || "").toLowerCase().indexOf(q) >= 0;
+        return [t.name, t.cn_name, t.group].concat(t.facet_labels || []).join(" ").toLowerCase().indexOf(q) >= 0;
       });
       var groups = {};
       list.forEach(function(t) {
-        var name = t.name || "";
-        var first = name.charAt(0).toUpperCase();
-        if (!first || !/[A-Z\u4e00-\u9fa5]/.test(first)) first = "#";
-        if (!groups[first]) groups[first] = [];
-        groups[first].push(t);
+        var group = t.group || "Eagle / 未归类";
+        if (!groups[group]) groups[group] = [];
+        groups[group].push(t);
       });
-      var keys = Object.keys(groups).sort();
+      var keys = Object.keys(groups).sort(function(a, b) {
+        var ai = groupOrder.indexOf(a), bi = groupOrder.indexOf(b);
+        if (ai < 0) ai = groupOrder.length;
+        if (bi < 0) bi = groupOrder.length;
+        return ai - bi || a.localeCompare(b, "zh-CN");
+      });
       return keys.map(function(k) { return { key: k, tags: groups[k] }; });
     }
     return function() {
@@ -280,17 +287,36 @@ var TagFilterDialog = {
           ]),
           h("div", { class: "tg-sel" }, selected.length === 0 ? h("span", { class: "tg-sel-empty" }, "\u672A\u9009\u6807\u7B7E") :
             selected.map(function(t) {
-              return h("span", { class: "tg-chip", key: t, onClick: function() { toggleTag(t); } }, [t, h("b", {}, " \u2715")]);
+              var info = tagInfo(t);
+              return h("span", { class: "tg-chip", key: t, onClick: function() { toggleTag(t); } }, [
+                t,
+                info.cn_name ? h("small", {}, info.cn_name) : null,
+                h("b", {}, " \u2715")
+              ]);
             })
           ),
+          h("div", { class: "tg-summary" }, [
+            h("span", {}, `当前 ${(props.tags || []).length} 个标签`),
+            h("span", {}, `中文 ${(props.tags || []).filter(function(t) { return t.cn_name; }).length}`),
+            h("span", {}, `已细分 ${(props.tags || []).filter(function(t) { return t.taxonomy_status === "reviewed"; }).length}`),
+            h("span", { class: "tg-summary-hint" }, "中文与细分来自 Danbooru 本地词库")
+          ]),
           h("div", { class: "tg-bd" }, props.loading ? h("div", { class: "tg-loading" }, "\u52A0\u8F7D\u4E2D...") :
             groupedTags().map(function(g) {
               return h("div", { class: "tg-grp", key: g.key }, [
                 h("div", { class: "tg-grp-h" }, g.key + " (" + g.tags.length + ")"),
                 h("div", { class: "tg-list" }, g.tags.map(function(t) {
                   var active = selected.indexOf(t.name) >= 0;
-                  return h("div", { class: "tg-it" + (active ? " on" : ""), key: t.name, onClick: function() { toggleTag(t.name); } }, [
-                    h("span", { class: "tg-nm" }, t.name),
+                  return h("div", {
+                    class: "tg-it " + (t.taxonomy_status || "unmatched") + (active ? " on" : ""),
+                    key: t.name,
+                    title: (t.facet_labels || []).join("、") || "未归入已审核细分",
+                    onClick: function() { toggleTag(t.name); }
+                  }, [
+                    h("span", { class: "tg-name-stack" }, [
+                      h("span", { class: "tg-nm" }, t.name),
+                      t.cn_name ? h("span", { class: "tg-cn" }, t.cn_name) : null
+                    ]),
                     h("span", { class: "tg-cnt" }, t.count || 0)
                   ]);
                 }))
@@ -515,6 +541,7 @@ var EagleGallery = {
         if (widget) {
           widget.value = JSON.stringify({ selections: sels, output_mode: outMode.value, sequence_index: seqIdx.value });
         }
+        props.node.graph?.change?.();
       } catch (e) {}
     }
 
@@ -618,17 +645,37 @@ var EagleGallery = {
     function restoreSelection() {
       var nodeId = String(props.node.id);
       var widgetSelections = [];
+      var hasWorkflowState = false;
       try {
         var widget = (props.node.widgets || []).find(function(w) { return w.name === "selection_data"; });
         var saved = widget && widget.value;
         if (typeof saved === "string" && saved) saved = JSON.parse(saved);
         if (saved && Array.isArray(saved.selections)) {
+          hasWorkflowState = true;
           widgetSelections = saved.selections;
           applySelections(widgetSelections);
           outMode.value = saved.output_mode || outMode.value;
           seqIdx.value = saved.sequence_index || seqIdx.value;
         }
       } catch (e) {}
+
+      // A workflow may intentionally save an empty selection.  Treat any
+      // structured widget payload as authoritative and only use the process
+      // cache for legacy workflows that have no embedded state.
+      if (hasWorkflowState) {
+        fetch("/eagle_gallery/cache_selection", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            node_id: nodeId,
+            selections: widgetSelections,
+            output_mode: outMode.value,
+            selections_data: JSON.stringify({ selections: widgetSelections }),
+            sequence_index: seqIdx.value,
+          }),
+        }).catch(function() {});
+        return;
+      }
       fetch("/eagle_gallery/cache_selection?node_id=" + encodeURIComponent(nodeId))
         .then(function(r) { return r.json(); })
         .then(function(d) {
@@ -636,17 +683,22 @@ var EagleGallery = {
             applySelections(d.selections);
             outMode.value = d.output_mode || "rgb";
             seqIdx.value = d.sequence_index || 0;
-          } else if (widgetSelections.length > 0) {
-            // ComfyUI 重启后服务端内存缓存为空时，用工作流内隐藏 widget 恢复。
-            syncSelection(widgetSelections);
           }
         }).catch(function() {});
     }
+
+    props.node._eagleRestoreUiState = restoreSelection;
 
     onMounted(function() {
       loadSettings(); loadFolders(); loadMore();
       // ComfyUI 节点创建之初 id 可能还是临时 id，稍等一下再按最终 id 恢复
       setTimeout(restoreSelection, 500);
+    });
+
+    onBeforeUnmount(function() {
+      if (props.node._eagleRestoreUiState === restoreSelection) {
+        delete props.node._eagleRestoreUiState;
+      }
     });
 
     return function() {
@@ -868,23 +920,30 @@ var CSS = [
   ".eg-folder-out{flex-shrink:0;margin-right:8px;background:#2a3a2a;border-color:#4a8a5a}",
   ".eg-folder-out:hover{background:#3a4a3a;border-color:#5a9a6a}",
   /* 标签弹窗 */
-  ".tg-box{width:520px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column}",
+  ".tg-box{width:760px;max-width:92vw;max-height:84vh;display:flex;flex-direction:column}",
   ".tg-hd{display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid #333}",
   ".tg-hd .sd-inp{flex:1}",
   ".tg-clr{padding:5px 10px;font-size:11px}",
   ".tg-sel{display:flex;flex-wrap:wrap;gap:6px;min-height:34px;padding:10px 16px;border-bottom:1px solid #2a2a32;background:rgba(255,255,255,0.02)}",
   ".tg-sel-empty{font-size:11px;color:#666;align-self:center}",
   ".tg-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:12px;background:#2a3a5a;color:#c8d8ff;font-size:11px;cursor:pointer;border:1px solid #3a4a7a}",
+  ".tg-chip small{color:#9fc8bf;font-size:9px}",
   ".tg-chip:hover{background:#3a4a6a}",
+  ".tg-summary{display:flex;align-items:center;gap:12px;padding:7px 16px;border-bottom:1px solid #252b36;background:#111722;color:#8fa0b8;font-size:10px}",
+  ".tg-summary-hint{margin-left:auto;color:#6f819c}",
   ".tg-bd{flex:1;overflow:auto;padding:12px 16px;scrollbar-width:thin}",
   ".tg-loading{padding:40px;color:#777;text-align:center}",
   ".tg-grp{margin-bottom:16px}",
   ".tg-grp-h{font-size:12px;font-weight:700;color:#4a7de0;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #2a3a4a}",
-  ".tg-list{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}",
-  ".tg-it{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;border-radius:4px;background:#0e0e12;border:1px solid #2a2a32;cursor:pointer;font-size:11px;color:#bbb}",
+  ".tg-list{display:flex;flex-wrap:wrap;gap:7px}",
+  ".tg-it{display:inline-flex;justify-content:space-between;align-items:center;gap:8px;min-width:120px;max-width:245px;padding:5px 8px;border-radius:6px;background:#0e0e12;border:1px solid #2a2a32;cursor:pointer;font-size:11px;color:#bbb}",
+  ".tg-it.reviewed{border-color:#365a67;background:#102028}",
+  ".tg-it.translated{border-color:#454761;background:#171724}",
   ".tg-it:hover{background:#1a1a24;border-color:#555}",
   ".tg-it.on{background:#2a3a5a;border-color:#4a7de0;color:#fff}",
-  ".tg-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px}",
+  ".tg-name-stack{display:flex;min-width:0;flex-direction:column;line-height:1.25}",
+  ".tg-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}",
+  ".tg-cn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px;color:#9ccfc3;font-size:9px}",
   ".tg-cnt{color:#777;font-size:10px;margin-left:4px}",
   ".tg-it.on .tg-cnt{color:#aac8ff}",
   /* 设置弹窗 */
@@ -946,20 +1005,32 @@ app.registerExtension({
       }
 
       var el = document.createElement("div");
-      el.style.cssText = "width:100%;height:100%;overflow:hidden;";
+      el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;";
 
-      var widget = this.addDOMWidget("eagle_gallery", "div", el, { serialize: false });
+      var widget = this.addDOMWidget("eagle_gallery", "div", el, { serialize: false, canvasOnly: true });
+      widget.width = undefined;
 
-      // 高度应用：ComfyUI 的 DOM widget 父容器未必有确定高度，这里给 el 一个
-      // 明确的像素高度，避免内容多高容器就撑多高，导致节点无限往下增长。
-      // 宽度不设置 computeSize / 不监听 domElem，避免选择图像后触发重绘时
-      // 把宽度锁死在很小的初始值上。
-      var applyHeight = function (nodeHeight) {
+      // Percent widths can stay pinned to a DOM widget's creation-time host width.
+      // Synchronize the real node width in pixels, without introducing a computeSize
+      // feedback loop that would make the node grow on each graph measurement.
+      var applyFrame = function (size) {
+        var nodeWidth = Number(size && size[0]) || 960;
+        var nodeHeight = Number(size && size[1]) || 760;
+        var w = Math.max(320, nodeWidth - 20);
         var h = Math.max(400, nodeHeight - 100);
+        el.style.width = w + "px";
         el.style.height = h + "px";
-        return h;
+        var host = el.parentElement;
+        if (host) {
+          host.style.width = w + "px";
+          host.style.maxWidth = "none";
+          host.style.minWidth = "0";
+          host.style.boxSizing = "border-box";
+          host.style.overflow = "hidden";
+        }
+        return [w, h];
       };
-      applyHeight(this.size[1]); // 创建时立刻定死高度
+      applyFrame(this.size);
 
       var nodeRef = this;
       try {
@@ -981,8 +1052,23 @@ app.registerExtension({
       var onResize = this.onResize;
       this.onResize = function (size) {
         if (onResize) onResize.apply(this, arguments);
-        applyHeight(size[1]);
+        applyFrame(size);
+        try { nodeRef.setDirtyCanvas(true, true); } catch (e) {}
       };
+      this._egApplyFrame = applyFrame;
+      setTimeout(function () { applyFrame(nodeRef.size); }, 0);
+      setTimeout(function () { applyFrame(nodeRef.size); }, 250);
+    };
+
+    var onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      var result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+      var node = this;
+      requestAnimationFrame(function () {
+        node._egApplyFrame?.(node.size);
+        node._eagleRestoreUiState?.();
+      });
+      return result;
     };
 
     // 修复：之前完全没有 onRemoved，节点删除后 Vue 实例不会被清理，
@@ -990,6 +1076,8 @@ app.registerExtension({
     var onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
+      this._egApplyFrame = null;
+      this._eagleRestoreUiState = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

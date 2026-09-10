@@ -456,11 +456,12 @@ class DanbooruTagger:
         raw_df = self._read_csv_robust(self.csv_path)
         new_df = self._preprocess_raw_df(raw_df)
 
-        _SIG_COLS = ['cn_name', 'wiki', 'cn_core']
+        _TEXT_SIG_COLS = ['cn_name', 'wiki', 'cn_core']
+        _META_SIG_COLS = ['post_count', 'category', 'nsfw']
 
-        def _sig(df: pd.DataFrame, iloc_idx: int) -> tuple:
+        def _sig(df: pd.DataFrame, iloc_idx: int, columns: list[str]) -> tuple:
             row = df.iloc[iloc_idx]
-            return tuple(str(row.get(c, '')) for c in _SIG_COLS)
+            return tuple(str(row.get(c, '')) for c in columns)
 
         cached_idx: dict[str, int] = {n: i for i, n in enumerate(self.df['name'])}
         new_idx:    dict[str, int] = {n: i for i, n in enumerate(new_df['name'])}
@@ -469,14 +470,22 @@ class DanbooruTagger:
         deleted_names = [n for n in cached_idx if n not in new_idx]
         changed_names = [
             n for n in new_idx
-            if n in cached_idx and _sig(new_df, new_idx[n]) != _sig(self.df, cached_idx[n])
+            if n in cached_idx and _sig(new_df, new_idx[n], _TEXT_SIG_COLS)
+            != _sig(self.df, cached_idx[n], _TEXT_SIG_COLS)
+        ]
+        metadata_names = [
+            n for n in new_idx
+            if n in cached_idx and n not in changed_names
+            and _sig(new_df, new_idx[n], _META_SIG_COLS)
+            != _sig(self.df, cached_idx[n], _META_SIG_COLS)
         ]
 
-        if not added_names and not deleted_names and not changed_names:
+        if not added_names and not deleted_names and not changed_names and not metadata_names:
             log.info('data is up to date, skipping update')
             return
 
-        log.info('changes: +%s ~%s -%s', len(added_names), len(changed_names), len(deleted_names))
+        log.info('changes: +%s text~%s metadata~%s -%s', len(added_names),
+                 len(changed_names), len(metadata_names), len(deleted_names))
 
         if deleted_names:
             keep_mask = ~self.df['name'].isin(set(deleted_names))
@@ -495,6 +504,12 @@ class DanbooruTagger:
                     getattr(self, attr)[ci] = _vecs[attr][j]
                 for col in changed_rows.columns:
                     self.df.at[ci, col] = changed_rows.at[j, col]
+
+        if metadata_names:
+            for name in metadata_names:
+                ci, ni = cached_idx[name], new_idx[name]
+                for col in _META_SIG_COLS:
+                    self.df.at[ci, col] = new_df.at[ni, col]
 
         if added_names:
             added_rows = new_df[new_df['name'].isin(set(added_names))].reset_index(drop=True)

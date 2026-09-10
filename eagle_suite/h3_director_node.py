@@ -78,6 +78,88 @@ _KIND_NOUN = {
     "composition": "a composition",
 }
 
+_LEGACY_KIND_ROLE = {
+    "person": "subject_person",
+    "prop": "subject_prop",
+    "style": "style_reference",
+    "environment": "scene_reference",
+    "composition": "composition_reference",
+    "reference": "motion_reference",
+}
+
+_MEDIA_ROLE_DESCRIPTIONS = {
+    "subject_person": "a person or character identity reference",
+    "subject_animal": "an animal or creature identity reference",
+    "subject_prop": "an object, costume, or prop identity reference",
+    "scene_reference": "a scene or environment reference",
+    "style_reference": "a visual style reference",
+    "action_reference": "an action or pose reference",
+    "expression_reference": "an expression reference",
+    "composition_reference": "a composition or storyboard reference",
+    "first_frame": "the required first-frame anchor",
+    "last_frame": "the required last-frame anchor",
+    "keyframe": "a keyframe anchor",
+    "storyboard": "a storyboard or composition anchor",
+    "subject_reference": "a subject appearance reference",
+    "motion_reference": "a motion reference",
+    "camera_reference": "a camera-movement reference",
+    "rhythm_reference": "an editing rhythm and timing reference",
+    "edit_source": "a source clip to edit",
+    "continuation_source": "a source clip to continue",
+    "voice_timbre": "a speaker voice-timbre reference",
+    "music_style": "a music style reference",
+    "dialogue_content": "dialogue content to reuse",
+    "sound_effect": "a sound-effect reference",
+    "full_track": "an audio track to reuse",
+}
+
+_SUBJECT_ROLES = {
+    "subject_person", "subject_animal", "subject_prop", "subject_reference",
+}
+
+_VISIBLE_RETENTION = {
+    "fully_preserved", "partially_preserved", "attribute_transfer", "weak_reference",
+}
+_AUDIO_RETENTION = {"fully_copy", "partially_copy", "reference", "weak_reference"}
+
+
+def _default_media_role(media_type, legacy_kind=""):
+    media_type = str(media_type or "image").lower()
+    if media_type == "video":
+        return "motion_reference"
+    if media_type == "audio":
+        return "voice_timbre"
+    return _LEGACY_KIND_ROLE.get(str(legacy_kind or "person"), "subject_person")
+
+
+def _normalize_media_item(item, index=0):
+    """Normalize the Director media contract without coupling roles to socket types."""
+    source = dict(item or {})
+    media_type = str(source.get("type") or "image").lower()
+    if media_type not in _MEDIA_TAG_NAMES:
+        media_type = "image"
+    legacy_kind = str(source.get("kind") or ("person" if media_type == "image" else "reference"))
+    role = str(source.get("role") or _default_media_role(media_type, legacy_kind)).strip()
+    if role not in _MEDIA_ROLE_DESCRIPTIONS:
+        role = _default_media_role(media_type, legacy_kind)
+    retention = str(source.get("retention") or "").strip()
+    allowed_retention = _AUDIO_RETENTION if media_type == "audio" else _VISIBLE_RETENTION
+    if retention == "style_only":
+        retention = "attribute_transfer"
+    if retention not in allowed_retention:
+        retention = "reference" if media_type == "audio" else "fully_preserved"
+    source.update({
+        "id": source.get("id") or f"media-{index + 1}",
+        "type": media_type,
+        "kind": legacy_kind,
+        "role": role,
+        "purpose": str(source.get("purpose") or "").strip(),
+        "retention": retention,
+        "useEmbeddedAudio": bool(source.get("useEmbeddedAudio", False)) if media_type == "video" else False,
+        "speakerId": str(source.get("speakerId") or "").strip(),
+    })
+    return source
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # ethanfel H3 Contex Loop 兼容常量和工具
@@ -167,14 +249,18 @@ def _project_media(project):
     """Return normalized multimodal references, migrating legacy image slots in memory."""
     media = _safe_get(project, "mediaRefs", []) or []
     if isinstance(media, list) and any(isinstance(item, dict) and item.get("filename") for item in media):
-        return [item for item in media if isinstance(item, dict) and item.get("filename")]
+        return [
+            _normalize_media_item(item, index)
+            for index, item in enumerate(media)
+            if isinstance(item, dict) and item.get("filename")
+        ]
 
     legacy = _safe_get(project, "refs", []) or []
     migrated = []
     for index, item in enumerate(legacy):
         if not isinstance(item, dict) or not item.get("filename"):
             continue
-        migrated.append({
+        migrated.append(_normalize_media_item({
             "id": item.get("id") or f"legacy-image-{index + 1}",
             "type": "image",
             "filename": item.get("filename", ""),
@@ -185,7 +271,7 @@ def _project_media(project):
             "duration": 0.0,
             "trimStart": 0.0,
             "trimEnd": 0.0,
-        })
+        }, index))
     return migrated
 
 
@@ -202,9 +288,27 @@ def _numbered_media(project):
 
 
 _MEDIA_TAG_RE = re.compile(r"<(Picture|Video|Audio)\s+(-?\d+)>", re.IGNORECASE)
+_FIELD_HEADER_RE = re.compile(
+    r"(?m)^(subject_definitions|summary|retention_analysis|detailed_description|"
+    r"integrated_multimodal_description|overall_soundscape|non_diegetic_music)\s*:",
+    re.IGNORECASE,
+)
 
 
-def _build_plan_preflight(project, plan):
+def _parse_h3_timecode(value):
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2})(?:\.(\d{1,3}))?", text)
+    if not match:
+        return None
+    minutes = int(match.group(1) or 0)
+    seconds = int(match.group(2))
+    if seconds >= 60:
+        return None
+    millis = (match.group(3) or "0").ljust(3, "0")[:3]
+    return minutes * 60.0 + seconds + int(millis) / 1000.0
+
+
+def _build_plan_preflight(project, plan, source_scenes=None):
     """在进入耗时的 H3 生成链之前检查计划与素材引用。
 
     warn 只记录错误标签，strict 会阻止流水线，off 则不检查文本标签。
@@ -225,6 +329,27 @@ def _build_plan_preflight(project, plan):
         if counts[kind] > limit:
             errors.append(f"{kind} 参考素材 {counts[kind]} 个，超过端口上限 {limit} 个")
 
+    if sum(counts.values()) > 12:
+        errors.append(f"混合参考素材共 {sum(counts.values())} 个，超过 MiniMax H3 上限 12 个")
+    if counts["audio"] and not (counts["image"] or counts["video"]):
+        errors.append("音频不能单独作为 H3 参考输入；请至少添加一张参考图或一段参考视频")
+
+    mode = str(_safe_get(project, "mode", "t2v") or "t2v").lower()
+    roles = [str(item.get("role") or "") for item in media]
+    if mode == "i2v" and counts["image"] < 1:
+        errors.append("I2VA 至少需要一张首帧参考图")
+    if mode == "fl2v" and counts["image"] < 2:
+        errors.append("FL2VA 需要首帧和尾帧两张参考图")
+    if mode == "l2v" and counts["image"] < 1:
+        errors.append("L2VA 至少需要一张尾帧参考图")
+    if mode == "fl2v" and counts["image"] >= 2:
+        if "first_frame" not in roles or "last_frame" not in roles:
+            warnings.append("首尾帧模式建议分别把两张图片用途设为“首帧锚点”和“尾帧锚点”")
+    if mode == "l2v" and counts["image"] >= 1 and "last_frame" not in roles:
+        warnings.append("L2VA 建议把目标图片用途设为“尾帧锚点”")
+    if mode in ("r2v", "rv2v", "v2v") and not media:
+        errors.append("Ref2VA 模式至少需要一个参考素材")
+
     seen_names = set()
     for offset, item in enumerate(media, start=1):
         filename = str(item.get("filename") or "").strip()
@@ -232,6 +357,10 @@ def _build_plan_preflight(project, plan):
         if filename and key in seen_names:
             warnings.append(f"参考素材重复: {filename}")
         seen_names.add(key)
+        if not str(item.get("role") or "").strip():
+            errors.append(f"素材 {offset} 未指定主要用途")
+        if not str(item.get("purpose") or "").strip():
+            warnings.append(f"素材 {offset} 未填写用途说明；复杂场景建议注明绑定主体/动作/运镜/声音")
         duration = float(item.get("duration", 0.0) or 0.0)
         trim_start = float(item.get("trim_start", 0.0) or 0.0)
         trim_end = float(item.get("trim_end", duration) or 0.0)
@@ -275,13 +404,88 @@ def _build_plan_preflight(project, plan):
             errors.append(f"镜头 {offset} 的时间线起点逆序")
         previous_start = start
 
+    # Knowledge-backed prompt contract checks. These run before any sampler or
+    # loop node so an invalid plan cannot consume the expensive generation path.
+    reference_mode = mode in ("r2v", "rv2v", "v2v")
+    expected_fields = (
+        ["subject_definitions", "summary", "retention_analysis", "detailed_description",
+         "overall_soundscape", "non_diegetic_music"]
+        if reference_mode else
+        ["integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"]
+    )
+    for offset, shot in enumerate(plan.get("shots") or [], start=1):
+        prompt = str(shot.get("prompt") or "")
+        actual_fields = [match.group(1).lower() for match in _FIELD_HEADER_RE.finditer(prompt)]
+        missing = [field for field in expected_fields if field not in actual_fields]
+        if missing:
+            errors.append(f"[H3-E011] 场景 {offset} 缺少必填字段: {', '.join(missing)}")
+        present_expected = [field for field in actual_fields if field in expected_fields]
+        if present_expected != [field for field in expected_fields if field in present_expected]:
+            errors.append(f"[H3-E012] 场景 {offset} 的 H3 字段顺序不符合当前模式")
+        forbidden = (
+            {"subject_definitions", "summary", "retention_analysis", "detailed_description"}
+            if not reference_mode else {"integrated_multimodal_description"}
+        )
+        mixed = sorted(set(actual_fields) & forbidden)
+        if mixed:
+            errors.append(
+                f"[H3-E013] 场景 {offset} 混用了其他模式的字段: {', '.join(mixed)}"
+            )
+        duration = float(shot.get("duration_seconds", 0.0) or 0.0)
+        if duration < 4.0 or duration > 15.0:
+            errors.append(
+                f"[H3-E006] 场景 {offset} 时长 {duration:g}s 超出 MiniMax H3 的 4–15s 范围"
+            )
+
+    scenes = source_scenes if isinstance(source_scenes, list) else []
+    for scene_index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        duration = float(_safe_get(scene, "defaultSeconds", 10) or 10)
+        inner_shots = _safe_get(scene, "shots", []) or []
+        previous_cut = 0.0
+        for shot_index, inner in enumerate(inner_shots, start=1):
+            if not isinstance(inner, dict):
+                continue
+            estimate = float(inner.get("estSeconds", 0.0) or 0.0)
+            if estimate > 15.0:
+                errors.append(
+                    f"[H3-E006] 场景 {scene_index} / Shot {shot_index} 预估 {estimate:g}s，单镜不得超过 15s"
+                )
+            if shot_index == 1:
+                continue
+            cut = _parse_h3_timecode(inner.get("time"))
+            if cut is None:
+                errors.append(
+                    f"[H3-E005] 场景 {scene_index} / Shot {shot_index} 缺少合法切镜时间 MM:SS.mmm"
+                )
+            elif cut <= previous_cut or cut >= duration:
+                errors.append(
+                    f"[H3-E005] 场景 {scene_index} / Shot {shot_index} 切镜时间 {inner.get('time')} "
+                    f"必须严格递增且小于 {duration:g}s"
+                )
+            else:
+                previous_cut = cut
+
+    issues = []
+    for severity, entries in (("error", errors), ("warning", warnings)):
+        for message in entries:
+            code_match = re.match(r"\[([^\]]+)\]\s*", str(message))
+            issues.append({
+                "severity": severity,
+                "code": code_match.group(1) if code_match else ("H3-E000" if severity == "error" else "H3-W100"),
+                "message": re.sub(r"^\[[^\]]+\]\s*", "", str(message)),
+            })
+
     return {
+        "spec": "h3-prompt-spec@1.0",
         "ok": not errors,
         "policy": policy,
         "errors": errors,
         "warnings": warnings,
         "media_counts": counts,
         "checked_shots": len(plan.get("shots") or []),
+        "issues": issues,
     }
 
 
@@ -293,38 +497,98 @@ def _used_ref_indices(project):
 
 def build_subject_definitions(project):
     lines = []
+    subject_number = 0
     for r, number, tag_name in _numbered_media(project):
-        kind = r.get("kind", "person")
-        if r.get("type", "image") == "image":
-            noun = _KIND_NOUN.get(kind, "an image")
-        elif r.get("type") == "video":
-            noun = "a video"
-        else:
-            noun = "an audio"
+        role = r.get("role") or _default_media_role(r.get("type"), r.get("kind"))
+        description = _MEDIA_ROLE_DESCRIPTIONS.get(role, "a multimodal reference")
         name = (r.get("name") or "").strip()
-        of_name = f" of {name}" if name else ""
-        lines.append(f"  <{tag_name} {number}> is {noun}{of_name} reference.")
+        purpose = (r.get("purpose") or "").strip()
+        source_tag = f"<{tag_name} {number}>"
+        identity = name or purpose or description
+        if role in _SUBJECT_ROLES:
+            subject_number += 1
+            line = f"  <Subject {subject_number}> is {identity}, defined by {source_tag}; {description}."
+        else:
+            line = f"  {source_tag} is {description}"
+            if name:
+                line += f" named {name}"
+            line += "."
+        if purpose and purpose != name:
+            line += f" Primary use: {purpose}."
+        if r.get("type") == "video" and r.get("useEmbeddedAudio"):
+            line += " Its synchronized source audio is explicitly enabled."
+        if r.get("type") == "audio" and r.get("speakerId"):
+            line += f" Bind voice identity to ({r['speakerId']})."
+        lines.append(line)
     return "\n".join(lines)
 
 
 def build_retention(project):
     lines = []
-    image_number = 0
-    for r in _project_media(project):
-        if r.get("type", "image") != "image":
-            continue
-        image_number += 1
+    subject_number = 0
+    for r, number, tag_name in _numbered_media(project):
+        role = r.get("role") or _default_media_role(r.get("type"), r.get("kind"))
         ret = r.get("retention", "fully_preserved") or "fully_preserved"
         name = (r.get("name") or "").strip()
         name_tag = f" ({name})" if name else ""
-        line = f"  <Picture {image_number}>{name_tag}: {ret}."
-        if r.get("kind") == "person":
-            line += " Do not copy the background of the reference image; keep only the character design."
+        source_tag = f"<{tag_name} {number}>"
+        if role in _SUBJECT_ROLES:
+            subject_number += 1
+            label = f"<Subject {subject_number}> [{source_tag}]"
+        else:
+            label = source_tag
+        line = f"  {label}{name_tag}: {ret}."
+        if role in ("subject_person", "subject_animal", "subject_prop") and r.get("type") == "image":
+            line += (
+                " Background: weak_reference; do not copy the reference-image background, "
+                "keep only the declared subject design."
+            )
         lines.append(line)
     return "\n".join(lines)
 
 
-def _build_shot_blocks(shots):
+def _reference_task_summary(project):
+    """Describe one explicit Ref2VA task instead of leaving reference intent ambiguous."""
+    media = _project_media(project)
+    roles = {item.get("role") for item in media}
+    if "edit_source" in roles:
+        task = "video editing"
+    elif "continuation_source" in roles:
+        task = "video continuation"
+    elif roles & {"first_frame", "last_frame", "keyframe", "storyboard"}:
+        task = "keyframe completion"
+    elif any(item.get("type") == "audio" and item.get("retention") in {"fully_copy", "partially_copy"} for item in media):
+        task = "audio reuse"
+    elif any(item.get("type") == "audio" for item in media):
+        task = "audio reference"
+    else:
+        task = "reference generation"
+    foundation = str(_safe_get(project, "foundation", "") or "").strip()
+    if foundation.startswith("integrated_multimodal_description:"):
+        foundation = foundation.split(":", 1)[1].strip()
+    detail = foundation or "Generate the requested scene while applying each reference only to its declared primary use."
+    return f"  Task type: {task}. {detail}"
+
+
+def _strip_field_header(value, field_name):
+    """Keep user text while avoiding duplicated H3 section headers."""
+    text = str(value or "").strip()
+    pattern = rf"^\s*{re.escape(field_name)}\s*:\s*"
+    return re.sub(pattern, "", text, count=1, flags=re.IGNORECASE).strip()
+
+
+def _dialogue_language(project):
+    skill = _safe_get(project, "skill", {}) or {}
+    if not isinstance(skill, dict):
+        skill = {}
+    return str(
+        skill.get("dialogueLanguage")
+        or _safe_get(project, "dialogueLanguage", "Chinese")
+        or "Chinese"
+    ).strip() or "Chinese"
+
+
+def _build_shot_blocks(shots, include_header=True):
     if not shots:
         return ""
     lines = []
@@ -332,10 +596,14 @@ def _build_shot_blocks(shots):
         if not isinstance(s, dict):
             continue
         parts = []
-        if s.get("time"):
-            parts.append(f"At {s['time']},")
+        # Official H3 syntax omits the timestamp on Shot 1. Later shots use a
+        # strictly increasing cut time and an explicit cut verb.
+        if i > 0 and s.get("time"):
+            parts.append(f"At {s['time']}, the camera cuts to")
         if s.get("framing"):
-            parts.append(f"[{s['framing']}]")
+            parts.append(str(s["framing"]))
+        if s.get("title"):
+            parts.append(f"a shot titled {s['title']}.")
         if s.get("transitionIn"):
             parts.append(f"Transition in: {s['transitionIn']}.")
         parts.append(s.get("content") or "(no content)")
@@ -351,24 +619,39 @@ def _build_shot_blocks(shots):
             parts.append(f"Sound: {s['sound']}.")
         if s.get("transitionOut"):
             parts.append(f"Transition out: {s['transitionOut']}.")
-        lines.append(f"[Shot {i + 1}: {s.get('title') or 'untitled'}] " + " ".join(parts))
+        lines.append(f"[Shot {i + 1}] " + " ".join(parts))
     if not lines:
         return ""
-    return "detailed_description:\n  " + "\n\n  ".join(lines)
+    body = "\n\n  ".join(lines)
+    return ("detailed_description:\n  " + body) if include_header else body
 
 
-def _build_dialogue_block(dialogues):
+def _build_dialogue_block(dialogues, language="Chinese", include_header=False):
     items = []
+    speakers = {}
     for d in dialogues:
         if not isinstance(d, dict):
             continue
         role = (d.get("role") or "").strip()
         text = (d.get("text") or "").strip()
         if role and text:
-            items.append(f"  <d>[{role}] {text}</d>")
+            if role not in speakers:
+                speakers[role] = f"S{len(speakers) + 1}"
+            speaker_id = speakers[role]
+            time_code = str(d.get("time") or "").strip()
+            prefix = f"At {time_code}, " if time_code else ""
+            if d.get("voiceover"):
+                line = (
+                    f"{prefix}{role} ({speaker_id}) says in an off-screen voiceover: "
+                    f"<d>[{language}] {text}</d> while the on-screen character's lips remain completely closed."
+                )
+            else:
+                line = f"{prefix}{role} ({speaker_id}) says: <d>[{language}] {text}</d>"
+            items.append("  " + line)
     if not items:
         return ""
-    return "Dialogue:\n" + "\n".join(items)
+    body = "\n".join(items)
+    return ("Dialogue:\n" + body) if include_header else body
 
 
 def _strip_dialogue_tags(text):
@@ -406,133 +689,99 @@ def _build_body(project, scene):
         token = f"<d>[{(item.get('role') or '').strip()}] {(item.get('text') or '').strip()}</d>"
         if token not in disabled:
             dialogues.append(item)
-    dialogue = _build_dialogue_block(dialogues)
+    dialogue = _build_dialogue_block(dialogues, _dialogue_language(project))
     sections = [x for x in [preamble, detailed, dialogue] if x]
     return "\n\n".join(sections)
 
 
-def _build_alignment(project):
-    """按生成模式追加对齐/一致性指令（原型未做，v1 新增）。"""
+def _build_alignment(project, duration_seconds=0.0, shot_count=1):
+    """Return the exact leading keyframe instruction used by H3 base modes."""
     mode = _safe_get(project, "mode", "t2v")
-    used = _used_ref_indices(project)
-    if mode in ("i2v", "fl2v"):
+    images = [item for item in _project_media(project) if item.get("type") == "image"]
+    used = list(range(len(images)))
+    if mode in ("i2v", "fl2v", "l2v"):
         if not used:
             return ""
-        n = used[0] + 1
+        first_index = next((i for i, item in enumerate(images) if item.get("role") == "first_frame"), 0)
+        n = first_index + 1
         if mode == "fl2v":
+            last_index = next(
+                (i for i, item in enumerate(images) if item.get("role") == "last_frame"),
+                1 if len(images) > 1 else first_index,
+            )
+            end_time = max(0.0, float(duration_seconds or 0.0))
+            final_shot = max(1, int(shot_count or 1))
             return (
-                "alignment:\n"
-                f"  For the target video, the first and last frames must match <Picture {n}> composition and subject.\n"
-                "  How the reference pictures align with the described shots: keep subject identity and key framing."
+                "How the reference pictures align with the target video — "
+                f"Picture {n} (from Shot 1) aligns with the 0.00-second mark of the target video; "
+                f"Picture {last_index + 1} (from Shot {final_shot}) aligns with the "
+                f"{end_time:.2f}-second mark of the target video."
+            )
+        if mode == "l2v":
+            last_index = next(
+                (i for i, item in enumerate(images) if item.get("role") == "last_frame"),
+                0,
+            )
+            end_time = max(0.0, float(duration_seconds or 0.0))
+            final_shot = max(1, int(shot_count or 1))
+            return (
+                "How the reference pictures align with the target video — "
+                f"<Picture {last_index + 1}> (from [Shot {final_shot}]) aligns with the "
+                f"{end_time:.2f}-second mark of the target video."
             )
         return (
-            "alignment:\n"
-            f"  The first frame must match <Picture {n}> as the starting image.\n"
-            "  How the reference pictures align with the described shots: maintain subject and style continuity."
-        )
-    if mode in ("r2v", "rv2v"):
-        return (
-            "character_consistency:\n"
-            "  Maintain strict identity, outfit, and silhouette across all shots using the provided character references."
+            "For the target video, at 0.00 seconds into the target video, "
+            f"<Picture {n}> (from [Shot 1]) is fully referenced."
         )
     return ""
 
 
 def compile_scene_prompt(project, scene):
-    """编译单个场景为标准 H3 提示词字符串。"""
+    """Compile one scene using the exact base/Ref2VA field contract."""
     if not isinstance(project, dict):
         project = {}
     if not isinstance(scene, dict):
         scene = {}
 
-    parts = []
-    mode = (_safe_get(project, "mode", "t2v") or "t2v").upper()
-    secs = _safe_get(scene, "defaultSeconds", 10) or 10
-    aspect = _safe_get(project, "aspect", "9:16")
-    resolution = _safe_get(project, "resolution", "720p")
-    fps = _safe_get(project, "fps", 24) or 24
-
-    # 1. Task
-    parts.append(f"Task: {mode}, {secs}s, {aspect}, {resolution}, {fps}fps.")
-
-    # 2. subject_definitions
-    subj = build_subject_definitions(project)
-    if subj:
-        parts.append("subject_definitions:\n" + subj)
-
-    # 3. integrated_multimodal_description
-    foundation = _safe_get(project, "foundation", "").strip()
-    if foundation:
-        parts.append("integrated_multimodal_description:\n  " + foundation.replace("\n", "\n  "))
-
-    # 4. retention_analysis
-    ret = build_retention(project)
-    if ret:
-        parts.append("retention_analysis:\n" + ret)
-
-    # 5. 正文（preamble + 镜头块 + 台词块）
-    body = _build_body(project, scene)
-    if body:
-        parts.append(body)
-
-    # 6. overall_soundscape（仅在镜头有音效时输出，避免默认占位词污染视频）
-    shots = _safe_get(scene, "shots", []) or []
-    sounds = [s.get("sound") for s in shots if isinstance(s, dict) and s.get("sound")]
-    if sounds:
-        parts.append("overall_soundscape:\n  " + ", ".join(sounds))
-
-    # 7. non_diegetic_music（仅在全局配置了音乐时输出）
-    global_music = _safe_get(project, "globalMusic", "").strip()
-    if global_music:
-        parts.append("non_diegetic_music:\n  " + global_music.replace("\n", "\n  "))
-
-    # 模式对齐指令
-    align = _build_alignment(project)
-    if align:
-        parts.append(align)
-
-    return "\n\n".join(parts)
+    prefix = _build_global_prefix(project)
+    body = _build_scene_prompt(project, scene)
+    return "\n\n".join(item for item in (prefix, body) if item)
 
 
 def _build_global_prefix(project):
     """编译全局共享前缀（prompt_prefix），与每个 scene_prompt 拼接组成完整 prompt。"""
     parts = []
+    reference_mode = str(_safe_get(project, "mode", "t2v") or "t2v").lower() in (
+        "r2v", "rv2v", "v2v",
+    )
 
-    # subject_definitions
+    # Base modes are a three-field document per scene. Their foundation must
+    # live inside integrated_multimodal_description, not in a shared Ref2VA
+    # prefix containing subject/retention sections.
+    if not reference_mode:
+        return ""
+
+    # Ref2VA section 1: subject_definitions
     subj = build_subject_definitions(project)
-    if subj:
-        parts.append("subject_definitions:\n" + subj)
+    parts.append("subject_definitions:\n" + (subj or "  N/A"))
 
-    # integrated_multimodal_description
-    foundation = _safe_get(project, "foundation", "").strip()
-    if foundation:
-        if foundation.lstrip().startswith("integrated_multimodal_description:"):
-            parts.append(foundation)
-        else:
-            parts.append("integrated_multimodal_description:\n" + foundation)
+    # Ref2VA section 2: summary
+    parts.append("summary:\n" + _reference_task_summary(project))
 
-    # retention_analysis
+    # Ref2VA section 3: retention_analysis
     ret = build_retention(project)
-    if ret:
-        parts.append("retention_analysis:\n" + ret)
-
-    # 全局 overall_soundscape / non_diegetic_music（从 project 取，场景级会覆盖）
-    global_sound = _safe_get(project, "globalSoundscape", "").strip()
-    global_music = _safe_get(project, "globalMusic", "").strip()
-    if global_sound:
-        parts.append("overall_soundscape:\n  " + global_sound.replace("\n", "\n  "))
-    if global_music:
-        parts.append("non_diegetic_music:\n  " + global_music.replace("\n", "\n  "))
+    parts.append("retention_analysis:\n" + (ret or "  N/A"))
 
     return "\n\n".join(parts)
 
 
 def _build_scene_prompt(project, scene):
-    """编译单个场景的独有部分（不含 prompt_prefix），供 Scene Prompt Editor 展示。"""
+    """Compile the per-scene portion while preserving the mode's field order."""
     parts = []
-    detailed = _build_shot_blocks(_safe_get(scene, "shots", []) or [])
-    if detailed:
-        parts.append(detailed)
+    mode = str(_safe_get(project, "mode", "t2v") or "t2v").lower()
+    reference_mode = mode in ("r2v", "rv2v", "v2v")
+    shots = _safe_get(scene, "shots", []) or []
+    detailed_body = _build_shot_blocks(shots, include_header=False)
 
     # 台词块追加到 body（如果存在）
     disabled = set(_disabled_scene_tokens(scene))
@@ -543,27 +792,44 @@ def _build_scene_prompt(project, scene):
         token = f"<d>[{(item.get('role') or '').strip()}] {(item.get('text') or '').strip()}</d>"
         if token not in disabled:
             active_dialogues.append(item)
-    dialogue = _build_dialogue_block(active_dialogues)
-    if dialogue:
-        parts.append(dialogue)
+    dialogue = _build_dialogue_block(active_dialogues, _dialogue_language(project))
 
     # preamble（去除已有的 <d> 台词标签，避免重复）
     preamble = _strip_dialogue_tags(_active_scene_text(scene, _safe_get(scene, "preamble", "")))
-    if preamble:
-        # 放到最前面（场景前言）
-        parts.insert(0, preamble)
+    timeline_parts = [item for item in (preamble, detailed_body, dialogue) if item]
+    timeline = "\n\n".join(timeline_parts) or "N/A"
+
+    if reference_mode:
+        # Ref2VA section 4.
+        parts.append("detailed_description:\n  " + timeline.replace("\n", "\n  "))
+    else:
+        # Base modes: exact optional alignment line followed by three fields.
+        alignment = _build_alignment(
+            project,
+            _safe_get(scene, "defaultSeconds", 10) or 10,
+            len(shots) or 1,
+        )
+        if alignment:
+            parts.append(alignment)
+        foundation = _strip_field_header(
+            _safe_get(project, "foundation", ""),
+            "integrated_multimodal_description",
+        )
+        integrated = "\n\n".join(item for item in (foundation, timeline) if item)
+        parts.append("integrated_multimodal_description:\n  " + integrated.replace("\n", "\n  "))
 
     # 场景级 overall_soundscape（无默认值，避免污染 scene_prompt）
-    shots = _safe_get(scene, "shots", []) or []
     sounds = [s.get("sound") for s in shots if isinstance(s, dict) and s.get("sound")]
-    if sounds:
-        parts.append("overall_soundscape:\n  " + ", ".join(sounds))
+    global_sound = _safe_get(project, "globalSoundscape", "").strip()
+    resolved_sound = ", ".join(sounds) or global_sound
+    parts.append("overall_soundscape:\n  " + (resolved_sound or "N/A").replace("\n", "\n  "))
 
     # 场景级 non_diegetic_music：目前 UI 无 per-scene music，由 _build_global_prefix 统一输出全局音乐，
     # 此处仅当 scene 显式携带 music 字段时才覆盖，避免与 prefix 重复。
     scene_music = _safe_get(scene, "music", "").strip()
-    if scene_music:
-        parts.append("non_diegetic_music:\n  " + scene_music.replace("\n", "\n  "))
+    global_music = _safe_get(project, "globalMusic", "").strip()
+    resolved_music = scene_music or global_music
+    parts.append("non_diegetic_music:\n  " + (resolved_music or "N/A").replace("\n", "\n  "))
 
     return "\n\n".join(parts)
 
@@ -785,6 +1051,11 @@ def compile_h3_params(project, scenes, llm_hint=""):
             "type": item.get("type", "image"),
             "filename": item.get("filename", ""),
             "name": item.get("name", ""),
+            "role": item.get("role", ""),
+            "purpose": item.get("purpose", ""),
+            "retention": item.get("retention", ""),
+            "use_embedded_audio": bool(item.get("useEmbeddedAudio", False)),
+            "speaker_id": item.get("speakerId", ""),
             "duration": float(item.get("duration", 0.0) or 0.0),
             "trim_start": float(item.get("trimStart", 0.0) or 0.0),
             "trim_end": float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0),
@@ -821,6 +1092,7 @@ def compile_h3_params(project, scenes, llm_hint=""):
         compatibility["context_storage_length"] = context_storage_length
 
     plan = {
+        "spec": "h3-prompt-spec@1.0",
         "version": H3_PLAN_VERSION,
         "run_name": run_name,
         "prompt_prefix": prompt_prefix,
@@ -831,7 +1103,7 @@ def compile_h3_params(project, scenes, llm_hint=""):
         "total_delivered_frames": stitched_frames,
         "reference_media": reference_media,
     }
-    plan["preflight"] = _build_plan_preflight(project, plan)
+    plan["preflight"] = _build_plan_preflight(project, plan, scenes)
     plan["plan_hash"] = _fingerprint({
         "compatibility": compatibility,
         "reference_media": plan["reference_media"],
@@ -1107,12 +1379,18 @@ def _skill_reference_context(project, scene):
         media_type = str(item.get("type") or "image")
         name = str(item.get("name") or item.get("originalName") or item.get("filename") or "").strip()
         kind = str(item.get("kind") or "reference").strip()
+        role = str(item.get("role") or _default_media_role(media_type, kind)).strip()
+        purpose = str(item.get("purpose") or "").strip()
         retention = str(item.get("retention") or "").strip()
-        details = [media_type, kind]
+        details = [media_type, role]
         if name:
             details.append(name)
+        if purpose:
+            details.append("用途=" + purpose)
         if retention:
             details.append(retention)
+        if media_type == "video":
+            details.append("原声=" + ("启用" if item.get("useEmbeddedAudio") else "关闭"))
         lines.append(f"- {token}: " + " | ".join(details))
     if not lines:
         return "【当前场景可用参考素材】\n(无)\n"
@@ -1175,12 +1453,10 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
     format_rules = (
         "【MiniMax H3 输出规范】\n"
         f"- 所有画面、主体、动作、场景、灯光、镜头与声音描述必须统一使用 {visual_language}，不得中英混写。\n"
-        f"- <d>...</d> 内的台词文本使用 {dialogue_language}；角色名保持原设定。\n"
+        f"- 台词必须写为 <d>[{dialogue_language}] 原文</d>；角色名和稳定 (S1)/(S2) 编号写在标签外。\n"
         "- 每镜按 主体与动作 → 环境与光线 → 景别与构图 → 运镜 → 声音 的顺序写成自包含描述。\n"
-        "- camera 字段优先使用 MiniMax 原生运镜命令："
-        "[Truck left/right]、[Pan left/right]、[Push in]、[Pull out]、"
-        "[Pedestal up/down]、[Tilt up/down]、[Zoom in/out]、[Shake]、"
-        "[Tracking shot]、[Static shot]；不要自造方括号命令。\n"
+        "- camera 字段使用自然语言运镜：Truck/Pan/Push/Pull/Pedestal/Tilt/Zoom/"
+        "Arc Shot/Tracking Shot/Static Shot，必要时补充幅度与速度；不要堆叠方括号命令。\n"
         "- 原生 <Picture N>/<Video N>/<Audio N> 标签必须逐字保留，不能翻译、改号或拆开。\n"
     )
     reference_ctx = _skill_reference_context(project, scene)
@@ -1200,7 +1476,8 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
             "不要套用固定的 10 秒单镜头假设；\n"
             f"3. 每个镜头写{visual_language}描述（主体 / 动作 / 运镜 / 氛围）且自包含，"
             "不得出现“如前所述”“同上”等承接语；\n"
-            f"4. 角色台词用内联标签：<d>[角色名] {dialogue_language} 台词（简洁）</d>；\n"
+            f"4. 发声者按首次发声顺序稳定编号，例：角色名 (S1) says: "
+            f"<d>[{dialogue_language}] 简洁台词</d>；\n"
             "5. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
         )
         return _SKILL_SYSTEM, director_ctx + user
@@ -1219,7 +1496,7 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
             f"所有 estSeconds 之和约等于 {duration_label} 秒，且不得超出该场景预算；framing 用 "
             "extreme_close_up / close_up / medium_shot / cowboy_shot / full_body / wide_shot "
             f"之一或空；content、camera、action、sound 均使用 {visual_language}，"
-            "camera 中的方括号命令保持官方英文拼写。"
+            "camera 用自然语言表达运镜类型、幅度和速度。"
         )
         return _SKILL_SYSTEM, director_ctx + user
     if task == "dialogue":
@@ -1239,6 +1516,35 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
     return _SKILL_SYSTEM, ""
 
 
+def _build_skill_extraction_prompts(project, scene, source_prompt, hint=""):
+    """Build a text-only request that turns a proven reference-video prompt into a reusable Skill."""
+    source_prompt = str(source_prompt or "").strip()[:16000]
+    reference_context = _skill_reference_context(project, scene)
+    system = (
+        "You are a senior prompt-systems designer. Extract a reusable H3 Director Skill from an "
+        "existing video/image editing prompt. Generalize the method and constraints; do not copy "
+        "character names, costumes, body traits, locations, or other one-off subject facts into the "
+        "Skill. Preserve native placeholders such as <Picture N> and <Video N> as generic examples. "
+        "A Director Skill is a Markdown playbook, not a finished shot prompt. Return valid JSON only."
+    )
+    user = (
+        "【Available media roles (metadata only; media pixels are not inspected in this text pass)】\n"
+        + reference_context + "\n"
+        "【Successful/current prompt to reverse-engineer】\n" + (source_prompt or "(empty)") + "\n\n"
+        "【Optional extraction note】\n" + (str(hint or "").strip() or "(none)") + "\n\n"
+        "Return ONLY one JSON object with this schema:\n"
+        '{"name":"short Chinese name","category":"video_to_image_editing",'
+        '"tasks":["script","shots"],"tags":["video-reference","identity-lock"],'
+        '"content":"Markdown"}\n'
+        "The Markdown content must contain: Purpose, Required Inputs, Reference Ownership, "
+        "Immutable Locks, Editable Dimensions, Motion/Camera Transfer, Prompt Construction Order, "
+        "Forbidden Changes, and Validation Checklist. Explain how a reference video contributes "
+        "motion, timing, camera, pose progression, or composition while a reference image owns "
+        "identity/appearance. State an explicit fallback when either medium is absent."
+    )
+    return system, user
+
+
 def run_director_skill(project, scenes, request, api_config=None, local_model=None, director_skill=""):
     """运行导演 Skill，返回 {scene_id, preamble, dialogues, shots, transport, error}。"""
     out = {
@@ -1253,6 +1559,7 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         "batchIndex": request.get("batchIndex", 0),
         "batchTotal": request.get("batchTotal", 1),
         "mergeMode": request.get("mergeMode", "overwrite"),
+        "operation": str(request.get("operation") or "generate_scene").strip().lower(),
     }
     try:
         requested_tasks = set(request.get("tasks") or [])
@@ -1281,6 +1588,32 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
             return out
         out["scene_id"] = scene.get("id")
         out["sceneId"] = scene.get("id")
+
+        operation = out["operation"]
+        if operation == "extract_skill":
+            system_prompt, user_prompt = _build_skill_extraction_prompts(
+                project,
+                scene,
+                request.get("sourcePrompt") or _active_scene_text(scene, scene.get("preamble", "")),
+                request.get("hint", ""),
+            )
+            raw = _call_llm(kind, transport, system_prompt, user_prompt, temperature)
+            parsed = _extract_json(raw)
+            if not isinstance(parsed, dict) or not str(parsed.get("content") or "").strip():
+                out["error"] = "Skill 反推失败：模型未返回有效的 Skill JSON。"
+                return out
+            out["skillDraft"] = {
+                "name": str(parsed.get("name") or "视频参考编辑 Skill").strip(),
+                "category": str(parsed.get("category") or "video_to_image_editing").strip(),
+                "tasks": [
+                    str(item).strip() for item in (parsed.get("tasks") or ["script", "shots"])
+                    if str(item).strip() in ("script", "shots", "dialogue", "all")
+                ] or ["script", "shots"],
+                "tags": [str(item).strip() for item in (parsed.get("tags") or []) if str(item).strip()],
+                "content": str(parsed.get("content") or "").strip(),
+                "filmstrip": [],
+            }
+            return out
 
         cur = {
             "id": scene.get("id"),
@@ -1528,13 +1861,38 @@ class EagleH3DirectorNode:
             },
         }
 
-    # 导演台只输出编排数据与一个媒体包。大量媒体插槽由独立的
-    # EagleH3MediaPortsNode 展开，避免 DOM 面板被右侧端口挤压越框。
+    # 导演台只输出编排数据与一个媒体总线。参考条件路由节点直接消费
+    # media_bundle 并动态绑定官方 Ref2VA 插槽，避免 DOM 面板被大量端口挤压越框。
+    # EagleH3MediaPortsNode 仅保留给旧工作流和底层排障。
+    # 前六个端口与 MiniMax H3 Context Loop Plan 保持相同的后端数据契约。
+    # 注意：第三方 Scene Prompt Editor 的前端还会硬编码查找
+    # ``MiniMaxH3ChainPlan`` 节点及其 plan_json/run_name 控件，所以它不是
+    # 通用 H3_CHAIN_PLAN 查看器。末尾的 context_loop_plan_json 用于显式
+    # 接入真实的第三方 Plan.plan_json_input，避免把运行对象与编辑源混淆。
     RETURN_TYPES = (
-        H3_PLAN_TYPE, H3_MEDIA_BUNDLE_TYPE, "INT", "INT", "INT", "INT", "STRING", "STRING",
+        H3_PLAN_TYPE, "STRING", "INT", "INT", "INT", "INT",
+        H3_MEDIA_BUNDLE_TYPE, "STRING",
     )
-    RETURN_NAMES = ("plan", "media_bundle", "width", "height", "clip_count",
-                    "video_blend_frames", "summary", "plan_json")
+    RETURN_NAMES = (
+        "plan", "summary", "clip_count", "width", "height",
+        "video_blend_frames", "media_bundle", "context_loop_plan_json",
+    )
+    OUTPUT_TOOLTIPS = (
+        "标准 H3_CHAIN_PLAN 运行对象，可接 Eagle“循环开始”或其他通用后端消费节点。"
+        "第三方 Context Loop 网页编辑器会额外校验来源节点类型；Eagle 不会自动插入跳接节点。",
+        "计划摘要。",
+        "场景/片段数量。",
+        "生成宽度。",
+        "生成高度。",
+        "场景边界视频融合帧数。",
+        "Eagle 私有 H3_MEDIA_BUNDLE，仅用于参考条件路由或媒体端口展开。",
+        "Context Loop 可编辑 authoring JSON。只接到第三方 MiniMax H3 Context Loop Plan 的 "
+        "plan_json_input，再由该 Plan.plan 输出接 Scene Prompt Editor / Plan Studio。",
+    )
+    DESCRIPTION = (
+        "编辑并编译 MiniMax H3 多场景计划。plan 是运行数据；"
+        "context_loop_plan_json 是开放的计划 JSON，可按需手动接入第三方节点。"
+    )
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
 
@@ -1648,9 +2006,10 @@ class EagleH3DirectorNode:
             ref_videos.append(tensor)
             # MiniMax H3 把参考视频画面和其原声放在两个同编号插槽中。
             # 无音轨或当前音频后端不支持该容器时返回 None，仍可只使用画面。
-            ref_video_audios.append(_load_audio_clip(
-                item.get("filename", ""), trim_start, trim_end
-            ))
+            ref_video_audios.append(
+                _load_audio_clip(item.get("filename", ""), trim_start, trim_end)
+                if item.get("useEmbeddedAudio") else None
+            )
 
         ref_audios = []
         for item in media_refs:
@@ -1686,12 +2045,16 @@ class EagleH3DirectorNode:
             "media_mapping": media_mapping,
         }
         plan_json = export_context_loop_plan_json(plan_data)
-        return (plan_data, media_bundle, width_val, height_val,
-                clip_count, video_blend_frames_val, summary, plan_json)
+        result = (plan_data, summary, clip_count, width_val, height_val,
+                  video_blend_frames_val, media_bundle, plan_json)
+        return {
+            "ui": {"h3_context_loop_plan_json": [plan_json]},
+            "result": result,
+        }
 
 
 class EagleH3MediaPortsNode:
-    """把导演台媒体包展开为 MiniMax H3 Autogrow 所需的固定插槽。"""
+    """旧版兼容节点：把导演台媒体包展开为固定插槽。"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1711,7 +2074,14 @@ class EagleH3MediaPortsNode:
     )
     OUTPUT_IS_LIST = (True, False, False, False, False, False, False, False, False, False, False)
     FUNCTION = "execute"
-    CATEGORY = "🦅 Eagle Suite/H3 导演台"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台/诊断与兼容"
+    DEPRECATED = True
+    DESCRIPTION = (
+        "仅供旧工作流和底层排障。新工作流请直接连接"
+        "“H3 导演台.media_bundle → H3 · 参考条件路由.media_bundle”。"
+        "REF_IMAGES 与 media_mapping 作为 media_bundle 内部数据仍会被路由正常使用，"
+        "无需独立连线。"
+    )
 
     def execute(self, media_bundle):
         bundle = media_bundle if isinstance(media_bundle, dict) else {}
@@ -1729,6 +2099,302 @@ class EagleH3MediaPortsNode:
             video_slots[1], video_audio_slots[1],
             video_slots[2], video_audio_slots[2],
             audio_slots[1], audio_slots[2],
+        )
+
+
+class EagleH3MediaPortsV2Node:
+    """按视频、音频、图片分区展开导演台媒体包。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"media_bundle": (H3_MEDIA_BUNDLE_TYPE,)}}
+
+    RETURN_TYPES = (
+        "IMAGE", "IMAGE", "IMAGE",
+        "AUDIO", "AUDIO", "AUDIO",
+        "AUDIO", "AUDIO", "AUDIO",
+        "IMAGE", "STRING",
+    )
+    RETURN_NAMES = (
+        "ref_video_0", "ref_video_1", "ref_video_2",
+        "video_audio_0", "video_audio_1", "video_audio_2",
+        "ref_audio_0", "ref_audio_1", "ref_audio_2",
+        "REF_IMAGES", "media_mapping",
+    )
+    OUTPUT_IS_LIST = (
+        False, False, False,
+        False, False, False,
+        False, False, False,
+        True, False,
+    )
+    OUTPUT_TOOLTIPS = (
+        "兼容端口：视频 1 的已解码 IMAGE 帧批次，不是原生 VIDEO。",
+        "兼容端口：视频 2 的已解码 IMAGE 帧批次，不是原生 VIDEO。",
+        "兼容端口：视频 3 的已解码 IMAGE 帧批次，不是原生 VIDEO。",
+        "视频 1 原声：对应官方 ref_video_audios.ref_video_audio_0。",
+        "视频 2 原声：对应官方 ref_video_audios.ref_video_audio_1。",
+        "视频 3 原声：对应官方 ref_video_audios.ref_video_audio_2。",
+        "独立音频 1：对应官方 ref_audios.ref_audio_0。",
+        "独立音频 2：对应官方 ref_audios.ref_audio_1。",
+        "独立音频 3：对应官方 ref_audios.ref_audio_2。",
+        "全部参考图片（IMAGE 列表）。",
+        "稳定标签、素材用途与张量槽位的 JSON 映射。",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台"
+    DEPRECATED = True
+    DESCRIPTION = (
+        "旧版标准输出，仅用于已有工作流兼容。新工作流使用“H3 标准媒体桥”；"
+        "其中 ref_video_* 其实是已解码 IMAGE 帧批次，不是原生 VIDEO。"
+    )
+
+    def execute(self, media_bundle):
+        bundle = media_bundle if isinstance(media_bundle, dict) else {}
+        video_slots = (list(bundle.get("video_slots") or []) + [None, None, None])[:3]
+        video_audio_slots = (
+            list(bundle.get("video_audio_slots") or []) + [None, None, None]
+        )[:3]
+        audio_slots = (list(bundle.get("audio_slots") or []) + [None, None, None])[:3]
+        ref_images = bundle.get("ref_images") or []
+        return (
+            video_slots[0], video_slots[1], video_slots[2],
+            video_audio_slots[0], video_audio_slots[1], video_audio_slots[2],
+            audio_slots[0], audio_slots[1], audio_slots[2],
+            ref_images, bundle.get("media_mapping", "[]"),
+        )
+
+
+class EagleH3MediaPackNode:
+    """把 ComfyUI 标准媒体端口收拢为导演台媒体包。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "media_mapping": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "tooltip": (
+                        "可选 JSON 素材映射。留空时按已连接端口自动生成 "
+                        "<Picture N>/<Video N>/<Audio N> 顺序。"
+                    ),
+                }),
+            },
+            "optional": {
+                "ref_video_0": ("IMAGE",),
+                "ref_video_1": ("IMAGE",),
+                "ref_video_2": ("IMAGE",),
+                "video_audio_0": ("AUDIO",),
+                "video_audio_1": ("AUDIO",),
+                "video_audio_2": ("AUDIO",),
+                "ref_audio_0": ("AUDIO",),
+                "ref_audio_1": ("AUDIO",),
+                "ref_audio_2": ("AUDIO",),
+                "ref_images": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = (H3_MEDIA_BUNDLE_TYPE, "STRING", "INT", "INT", "INT")
+    RETURN_NAMES = (
+        "media_bundle", "media_mapping", "image_count", "video_count", "audio_count",
+    )
+    OUTPUT_TOOLTIPS = (
+        "Eagle H3 内部媒体总线，可接参考条件路由或标准媒体输出。",
+        "规范化后的素材标签与用途 JSON。",
+        "参考图片数量。",
+        "参考视频数量。",
+        "独立参考音频数量。",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台"
+    DEPRECATED = True
+    DESCRIPTION = (
+        "旧版标准输入，仅用于已有工作流兼容。新工作流使用“H3 标准媒体桥”。"
+    )
+
+    @staticmethod
+    def _split_images(value):
+        if value is None:
+            return []
+        try:
+            import torch
+            if torch.is_tensor(value) and value.ndim == 4:
+                return [value[index:index + 1] for index in range(int(value.shape[0]))]
+        except Exception:
+            pass
+        if isinstance(value, (list, tuple)):
+            return [item for item in value if item is not None]
+        return [value]
+
+    @staticmethod
+    def _normalized_mapping(raw_mapping, image_count, video_slots, audio_slots):
+        text = str(raw_mapping or "").strip()
+        if text:
+            try:
+                mapping = json.loads(text)
+            except Exception as error:
+                raise ValueError(f"media_mapping 不是有效 JSON: {error}") from error
+            if not isinstance(mapping, list) or not all(isinstance(row, dict) for row in mapping):
+                raise ValueError("media_mapping 必须是 JSON 对象数组")
+            return mapping
+
+        mapping = []
+        for index in range(image_count):
+            mapping.append({
+                "type": "image",
+                "name": f"Picture {index + 1}",
+                "role": "reference",
+                "purpose": f"<Picture {index + 1}> external reference",
+            })
+        for index, value in enumerate(video_slots):
+            if value is not None:
+                mapping.append({
+                    "type": "video",
+                    "name": f"Video {index + 1}",
+                    "role": "reference",
+                    "purpose": f"<Video {index + 1}> external reference",
+                })
+        for index, value in enumerate(audio_slots):
+            if value is not None:
+                mapping.append({
+                    "type": "audio",
+                    "name": f"Audio {index + 1}",
+                    "role": "reference",
+                    "purpose": f"<Audio {index + 1}> external reference",
+                })
+        return mapping
+
+    def execute(self, media_mapping="", ref_video_0=None, ref_video_1=None,
+                ref_video_2=None, video_audio_0=None, video_audio_1=None,
+                video_audio_2=None, ref_audio_0=None, ref_audio_1=None,
+                ref_audio_2=None, ref_images=None):
+        images = self._split_images(ref_images)
+        videos = [ref_video_0, ref_video_1, ref_video_2]
+        video_audios = [video_audio_0, video_audio_1, video_audio_2]
+        audios = [ref_audio_0, ref_audio_1, ref_audio_2]
+        mapping = self._normalized_mapping(
+            media_mapping, len(images), videos, audios
+        )
+        mapping_json = json.dumps(mapping, ensure_ascii=False)
+        bundle = {
+            "version": 1,
+            "ref_images": images,
+            "video_slots": videos,
+            "video_audio_slots": video_audios,
+            "audio_slots": audios,
+            "media_mapping": mapping_json,
+        }
+        return (
+            bundle,
+            mapping_json,
+            len(images),
+            sum(value is not None for value in videos),
+            sum(value is not None for value in audios),
+        )
+
+
+class EagleH3MediaBridgeNode:
+    """Single, clearly labelled standard-media boundary for H3 workflows."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "media_mapping": ("STRING", {
+                    "default": "", "multiline": True, "dynamicPrompts": False,
+                    "tooltip": "可选素材映射 JSON；留空时自动生成 Picture/Video/Audio 顺序。",
+                }),
+            },
+            "optional": {
+                "media_bundle": (H3_MEDIA_BUNDLE_TYPE, {
+                    "tooltip": "接导演台或参考条件链的 H3 媒体包；标准端口可按槽位覆盖它。",
+                }),
+                "reference_images": ("IMAGE", {"tooltip": "普通参考图片或 IMAGE 批次。"}),
+                "video_frames_1": ("IMAGE", {"tooltip": "参考视频 1 的已解码帧批次，不是 VIDEO 对象。"}),
+                "video_frames_2": ("IMAGE", {"tooltip": "参考视频 2 的已解码帧批次，不是 VIDEO 对象。"}),
+                "video_frames_3": ("IMAGE", {"tooltip": "参考视频 3 的已解码帧批次，不是 VIDEO 对象。"}),
+                "video_audio_1": ("AUDIO", {"tooltip": "参考视频 1 的配对原声。"}),
+                "video_audio_2": ("AUDIO", {"tooltip": "参考视频 2 的配对原声。"}),
+                "video_audio_3": ("AUDIO", {"tooltip": "参考视频 3 的配对原声。"}),
+                "reference_audio_1": ("AUDIO",),
+                "reference_audio_2": ("AUDIO",),
+                "reference_audio_3": ("AUDIO",),
+            },
+        }
+
+    RETURN_TYPES = (
+        H3_MEDIA_BUNDLE_TYPE, "IMAGE",
+        "IMAGE", "IMAGE", "IMAGE",
+        "AUDIO", "AUDIO", "AUDIO",
+        "AUDIO", "AUDIO", "AUDIO",
+        "STRING", "INT", "INT", "INT",
+    )
+    RETURN_NAMES = (
+        "media_bundle", "reference_images",
+        "video_frames_1", "video_frames_2", "video_frames_3",
+        "video_audio_1", "video_audio_2", "video_audio_3",
+        "reference_audio_1", "reference_audio_2", "reference_audio_3",
+        "media_mapping", "image_count", "video_count", "audio_count",
+    )
+    OUTPUT_IS_LIST = (
+        False, True,
+        False, False, False,
+        False, False, False,
+        False, False, False,
+        False, False, False, False,
+    )
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台"
+    DESCRIPTION = (
+        "H3 唯一推荐的标准媒体边界。既可展开导演台 media_bundle，也可把外部 "
+        "IMAGE/AUDIO 重新打包。video_frames_* 明确表示视频帧 IMAGE 批次，"
+        "避免与 ComfyUI 原生 VIDEO 对象混淆。"
+    )
+
+    def execute(self, media_mapping="", media_bundle=None, reference_images=None,
+                video_frames_1=None, video_frames_2=None, video_frames_3=None,
+                video_audio_1=None, video_audio_2=None, video_audio_3=None,
+                reference_audio_1=None, reference_audio_2=None, reference_audio_3=None):
+        source = media_bundle if isinstance(media_bundle, dict) else {}
+        source_videos = (list(source.get("video_slots") or []) + [None, None, None])[:3]
+        source_video_audio = (list(source.get("video_audio_slots") or []) + [None, None, None])[:3]
+        source_audio = (list(source.get("audio_slots") or []) + [None, None, None])[:3]
+
+        video_overrides = [video_frames_1, video_frames_2, video_frames_3]
+        video_audio_overrides = [video_audio_1, video_audio_2, video_audio_3]
+        audio_overrides = [reference_audio_1, reference_audio_2, reference_audio_3]
+        videos = [value if value is not None else source_videos[index]
+                  for index, value in enumerate(video_overrides)]
+        video_audios = [value if value is not None else source_video_audio[index]
+                        for index, value in enumerate(video_audio_overrides)]
+        audios = [value if value is not None else source_audio[index]
+                  for index, value in enumerate(audio_overrides)]
+        if reference_images is None:
+            images = list(source.get("ref_images") or [])
+        else:
+            images = EagleH3MediaPackNode._split_images(reference_images)
+
+        raw_mapping = str(media_mapping or "").strip() or source.get("media_mapping", "")
+        mapping = EagleH3MediaPackNode._normalized_mapping(
+            raw_mapping, len(images), videos, audios
+        )
+        mapping_json = json.dumps(mapping, ensure_ascii=False)
+        bundle = {
+            "version": 2,
+            "ref_images": images,
+            "video_slots": videos,
+            "video_audio_slots": video_audios,
+            "audio_slots": audios,
+            "media_mapping": mapping_json,
+        }
+        return (
+            bundle, images or [None],
+            videos[0], videos[1], videos[2],
+            video_audios[0], video_audios[1], video_audios[2],
+            audios[0], audios[1], audios[2], mapping_json,
+            len(images), sum(value is not None for value in videos),
+            sum(value is not None for value in audios),
         )
 
 
@@ -1855,7 +2521,11 @@ async def upload_media(request):
                 "originalName": original_name,
                 "name": "",
                 "kind": "person" if media_type == "image" else "reference",
-                "retention": "fully_preserved",
+                "role": _default_media_role(media_type, "person" if media_type == "image" else "reference"),
+                "purpose": "",
+                "retention": "reference" if media_type == "audio" else "fully_preserved",
+                "useEmbeddedAudio": False,
+                "speakerId": "",
                 "duration": round(duration, 4),
                 "trimStart": 0.0,
                 "trimEnd": round(duration, 4),
@@ -1984,4 +2654,9 @@ async def ref_proxy(request):
         return web.Response(status=500)
 
 
-__all__ = ["EagleH3DirectorNode"]
+__all__ = [
+    "EagleH3DirectorNode",
+    "EagleH3MediaBridgeNode",
+    "H3_MEDIA_BUNDLE_TYPE",
+    "H3_PLAN_TYPE",
+]

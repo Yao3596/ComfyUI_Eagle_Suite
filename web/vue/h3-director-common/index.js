@@ -34,7 +34,7 @@ function dims(aspect, res) {
     return [h, h];
 }
 
-export const H3DirectorApp = defineComponent({
+const H3DirectorApp = defineComponent({
     name: "H3DirectorApp",
     components: { PlanPanel, EditorPanel, ShotSequence, PromptPreview },
     props: {

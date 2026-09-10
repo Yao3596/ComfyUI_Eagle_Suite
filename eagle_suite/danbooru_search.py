@@ -17,12 +17,14 @@ Danbooru 标签语义搜索 + 图库浏览节点（后端）
 import os
 import io
 import csv
+import fnmatch
 import json
 import re
 import random
 import math
 import time
 import asyncio
+import threading
 import traceback
 import ipaddress
 from collections import deque
@@ -35,6 +37,10 @@ from aiohttp import web
 
 from .route_registry import route
 from .logger import logger
+from .danbooru_library import (
+    Library, FACETS, PoliteClient, bootstrap as bootstrap_library,
+    sync as sync_library, translation_prompt,
+)
 
 # ────────────────────────────────────────────────────────────────────────────
 # 路径与全局状态
@@ -47,7 +53,13 @@ ENGINE_DIR = os.path.join(NODE_DIR, "danbooru_engine")
 TAGS_CSV_PATH = os.path.join(ENGINE_DIR, "origin_database", "tags_enhanced.csv")
 TAG_METADATA_PATH = os.path.join(ENGINE_DIR, "tags_embedding", "tags_metadata.parquet")
 EMBEDDING_CACHE_DIR = os.path.join(ENGINE_DIR, "tags_embedding")
+SEMANTIC_CATALOG_PATH = os.path.join(EMBEDDING_CACHE_DIR, "semantic_catalog.csv")
 COOCCURRENCE_PATH = os.path.join(ENGINE_DIR, "origin_database", "cooccurrence_clean.parquet")
+LIBRARY_DIR = os.path.join(ENGINE_DIR, "library")
+LIBRARY_PATH = os.path.join(LIBRARY_DIR, "tags.sqlite3")
+_library_job_lock = threading.Lock()
+_library_stop = threading.Event()
+_library_job = {"running": False, "message": "尚未运行"}
 
 DANBOORU_BASE = "https://danbooru.donmai.us"
 PAGE_LIMIT = 40
@@ -59,12 +71,17 @@ _tag_embeddings = None        # np.ndarray  (N, dim)
 _tag_translations = None      # { tag: cn_name }
 _tag_catalog = None           # 标签数据文件中的轻量元数据（抽卡使用，不加载模型）
 _gacha_buckets = None         # {prompt_kind: [catalog row]}
+_gacha_catalog_source = None  # sqlite / csv / parquet (reported to the UI)
 _selection_cache = {}         # { node_id: {selections, selected_tags, ...} }
 _engine = None                # danbooru_engine.core.engine.DanbooruTagger
 _engine_lock = None
+_semantic_catalog_lock = threading.Lock()
+_semantic_catalog_dirty = True
+_semantic_catalog_info = {}
 _danbooru_session = None
 _gacha_counter = 0
 _gacha_history = deque(maxlen=300)
+_model_release_seen = deque(maxlen=100)
 
 GACHA_RULE_CARDS = [
     {"name": "放学后的教室", "hints": ("school", "uniform", "student", "serafuku"), "tags": {
@@ -116,7 +133,7 @@ GACHA_RULE_CARDS = [
 # ────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_SETTINGS = {
-    "_config_version": 4,
+    "_config_version": 10,
     # 通用
     "tag_display_language": "bilingual",
     "group_output_tags": True,
@@ -131,12 +148,24 @@ DEFAULT_SETTINGS = {
     "hide_ai": True,
     "proxy_url": "",
     "api_base_url": DANBOORU_BASE,
+    # 词库同步是单线程元数据读取。短间隔负责限速，周期性长休息
+    # 进一步平滑首次全量同步；不会伪装浏览器或更换身份。
+    "library_request_interval": 3.0,
+    "library_request_jitter": 1.0,
+    "library_pause_every_pages": 25,
+    "library_pause_seconds": 15.0,
+    "library_refresh_days": 30,
     # 搜索与匹配
     "search_mode": "hybrid",
     "search_top_k": 80,
     "search_result_limit": 80,
     "search_popularity_weight": 0.15,
     "search_tag_types": ["General", "Artist", "Copyright", "Character", "Meta"],
+    # The vector index combines the bundled seed with a bounded, quality-first
+    # slice of tags.sqlite3. Direct SQLite lookup still covers the complete DB.
+    "semantic_use_library": True,
+    "semantic_library_limit": 60000,
+    "semantic_library_min_post_count": 100,
     # 总开关：关闭时 Danbooru 节点绝不会加载本地生成模型或请求 LLM API。
     "enable_model_calls": False,
     # 抽卡默认直接使用标签数据文件，不加载模型，也不要求选择图片。
@@ -145,6 +174,29 @@ DEFAULT_SETTINGS = {
         "outfit": 2, "action": 2, "expression": 1, "scene": 2,
         "environment": 2, "composition": 1, "lighting": 1,
     },
+    "gacha_facet_counts": {},  # Nonzero fine-grained quotas replace broad quotas.
+    # 智能模式只让用户表达密度和意图，不要求逐类填写精确数量。
+    # 精确数量仍保留为高级/复现模式，兼容旧设置。
+    "gacha_allocation_mode": "smart",
+    "gacha_density": "balanced",
+    "gacha_category_modes": {
+        "outfit": "auto", "action": "auto", "expression": "auto", "scene": "auto",
+        "environment": "auto", "composition": "auto", "lighting": "auto",
+    },
+    "gacha_facet_modes": {},
+    # Multi-select coarse facet preferences. They bias category planning; the
+    # individual facet chips remain the precise prefer/required/off controls.
+    "gacha_facet_group_preferences": ["styling"],
+    "gacha_model_planning": True,
+    # 0=general, 1=sensitive, 2=questionable, 3=explicit. This controls
+    # local draw eligibility independently from the online gallery filter.
+    "gacha_content_level": 0,
+    # none=dont add held objects, daily=non-weapon props, weapon=weapons only,
+    # any=unrestricted. Clothing/body interactions are separate from holding.
+    "gacha_holding_mode": "none",
+    "gacha_avoid_holding": True,  # legacy migration/read compatibility
+    "gacha_excluded_tags": "",
+    "library_model_provider": "comfyui_model",
     "gacha_avoid_duplicates": True,
     "gacha_seed": -1,
     "gacha_online_query": "",
@@ -180,6 +232,20 @@ def load_settings():
             source_version = 0
         if source_version < 3 and str(data.get("gacha_provider") or "rules") == "rules":
             merged["gacha_provider"] = "database"
+        def positive_quota(value):
+            try:
+                return int(value or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        if source_version < 6 and any(
+            positive_quota(value) for value in (data.get("gacha_facet_counts") or {}).values()
+        ):
+            # An old non-zero fine quota was an explicit request to replace
+            # broad quotas. Preserve that intent instead of silently treating
+            # the numbers as smart-mode preferences.
+            merged["gacha_allocation_mode"] = "exact"
+        if source_version < 8 and "gacha_holding_mode" not in data:
+            merged["gacha_holding_mode"] = "none" if data.get("gacha_avoid_holding", True) else "any"
         merged["_config_version"] = DEFAULT_SETTINGS["_config_version"]
     except Exception as error:
         logger.warning(f"[DanbooruSearch] 读取设置失败 {SETTINGS_PATH}: {error}")
@@ -377,8 +443,124 @@ def _load_tag_catalog():
     return catalog
 
 
+_SEMANTIC_CATEGORY_CODES = {
+    "general": 0, "artist": 1, "copyright": 3, "character": 4, "meta": 5,
+}
+
+
+def _semantic_csv_row(item):
+    """Normalize a CSV/SQLite record to the embedding engine's seed schema."""
+    category = item.get("category", "general")
+    try:
+        category_code = int(category)
+    except (TypeError, ValueError):
+        category_code = _SEMANTIC_CATEGORY_CODES.get(str(category or "general").lower(), 0)
+    nsfw = item.get("nsfw")
+    if nsfw is None:
+        nsfw_value = ""
+    else:
+        nsfw_value = "1" if str(nsfw).strip().lower() in {"1", "true", "adult", "questionable", "explicit"} else "0"
+    return {
+        "name": str(item.get("tag") or item.get("name") or "").strip(),
+        "cn_name": str(item.get("cn_name") or "").strip(),
+        "wiki": str(item.get("wiki") or "").strip(),
+        "post_count": max(0, int(item.get("post_count") or item.get("count") or 0)),
+        "category": category_code,
+        "nsfw": nsfw_value,
+    }
+
+
+def _prepare_semantic_catalog(settings=None, force=False):
+    """Materialize a bounded SQLite+CSV source for the persistent vector index."""
+    global _semantic_catalog_dirty, _semantic_catalog_info
+    settings = settings or load_settings()
+    use_library = bool(settings.get("semantic_use_library", True))
+    if not use_library or not os.path.isfile(LIBRARY_PATH):
+        _semantic_catalog_info = {
+            "source": "csv", "path": TAGS_CSV_PATH,
+            "rows": len(_load_tag_catalog()), "database_rows": 0,
+        }
+        _semantic_catalog_dirty = False
+        return TAGS_CSV_PATH
+
+    if not force and not _semantic_catalog_dirty and os.path.isfile(SEMANTIC_CATALOG_PATH):
+        return SEMANTIC_CATALOG_PATH
+
+    with _semantic_catalog_lock:
+        if not force and not _semantic_catalog_dirty and os.path.isfile(SEMANTIC_CATALOG_PATH):
+            return SEMANTIC_CATALOG_PATH
+        limit = max(1000, min(250000, int(settings.get("semantic_library_limit", 60000) or 60000)))
+        minimum = max(0, int(settings.get("semantic_library_min_post_count", 100) or 0))
+        library = Library(LIBRARY_PATH)
+        database_rows = library.semantic_catalog(limit, minimum)
+        seed_rows = _load_tag_catalog()
+
+        # SQLite has the freshest counts, translations and approved annotations.
+        # CSV remains a fill source when the database is new or only partly synced.
+        merged = {}
+        for raw in database_rows:
+            row = _semantic_csv_row(raw)
+            if row["name"]:
+                merged[row["name"]] = row
+        for raw in seed_rows:
+            row = _semantic_csv_row(raw)
+            if not row["name"]:
+                continue
+            existing = merged.get(row["name"])
+            if existing is not None:
+                for key in ("cn_name", "wiki", "nsfw"):
+                    if existing.get(key) in {"", None} and row.get(key) not in {"", None}:
+                        existing[key] = row[key]
+                continue
+            if len(merged) < limit:
+                merged[row["name"]] = row
+
+        os.makedirs(EMBEDDING_CACHE_DIR, exist_ok=True)
+        temporary = SEMANTIC_CATALOG_PATH + ".tmp"
+        fields = ("name", "cn_name", "wiki", "post_count", "category", "nsfw")
+        with open(temporary, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(list(merged.values())[:limit])
+        os.replace(temporary, SEMANTIC_CATALOG_PATH)
+        revision = library.semantic_revision()
+        _semantic_catalog_info = {
+            "source": "sqlite+csv", "path": SEMANTIC_CATALOG_PATH,
+            "rows": min(len(merged), limit), "database_rows": len(database_rows),
+            "seed_rows": len(seed_rows), "limit": limit, "min_post_count": minimum,
+            "revision": revision, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _semantic_catalog_dirty = False
+        logger.info(
+            f"[DanbooruSearch] 语义索引数据源已合并：{_semantic_catalog_info['rows']} 条 "
+            f"(SQLite 候选 {len(database_rows)}，CSV 种子 {len(seed_rows)})"
+        )
+        return SEMANTIC_CATALOG_PATH
+
+
+def _load_gacha_catalog(settings=None):
+    """Load runtime draw rows from SQLite; bundled files are fallback seeds."""
+    global _gacha_catalog_source
+    settings = settings or load_settings()
+    try:
+        minimum = max(0, int(settings.get("gacha_min_post_count", 5000)))
+    except (TypeError, ValueError):
+        minimum = 5000
+    if os.path.isfile(LIBRARY_PATH):
+        try:
+            rows = Library(LIBRARY_PATH).gacha_catalog(minimum, 100000)
+            if rows:
+                _gacha_catalog_source = "sqlite"
+                return rows
+        except Exception as error:
+            logger.warning(f"[DanbooruSearch] SQLite 抽卡池读取失败，回退随附词表: {error}")
+    rows = _load_tag_catalog()
+    _gacha_catalog_source = "csv" if os.path.isfile(TAGS_CSV_PATH) else "parquet"
+    return rows
+
+
 def _load_tag_translations():
-    """从标签目录建立 ``{tag: 中文译名}``，与抽卡共用一次文件读取。"""
+    """Build translations from the seed and overlay the fresher SQLite library."""
     global _tag_translations
     if _tag_translations is None:
         _tag_translations = {
@@ -386,6 +568,11 @@ def _load_tag_translations():
             for item in _load_tag_catalog()
             if item.get("tag")
         }
+        if os.path.isfile(LIBRARY_PATH):
+            try:
+                _tag_translations.update(Library(LIBRARY_PATH).translation_map())
+            except Exception as error:
+                logger.warning(f"[DanbooruSearch] SQLite 中文标签读取失败，继续使用随附译名: {error}")
     return _tag_translations
 
 
@@ -452,6 +639,64 @@ def _load_model():
     logger.info(f"[DanbooruSearch] 加载 BGE-M3 模型: {source} (device={device})")
     _model = SentenceTransformer(source, device=device)
     return _model
+
+
+def _probe_semantic_model(model_path="", proxy_url=""):
+    """Load one encoder and verify finite normalized Chinese/English vectors."""
+    from sentence_transformers import SentenceTransformer
+
+    source = _resolve_model_source(model_path) if str(model_path or "").strip() else "BAAI/bge-m3"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    active = _engine if (_engine is not None and getattr(_engine, "is_loaded", False)
+                         and str(getattr(_engine, "model_path", "")) == str(source)) else None
+    model = getattr(active, "model", None)
+    owned = model is None
+    keys = ("HTTP_PROXY", "HTTPS_PROXY")
+    previous = {key: os.environ.get(key) for key in keys}
+    started = time.time()
+    try:
+        if proxy_url:
+            for key in keys:
+                os.environ[key] = proxy_url
+        if model is None:
+            model = SentenceTransformer(source, device=device)
+        vectors = model.encode(
+            ["在室外", "outdoors", "室内"],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        ).astype(np.float32)
+        if vectors.ndim != 2 or vectors.shape[0] != 3 or vectors.shape[1] < 8:
+            raise RuntimeError("模型没有返回有效的批量文本向量")
+        if not np.isfinite(vectors).all():
+            raise RuntimeError("模型向量包含 NaN 或无穷值")
+        norms = np.linalg.norm(vectors, axis=1)
+        if not np.allclose(norms, 1.0, atol=0.05):
+            raise RuntimeError("模型未能产生可用于余弦检索的归一化向量")
+        return {
+            "passed": True,
+            "model": str(source),
+            "device": device,
+            "dimension": int(vectors.shape[1]),
+            "bilingual_similarity": round(float(vectors[0] @ vectors[1]), 4),
+            "contrast_similarity": round(float(vectors[0] @ vectors[2]), 4),
+            "seconds": round(time.time() - started, 2),
+        }
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if owned:
+            try:
+                del model
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
 
 def _load_tag_database():
@@ -590,19 +835,27 @@ def _load_engine_with_proxy(engine, proxy_url):
 
 async def _get_search_engine():
     """懒加载项目自带的多视图 embedding 引擎，避免节点启动时占用模型资源。"""
-    global _engine, _engine_lock
-    if _engine is not None and getattr(_engine, "is_loaded", False):
+    global _engine, _engine_lock, _semantic_catalog_dirty
+    if (_engine is not None and getattr(_engine, "is_loaded", False)
+            and not _semantic_catalog_dirty):
         return _engine
     if _engine_lock is None:
         _engine_lock = asyncio.Lock()
 
     async with _engine_lock:
-        if _engine is not None and getattr(_engine, "is_loaded", False):
+        if (_engine is not None and getattr(_engine, "is_loaded", False)
+                and not _semantic_catalog_dirty):
             return _engine
+
+        if _semantic_catalog_dirty and _engine is not None:
+            # Avoid keeping the stale four-view matrices alive while the
+            # refreshed SQLite+CSV index is loaded.
+            _unload_semantic_models()
 
         from .danbooru_engine.core.engine import DanbooruTagger
 
         settings = load_settings()
+        catalog_path = await asyncio.to_thread(_prepare_semantic_catalog, settings)
         model_path = (settings.get("model_path") or "").strip()
         if not model_path:
             _repair_incomplete_bge_cache()
@@ -611,7 +864,7 @@ async def _get_search_engine():
             model_path = _resolve_model_source(model_path)
         engine = DanbooruTagger(
             model_path=model_path,
-            csv_file=TAGS_CSV_PATH,
+            csv_file=catalog_path,
             cache_dir=EMBEDDING_CACHE_DIR,
             cooc_file=COOCCURRENCE_PATH,
         )
@@ -628,6 +881,7 @@ async def _get_search_engine():
                 "请检查设置中的本地模型路径/代理，或稍后重试。"
             ) from error
         _engine = engine
+        _semantic_catalog_dirty = False
         return _engine
 
 
@@ -693,7 +947,23 @@ def _direct_catalog_search(query, category="all", show_nsfw=False, limit=80, pop
             "nsfw": "1" if item.get("nsfw") else "0",
         }))
     ranked.sort(key=lambda pair: (-pair[0], -pair[1]["count"], pair[1]["tag"]))
-    return [item for _, item in ranked[:max(1, int(limit))]]
+    results = [item for _, item in ranked[:max(1, int(limit))]]
+    if os.path.isfile(LIBRARY_PATH):
+        library_rows = Library(LIBRARY_PATH).search(query, category, show_nsfw, limit)
+        by_name = {item["tag"]: item for item in results}
+        for item in library_rows:
+            if allowed_types and item["category"] not in allowed_types:
+                continue
+            facets = item.get("facets", [])
+            by_name[item["tag"]] = {
+                "tag": item["tag"], "cn_name": item["cn_name"], "category": item["category"],
+                "kind": FACETS[facets[0]][1] if facets else _classify_tag_kind(item["tag"], item["cn_name"], item["category"]),
+                "facets": facets, "count": item["post_count"], "source": "direct",
+                "score": 1.0 if item["tag"] == query else 0.8, "layer": "本地扩展词库",
+                "wiki": item["wiki"], "nsfw": "1" if item["nsfw"] else "0",
+            }
+        results = sorted(by_name.values(), key=lambda item: (-item["score"], -item["count"], item["tag"]))[:limit]
+    return results
 
 
 async def _search_with_engine(query, search_mode, category, show_nsfw):
@@ -811,7 +1081,7 @@ async def route_search(request):
         strategy = str(settings.get("search_mode") or "hybrid")
         limit = max(10, min(200, int(settings.get("search_result_limit", 80))))
         popularity = max(0.0, min(1.0, float(settings.get("search_popularity_weight", 0.15))))
-        direct = _direct_catalog_search(query, category, show_nsfw, limit, popularity) if strategy in {"direct", "hybrid"} else []
+        direct = await asyncio.to_thread(_direct_catalog_search, query, category, show_nsfw, limit, popularity) if strategy in {"direct", "hybrid"} else []
         semantic, semantic_keywords = [], []
         if strategy in {"semantic", "hybrid"}:
             try:
@@ -837,10 +1107,26 @@ async def route_search(request):
             results = sorted(merged.values(), key=lambda item: (-float(item.get("score", 0)), -int(item.get("count", 0))))[:limit]
             keywords = semantic_keywords or _tokenize_query(query)
 
+        if os.path.isfile(LIBRARY_PATH):
+            metadata = dict(await asyncio.to_thread(_library_lookup, [item["tag"] for item in results]))
+            results = [item for item in results if not metadata.get(item["tag"], {}).get("deprecated")
+                       and (show_nsfw or metadata.get(item["tag"], {}).get("nsfw", 0) == 0)]
+            for item in results:
+                entry = metadata.get(item["tag"], {})
+                if entry.get("cn_name"):
+                    item["cn_name"] = entry["cn_name"]
+                item["facets"] = entry.get("facets", [])
+                item["facet_labels"] = {key: FACETS[key][0] for key in item["facets"]}
         return web.json_response({
             "success": True,
             "results": results,
             "keywords": keywords,
+            "data_source": {
+                "strategy": strategy,
+                "direct": "sqlite+csv" if os.path.isfile(LIBRARY_PATH) else "csv",
+                "semantic": (_semantic_catalog_info.get("source") if semantic else ""),
+                "semantic_rows": int(_semantic_catalog_info.get("rows") or 0),
+            },
         })
     except Exception as e:
         traceback.print_exc()
@@ -915,6 +1201,10 @@ async def route_translate_batch(request):
         for tag in tags:
             result[tag] = translations.get(tag, "")
 
+        if os.path.isfile(LIBRARY_PATH):
+            for tag, item in await asyncio.to_thread(_library_lookup, tags):
+                result[tag] = item.get("cn_name") or result.get(tag, "")
+
         return web.json_response({"success": True, "translations": result})
     except Exception as e:
         traceback.print_exc()
@@ -929,9 +1219,13 @@ async def route_posts(request):
         page = max(1, int(data.get("page", 1)))
         limit = max(1, min(200, int(data.get("limit", PAGE_LIMIT))))
         rating_filter = data.get("rating_filter", "general")
+        sort_order = str(data.get("sort_order") or "id_desc")
+        min_score = max(0, min(1000000, int(data.get("min_score") or 0)))
+        min_favorites = max(0, min(1000000, int(data.get("min_favorites") or 0)))
 
         posts, has_more = await asyncio.to_thread(
-            _fetch_posts, tags, page, limit, rating_filter, True
+            _fetch_posts, tags, page, limit, rating_filter, True,
+            sort_order, min_score, min_favorites,
         )
         return web.json_response({
             "success": True,
@@ -946,7 +1240,38 @@ async def route_posts(request):
         return web.json_response({"success": False, "error": str(e)})
 
 
-def _fetch_posts(tags, page, limit, rating_filter, include_page_info=False):
+@route("POST", "/danbooru_search/api/pools")
+async def route_pools(request):
+    """Search series/collection pools on demand; never bulk-sync community data."""
+    try:
+        data = await request.json()
+        query = re.sub(r"\s+", "_", str(data.get("query") or "").strip())[:100]
+        category = str(data.get("category") or "series")
+        if not query:
+            return web.json_response({"success": True, "pools": []})
+        params = {
+            "limit": max(1, min(50, int(data.get("limit") or 20))),
+            "search[name_matches]": f"*{query}*",
+            "search[is_deleted]": "false",
+            "search[order]": "post_count",
+        }
+        if category in {"series", "collection"}:
+            params["search[category]"] = category
+        raw = await asyncio.to_thread(_danbooru_get, "/pools.json", params, 20)
+        pools = [{
+            "id": item.get("id"),
+            "name": item.get("name") or "",
+            "category": item.get("category") or "",
+            "post_count": int(item.get("post_count") or 0),
+        } for item in raw if isinstance(item, dict) and item.get("id") and not item.get("is_deleted")]
+        return web.json_response({"success": True, "pools": pools})
+    except Exception as error:
+        traceback.print_exc()
+        return web.json_response({"success": False, "error": str(error)})
+
+
+def _fetch_posts(tags, page, limit, rating_filter, include_page_info=False,
+                 sort_order="id_desc", min_score=0, min_favorites=0):
     settings = load_settings()
 
     tag_parts = tags.split() if tags else []
@@ -961,6 +1286,17 @@ def _fetch_posts(tags, page, limit, rating_filter, include_page_info=False):
         }
         if rating_filter in rating_map:
             tag_parts.append(rating_map[rating_filter])
+
+    # These are official Danbooru metatags. Do not duplicate an advanced
+    # expression the user already typed into the search field.
+    allowed_orders = {"id_desc", "score", "favcount", "random"}
+    sort_order = sort_order if sort_order in allowed_orders else "id_desc"
+    if sort_order != "id_desc" and not any(part.startswith("order:") for part in tag_parts):
+        tag_parts.append("order:" + sort_order)
+    if min_score and not any(part.startswith("score:") for part in tag_parts):
+        tag_parts.append(f"score:>={max(0, min(1000000, int(min_score)))}")
+    if min_favorites and not any(part.startswith("favcount:") for part in tag_parts):
+        tag_parts.append(f"favcount:>={max(0, min(1000000, int(min_favorites)))}")
 
     params = {
         "tags": " ".join(tag_parts),
@@ -1070,12 +1406,20 @@ async def route_get_settings(request):
 
 @route("POST", "/danbooru_search/settings")
 async def route_post_settings(request):
+    global _semantic_catalog_dirty
     try:
         data = await request.json()
         previous = load_settings()
         settings = save_settings(data)
         # 改了模型路径 → 下次搜索重新加载
-        if settings.get("model_path") != previous.get("model_path"):
+        semantic_keys = {
+            "semantic_use_library", "semantic_library_limit",
+            "semantic_library_min_post_count",
+        }
+        catalog_changed = any(settings.get(key) != previous.get(key) for key in semantic_keys)
+        if settings.get("model_path") != previous.get("model_path") or catalog_changed:
+            if catalog_changed:
+                _semantic_catalog_dirty = True
             _unload_semantic_models()
         public_settings = dict(settings)
         public_settings["api_key_set"] = bool(public_settings.get("danbooru_api_key"))
@@ -1098,13 +1442,533 @@ def _file_status(path):
 
 
 def _tag_data_status():
+    library = {}
+    if os.path.isfile(LIBRARY_PATH):
+        try:
+            library = Library(LIBRARY_PATH).semantic_revision()
+        except Exception as error:
+            library = {"error": str(error)}
     return {
         "tags": _file_status(TAGS_CSV_PATH),
         "cooccurrence": _file_status(COOCCURRENCE_PATH),
+        "library": {**_file_status(LIBRARY_PATH), **library},
+        "semantic_catalog": {**_file_status(SEMANTIC_CATALOG_PATH), **_semantic_catalog_info},
+        "semantic_embeddings": _file_status(os.path.join(EMBEDDING_CACHE_DIR, "danbooru_multiview_embeddings.safetensors")),
         "translations_in_memory": len(_tag_translations or {}),
         "catalog_in_memory": len(_tag_catalog or []),
         "engine_loaded": bool(_engine is not None and getattr(_engine, "is_loaded", False)),
+        "semantic_catalog_dirty": bool(_semantic_catalog_dirty),
     }
+
+
+def _library_lookup(tags):
+    return Library(LIBRARY_PATH).lookup(tags).items()
+
+
+def _library_model(rows, settings):
+    """Explicit batch action only. Never fall back to another paid/local model."""
+    if not settings.get("enable_model_calls"):
+        raise ValueError("请先开启模型调用总开关，并保存模型配置")
+    # Older settings files may contain an explicit null from before this field
+    # existed. Treat it like a missing value instead of reporting an unsupported
+    # provider.
+    provider = str(settings.get("library_model_provider") or "comfyui_model")
+    system, prompt = translation_prompt(rows)
+    if provider == "comfyui_model":
+        from .local_llm_node import generate_local_text
+        model = settings.get("gacha_comfy_model", "")
+        if not model:
+            raise ValueError("请在模型设置选择 ComfyUI 本地生成模型")
+        if settings.get("exclusive_model_memory", True):
+            _unload_semantic_models()
+        content = generate_local_text(model, system, prompt,
+            device=settings.get("gacha_comfy_device", "auto"), dtype=settings.get("gacha_comfy_dtype", "bf16"),
+            max_new_tokens=4096, temperature=0.1, top_p=0.95)
+    elif provider in {"api_profile", "local_openai"}:
+        import requests
+        key = ""
+        if provider == "api_profile":
+            from . import api_config_manager as cm
+            profile_name = settings.get("gacha_api_profile", "")
+            if not profile_name:
+                raise ValueError("请明确选择 LLM Profile；词库翻译不自动使用活动配置")
+            profile = cm.get_profile(profile_name)
+            if cm.normalize_model_type(profile.get("model_type"), profile.get("model", "")) != cm.MODEL_TYPE_LLM:
+                raise ValueError("Profile 必须是 LLM 类型")
+            base, model = profile.get("base_url", ""), profile.get("model", "")
+            key = cm.decode_api_key(profile.get("api_key", ""))
+        else:
+            base, model = settings.get("gacha_local_url", ""), settings.get("gacha_local_model", "")
+        if not base or not model:
+            raise ValueError("模型地址或名称为空")
+        endpoint = base.rstrip("/")
+        if not endpoint.endswith("/chat/completions"):
+            endpoint += "/chat/completions"
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        response = requests.post(endpoint, headers=headers, timeout=(10, 120), json={
+            "model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "temperature": 0.1, "max_tokens": 4096})
+        if response.status_code != 200:
+            raise ValueError(f"模型服务 HTTP {response.status_code}；未切换模型")
+        choice = response.json()["choices"][0]
+        if choice.get("finish_reason") == "length":
+            raise ValueError("模型输出未完成，请缩小批次；不会保存截断结果")
+        content = choice["message"]["content"]
+    else:
+        raise ValueError("不支持的词库翻译模型来源")
+    content = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(content).strip())
+    return json.loads(content), f"{provider}:{model}"
+
+
+def _select_library_port_transport(api_config=None, local_model=None):
+    """Choose an explicitly connected model for one-shot library enrichment.
+
+    A connected local model always wins. An invalid connected local handle is
+    reported instead of silently falling through to an API that may be billed.
+    API keys are optional so a localhost OpenAI-compatible service (for example
+    Ollama) can be used through an API_CONFIG port.
+    """
+    if local_model is not None:
+        if not isinstance(local_model, dict) or not str(local_model.get("path") or "").strip():
+            raise ValueError("已连接的本地模型端口无有效模型路径，请重新执行本地大模型加载器")
+        return "local", {
+            "path": str(local_model["path"]).strip(),
+            "handle": local_model,
+        }
+
+    if api_config is not None:
+        key = base = model = ""
+        supports_vision = None
+        if isinstance(api_config, dict):
+            key = api_config.get("api_key") or api_config.get("key") or ""
+            base = api_config.get("base_url") or api_config.get("base") or ""
+            model = api_config.get("model") or api_config.get("model_name") or ""
+            supports_vision = api_config.get("supports_vision")
+        elif isinstance(api_config, (tuple, list)) and len(api_config) >= 3:
+            key, base, model = api_config[:3]
+            supports_vision = None
+        base = str(base or "").strip()
+        model = str(model or "").strip()
+        parsed = urlparse(base)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or not model:
+            raise ValueError("已连接的 API_CONFIG 缺少有效 Base URL 或模型名")
+        return "api", {"key": str(key or ""), "base": base, "model": model,
+                       "supports_vision": supports_vision}
+
+    raise ValueError("请连接 local_model（本地模型）或 api_config（API / Ollama）后再填充词库")
+
+
+def _parse_library_model_payload(content):
+    """Extract a tag-annotation array without leaking decoder internals.
+
+    Thinking models and OpenAI-compatible servers do not all format responses
+    alike: some wrap JSON in Markdown, some return a small object wrapper, and
+    some put preliminary reasoning before the final array. Only an array of
+    objects is accepted; arbitrary prose and nested ``facets`` arrays are not.
+    """
+    text = str(content or "").strip()
+    if not text:
+        raise ValueError(
+            "模型返回了空内容；请检查本地模型的聊天模板/"
+            "思考输出设置，或 API 模型名与连通性，本批未写入"
+        )
+
+    # Prefer fenced payloads, but also scan the full response. Removing a
+    # completed think block avoids parsing an example array from reasoning.
+    without_think = re.sub(r"<think\b[^>]*>[\s\S]*?</think>", "", text, flags=re.I).strip()
+    fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", without_think or text, flags=re.I)
+    candidates = [*fenced, without_think, text]
+    decoder = json.JSONDecoder()
+
+    def annotation_array(value):
+        if isinstance(value, dict):
+            for key in ("items", "tags", "results", "data", "annotations"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    value = nested
+                    break
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return value
+        return None
+
+    for candidate in candidates:
+        candidate = str(candidate or "").strip()
+        if not candidate:
+            continue
+        try:
+            accepted = annotation_array(json.loads(candidate))
+            if accepted is not None:
+                return accepted
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # raw_decode from every possible array/object start handles leading
+        # prose while refusing unrelated inner arrays such as ``facets``.
+        for match in re.finditer(r"[\[{]", candidate):
+            try:
+                value, _end = decoder.raw_decode(candidate[match.start():])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            accepted = annotation_array(value)
+            if accepted is not None:
+                return accepted
+    raise ValueError(
+        "模型未返回可用的 JSON 标签数组；请缩小单批数量或检查模型聊天模板，本批未写入"
+    )
+
+
+def _library_model_from_ports(rows, api_config=None, local_model=None):
+    """Translate/classify exactly one candidate batch through canvas ports."""
+    kind, transport = _select_library_port_transport(api_config, local_model)
+    system, prompt = translation_prompt(rows)
+    if kind == "local":
+        from .local_llm_node import (
+            generate_local_text, _run_llamacpp_inference, ensure_local_model_handle,
+        )
+        handle = transport["handle"]
+        if handle.get("released"):
+            ensure_local_model_handle(handle)
+        if handle.get("backend") == "llama.cpp" and handle.get("llm") is not None:
+            content, error, _elapsed = _run_llamacpp_inference(
+                handle["llm"], [], prompt, system,
+                4096, 0.1, 0.95, True, -1,
+                bool(handle.get("thinking", False)),
+                int(handle.get("thinking_budget", 4096) or 4096), 1.0,
+            )
+            if error:
+                raise RuntimeError(error)
+        else:
+            content = generate_local_text(
+                transport["path"], system, prompt,
+                device=handle.get("device", "auto"),
+                dtype=handle.get("dtype", "bf16"),
+                max_new_tokens=4096, temperature=0.1, top_p=0.95,
+            )
+        label = "local:" + (os.path.basename(transport["path"].rstrip("/\\")) or transport["path"])
+    else:
+        import requests
+        from . import api_config_manager as cm
+        key = cm.decode_api_key(transport["key"]) or transport["key"]
+        endpoint = transport["base"].rstrip("/")
+        if not endpoint.endswith("/chat/completions"):
+            endpoint += "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        response = requests.post(endpoint, headers=headers, timeout=(10, 180), json={
+            "model": transport["model"],
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 4096,
+        })
+        if response.status_code != 200:
+            raise ValueError(f"模型服务 HTTP {response.status_code}；本批未写入")
+        try:
+            response_payload = response.json()
+        except (ValueError, TypeError):
+            raise ValueError("模型服务返回空内容或非 JSON 响应；请检查 Base URL 和模型名，本批未写入") from None
+        choices = response_payload.get("choices") if isinstance(response_payload, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("模型服务响应缺少 choices；请检查 OpenAI 兼容接口，本批未写入")
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        if choice.get("finish_reason") == "length":
+            raise ValueError("模型输出被截断，请缩小单批数量；本批未写入")
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        content = message.get("content") or message.get("reasoning_content") or ""
+        label = "api:" + transport["model"]
+
+    return _parse_library_model_payload(content), label
+
+
+def _generate_text_from_ports(system, prompt, api_config=None, local_model=None,
+                              max_tokens=1000, temperature=0.25, images=None):
+    """Run a bounded generative request through the model explicitly wired to this node."""
+    kind, transport = _select_library_port_transport(api_config, local_model)
+    image_inputs = [image for image in (images or []) if isinstance(image, torch.Tensor)]
+    if kind == "local":
+        from .local_llm_node import (
+            generate_local_text, _run_llamacpp_inference, ensure_local_model_handle,
+            EagleLocalLLMNode,
+        )
+        handle = transport["handle"]
+        if handle.get("released"):
+            ensure_local_model_handle(handle)
+        local_has_vision = bool(handle.get("mmproj")) or bool(
+            handle.get("backend") == "transformers"
+            and getattr(handle.get("processor"), "image_processor", None) is not None
+        )
+        if image_inputs and local_has_vision:
+            content, status, _history = EagleLocalLLMNode().process(
+                model_path=transport["path"], device=handle.get("device", "auto"),
+                dtype=handle.get("dtype", "bf16"), prompt_model_type="自然语言",
+                system_template="custom", system_prompt=system, user_prompt=prompt,
+                filter_intro=False, max_new_tokens=int(max_tokens),
+                temperature=float(temperature), top_p=0.92, do_sample=True,
+                repetition_penalty=1.0, batch_mode="first", max_image_size=1024,
+                seed=-1, output_think=False, history="", model=handle,
+                image_1=image_inputs[0],
+            )
+            if not content:
+                raise RuntimeError(status or "本地视觉模型未返回内容")
+            return content, "local-vision:" + (os.path.basename(transport["path"].rstrip("/\\")) or transport["path"])
+        if handle.get("backend") == "llama.cpp" and handle.get("llm") is not None:
+            content, error, _elapsed = _run_llamacpp_inference(
+                handle["llm"], [], prompt, system,
+                int(max_tokens), float(temperature), 0.92, True, -1,
+                bool(handle.get("thinking", False)),
+                int(handle.get("thinking_budget", 4096) or 4096), 1.0,
+            )
+            if error:
+                raise RuntimeError(error)
+        else:
+            content = generate_local_text(
+                transport["path"], system, prompt,
+                device=handle.get("device", "auto"), dtype=handle.get("dtype", "bf16"),
+                max_new_tokens=int(max_tokens), temperature=float(temperature), top_p=0.92,
+            )
+        return content, "local:" + (os.path.basename(transport["path"].rstrip("/\\")) or transport["path"])
+
+    import requests
+    from . import api_config_manager as cm
+    key = cm.decode_api_key(transport["key"]) or transport["key"]
+    endpoint = transport["base"].rstrip("/")
+    if not endpoint.endswith("/chat/completions"):
+        endpoint += "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    user_content = prompt
+    model_name = str(transport.get("model") or "")
+    vision_hint = transport.get("supports_vision") is True or bool(re.search(
+        r"(?:vision|(?:^|[-_.])vl(?:[-_.]|$)|qwen[^/]*vl|llava|pixtral|internvl|gpt-4o|gpt-5|gemma[-_.]?[34])",
+        model_name, flags=re.I,
+    ))
+    if image_inputs and vision_hint:
+        from .local_llm_node import _tensor_to_base64
+        encoded = _tensor_to_base64(image_inputs[0], max_size=1024, quality=88, batch_mode="first")
+        if encoded:
+            user_content = [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded[0]}},
+                {"type": "text", "text": prompt},
+            ]
+    response = requests.post(endpoint, headers=headers, timeout=(10, 120), json={
+        "model": transport["model"],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_content}],
+        "temperature": float(temperature), "max_tokens": int(max_tokens),
+    })
+    if response.status_code != 200:
+        raise ValueError(f"模型服务 HTTP {response.status_code}；已回退本地规则规划")
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        raise ValueError("模型服务返回空内容或非 JSON 响应；已回退本地规则规划") from None
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("模型服务响应缺少 choices；已回退本地规则规划")
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    content = message.get("content") or message.get("reasoning_content") or ""
+    return content, "api:" + transport["model"]
+
+
+def _run_library_port_fill(request, node_id, api_config=None, local_model=None):
+    """Run one enrichment batch, either legacy one-shot or opt-in per queue."""
+    global _tag_translations, _gacha_buckets, _gacha_catalog_source
+    request = request if isinstance(request, dict) else {}
+    continuous = bool(request.get("continuous", False))
+    request_id = str(request.get("id") or "").strip()
+    if not continuous and not request_id:
+        return
+    request_node_id = str(request.get("node_id") or "").strip()
+    if request_node_id and request_node_id != str(node_id or ""):
+        # A duplicated node inherits widget JSON; never let that stale action
+        # run on the copy without an explicit click from its own settings UI.
+        return
+    batch = max(1, min(50, int(request.get("batch") or 20)))
+    resource = "port_fill:" + re.sub(r"[^A-Za-z0-9_.-]+", "_", str(node_id or "node"))
+    library = Library(LIBRARY_PATH)
+    if not continuous and str(library.checkpoint(resource).get("request_id") or "") == request_id:
+        return
+
+    with _library_job_lock:
+        if _library_job.get("running"):
+            raise ValueError("词库已有同步或模型任务正在运行，请完成后再试")
+        _library_job.update(
+            running=True,
+            message="正在使用画布连接的模型翻译并细分类…",
+            progress={"stage": "model", "batch": batch},
+        )
+    message = ""
+    try:
+        rows = library.candidates(batch)
+        checkpoint = {"request_id": request_id, "completed_at": time.time(), "batch": len(rows)}
+        if not rows:
+            if not continuous:
+                library.save_checkpoint(resource, checkpoint)
+            message = "没有尚未处理的候选标签"
+        else:
+            payload, model = _library_model_from_ports(rows, api_config, local_model)
+            library.save_drafts(
+                payload, rows, model,
+                action_checkpoint=None if continuous else (resource, checkpoint),
+            )
+            message = f"{len(rows)} 条翻译/细分类进入待审核；确认后才用于安全抽卡"
+        _tag_translations = None
+        _gacha_buckets = None
+        _gacha_catalog_source = None
+    except Exception as error:
+        message = str(error) if isinstance(error, (ValueError, RuntimeError)) else f"模型填充失败（{type(error).__name__}）；本批未写入"
+        raise
+    finally:
+        with _library_job_lock:
+            _library_job.update(running=False, message=message)
+
+
+def _run_library_job(action, pages, batch, settings):
+    global _tag_translations, _gacha_buckets, _gacha_catalog_source, _semantic_catalog_dirty
+    def progress(value):
+        with _library_job_lock:
+            _library_job["progress"] = value
+    try:
+        library = Library(LIBRARY_PATH)
+        if action == "seed":
+            library.seed(TAGS_CSV_PATH, _detect_tag_csv_encoding())
+            message = "已导入随附词表，未覆盖已有条目"
+        elif action in {"bootstrap", "tags", "groups", "wiki"}:
+            import requests
+            with requests.Session() as session:
+                # No credential/proxy rotation, browser fingerprint spoofing or challenge solver.
+                proxy = str(settings.get("proxy_url") or "").strip()
+                if proxy:
+                    session.proxies.update({"http": proxy, "https": proxy})
+                client = PoliteClient(
+                    session, _library_stop,
+                    interval=max(2.0, min(60.0, float(settings.get("library_request_interval", 3.0)))),
+                    jitter=max(0.0, min(30.0, float(settings.get("library_request_jitter", 1.0)))),
+                    pause_every=max(0, min(1000, int(settings.get("library_pause_every_pages", 25)))),
+                    pause_seconds=max(0.0, min(600.0, float(settings.get("library_pause_seconds", 15.0)))),
+                    base_url=_get_api_base(settings),
+                )
+                if action == "bootstrap":
+                    states = bootstrap_library(
+                        library, client, TAGS_CSV_PATH,
+                        lambda value: progress(value),
+                        _detect_tag_csv_encoding(),
+                    )
+                    if all(state.get("complete") for state in states.values()):
+                        message = "首次词库初始化完成；后续仅需低频手动刷新"
+                    else:
+                        message = "初始化已保存断点；下次点击继续初始化"
+                elif action == "wiki":
+                    library.fetch_candidate_wikis(client, batch, progress)
+                    message = "本批标签的官方释义已缓存；可以开始模型翻译"
+                else:
+                    state = sync_library(library, client, action, pages, progress)
+                    message = "本轮全表扫描完成" if state["complete"] else "已保存分页断点，可继续同步"
+        elif action == "translate":
+            rows = library.candidates(batch)
+            if not rows:
+                message = "没有尚未处理的候选标签"
+            else:
+                payload, model = _library_model(rows, settings)
+                library.save_drafts(payload, rows, model)
+                message = f"{len(rows)} 条翻译/细分类进入待审核；尚未用于抽卡"
+        elif action == "export":
+            target = library.export(os.path.join(LIBRARY_DIR, "exports", "tag_dictionary.jsonl"))
+            message = "完整词典已导出：" + target
+        else:
+            raise ValueError("Unknown library action")
+        _tag_translations = None
+        _gacha_buckets = None
+        _gacha_catalog_source = None
+        if action in {"seed", "bootstrap", "tags"}:
+            _semantic_catalog_dirty = True
+    except InterruptedError:
+        message = "已停止，已提交的数据和断点保留"
+    except Exception as error:
+        # Don't expose upstream response bodies, request URLs with credentials or proxy passwords.
+        message = str(error) if isinstance(error, (ValueError, RuntimeError)) else f"任务失败（{type(error).__name__}），已保存完成部分"
+    finally:
+        with _library_job_lock:
+            _library_job.update(running=False, message=message)
+
+
+@route("GET", "/danbooru_search/library")
+async def route_library_status(request):
+    library = await asyncio.to_thread(Library, LIBRARY_PATH)
+    status = await asyncio.to_thread(library.status)
+    tag_checkpoint = status.get("checkpoints", {}).get("tags", {})
+    group_checkpoint = status.get("checkpoints", {}).get("groups", {})
+    ready = bool(tag_checkpoint.get("complete") and group_checkpoint.get("complete"))
+    completed_at = float(tag_checkpoint.get("completed_at") or 0)
+    refresh_days = max(1, int(load_settings().get("library_refresh_days", 30)))
+    next_refresh_at = completed_at + refresh_days * 86400 if completed_at else 0
+    bootstrap_status = {
+        "ready": ready,
+        "stage": "ready" if ready else ("tags" if group_checkpoint.get("complete") else "groups"),
+        "tag_records": int(tag_checkpoint.get("records") or 0),
+        "group_records": int(group_checkpoint.get("records") or 0),
+        "refresh_days": refresh_days,
+        "next_refresh_at": next_refresh_at,
+        "refresh_due": bool(ready and next_refresh_at and time.time() >= next_refresh_at),
+    }
+    pending = await asyncio.to_thread(library.pending)
+    with _library_job_lock:
+        job = dict(_library_job)
+    return web.json_response({"success": True, "status": status, "bootstrap": bootstrap_status,
+        "job": job, "pending": pending,
+        "facets": {key: value[0] for key, value in FACETS.items()}})
+
+
+@route("GET", "/danbooru_search/ollama_models")
+async def route_ollama_models(request):
+    def discover():
+        import requests
+        response = requests.get("http://127.0.0.1:11434/api/tags", timeout=(3, 8))
+        response.raise_for_status()
+        return [{"name": item["name"], "size": item.get("size", 0)} for item in response.json().get("models", [])]
+    try:
+        models = await asyncio.to_thread(discover)
+        return web.json_response({"success": True, "models": models, "base_url": "http://127.0.0.1:11434/v1"})
+    except Exception:
+        return web.json_response({"success": False, "error": "无法连接本机 Ollama（127.0.0.1:11434），请先启动 Ollama；远程服务可手填 URL/模型名"}, status=503)
+
+
+@route("POST", "/danbooru_search/library")
+async def route_library_action(request):
+    global _semantic_catalog_dirty, _tag_translations
+    try:
+        data = await request.json()
+        action = data.get("action")
+        if action == "stop":
+            _library_stop.set()
+        elif action == "review":
+            if not isinstance(data.get("approve"), bool):
+                raise ValueError("必须明确选择通过或拒绝")
+            await asyncio.to_thread(Library(LIBRARY_PATH).review, data["name"], data["approve"])
+            if data["approve"]:
+                _semantic_catalog_dirty = True
+                _tag_translations = None
+        else:
+            if action not in {"bootstrap", "seed", "tags", "groups", "wiki", "translate", "export"}:
+                raise ValueError("未知操作")
+            pages, batch = int(data.get("pages", 10)), int(data.get("batch", 20))
+            if pages < 0 or not 1 <= batch <= 50:
+                raise ValueError("页数须≥0；翻译单批 1–50 条，正文不截断")
+            settings = load_settings()
+            if action == "translate" and not settings.get("enable_model_calls"):
+                raise ValueError("请先开启模型调用并保存配置")
+            with _library_job_lock:
+                if _library_job["running"]:
+                    return web.json_response({"success": False, "error": "已有词库任务运行中"}, status=409)
+                _library_stop.clear()
+                _library_job.update(running=True, action=action, message="任务运行中", progress={})
+                threading.Thread(target=_run_library_job, args=(action, pages, batch, settings), daemon=True).start()
+        return web.json_response({"success": True})
+    except (ValueError, KeyError, TypeError) as error:
+        return web.json_response({"success": False, "error": str(error)}, status=400)
 
 
 @route("GET", "/danbooru_search/tag_data_status")
@@ -1114,26 +1978,37 @@ async def route_tag_data_status(request):
 
 @route("POST", "/danbooru_search/reload_tag_data")
 async def route_reload_tag_data(request):
-    """重新读取用户在磁盘上更新的 CSV/Parquet；不在请求线程重建向量。"""
+    """Refresh CSV/SQLite sources and rebuild the bounded semantic snapshot."""
     try:
-        global _tag_translations, _tag_catalog, _gacha_buckets, _tag_rows, _tag_embeddings, _engine
+        global _tag_translations, _tag_catalog, _gacha_buckets, _gacha_catalog_source
+        global _semantic_catalog_dirty
         _tag_translations = None
         _tag_catalog = None
         _gacha_buckets = None
-        _tag_rows = None
-        _tag_embeddings = None
-        _engine = None
+        _gacha_catalog_source = None
+        _semantic_catalog_dirty = True
+        _unload_semantic_models()
+        settings = dict(load_settings())
+        if request.can_read_body:
+            data = await request.json()
+            for key in ("semantic_use_library", "semantic_library_limit", "semantic_library_min_post_count"):
+                if key in data:
+                    settings[key] = data[key]
         try:
             from .danbooru_engine.core.engine import DanbooruTagger
             DanbooruTagger._instance = None
         except Exception:
             pass
         translations = await asyncio.to_thread(_load_tag_translations)
+        await asyncio.to_thread(_prepare_semantic_catalog, settings, True)
         status = _tag_data_status()
         status["translations_in_memory"] = len(translations)
         return web.json_response({
             "success": True,
-            "message": f"已重新载入 {len(translations)} 条标签；下一次语义搜索会按新数据更新索引",
+            "message": (
+                f"已合并 SQLite + CSV：{status['semantic_catalog'].get('rows', 0)} 条向量候选，"
+                f"中文译名 {len(translations)} 条；下一次语义搜索会增量更新向量"
+            ),
             "data": status,
         })
     except Exception as error:
@@ -1167,6 +2042,26 @@ async def route_local_models(request):
         return web.json_response({"success": True, "models": usable})
     except Exception as error:
         return web.json_response({"success": False, "models": [], "error": str(error)}, status=500)
+
+
+@route("POST", "/danbooru_search/test_semantic_model")
+async def route_test_semantic_model(request):
+    """Validate the selected encoder without rebuilding the complete tag index."""
+    try:
+        data = await request.json()
+        settings = load_settings()
+        model_path = str(data.get("model_path") or settings.get("model_path") or "").strip()
+        result = await asyncio.to_thread(
+            _probe_semantic_model,
+            model_path,
+            str(settings.get("proxy_url") or "").strip(),
+        )
+        return web.json_response({"success": True, "result": result})
+    except Exception as error:
+        return web.json_response({
+            "success": False,
+            "error": f"向量模型校验失败：{error}",
+        }, status=500)
 
 
 def _unload_semantic_models():
@@ -1242,7 +2137,9 @@ _PROMPT_KIND_MARKERS = {
         "sitting", "standing", "walking", "running", "jumping", "lying", "kneeling",
         "holding", "looking", "reading", "drawing", "eating", "drinking", "dancing",
         "fighting", "sleeping", "waving", "pointing", "reaching", "hugging", "pose",
-        "arms_", "hand_", "crossed_legs", "from_behind",
+        "arms_", "hand_", "crossed_legs", "raised_leg", "leg_up", "spread_legs",
+        "crouching", "squatting", "all_fours", "skirt_lift", "clothes_lift",
+        "undressing", "masturbation", "fingering", "handjob", "sex", "from_behind",
     ),
     "environment": (
         "rain", "snow", "wind", "fog", "mist", "cloud", "sunset", "sunrise", "night",
@@ -1284,6 +2181,21 @@ _GACHA_EXCLUDED_PATTERNS = (
     r"(?:^|_)shadow_puppet(?:_|$)",
 )
 
+_GACHA_HOLDING_PATTERNS = (
+    r"(?:^|_)(?:holding|carrying|wielding|gripping)(?:_|$)",
+    r"(?:^|_)(?:in_hand|held_object)(?:_|$)",
+)
+
+_GACHA_WEAPON_PATTERNS = (
+    r"(?:^|_)(?:weapon|knife|sword|dagger|gun|pistol|rifle|shotgun|bow|arrow|spear|"
+    r"halberd|axe|katana|blade|mace|shield|staff|wand)(?:_|$)",
+)
+
+_GACHA_EXPLICIT_PATTERNS = (
+    r"(?:^|_)(?:masturbation|fingering|handjob|oral|fellatio|deepthroat)(?:_|$)",
+    r"(?:^|_)(?:sex|intercourse|penetration|ejaculation|cum)(?:_|$)",
+)
+
 
 def _infer_prompt_kind(tag, cn_name=""):
     """把通用 Danbooru 标签映射到抽卡语义槽；内容仍来自数据文件/API。"""
@@ -1305,6 +2217,111 @@ def _infer_prompt_kind(tag, cn_name=""):
     return None
 
 
+def _infer_gacha_facets(item):
+    """Attach stable fine facets to reviewed rows and common raw pose tags."""
+    reviewed = {key for key in (item.get("facets") or []) if key in FACETS}
+    value = str(item.get("tag") or item.get("name") or "").lower().replace(" ", "_")
+    facets = set(reviewed)
+    rules = (
+        ("pose.posture", r"(?:^|_)(?:standing|sitting|kneeling|lying|crouching|squatting|all_fours)(?:_|$)"),
+        ("pose.legs", r"(?:^|_)(?:leg_up|raised_leg|crossed_legs|spread_legs|legs_together|knees_together|one_knee)(?:_|$)"),
+        ("pose.arms", r"(?:^|_)(?:arms_up|arms_behind|crossed_arms|outstretched_arm|raised_arm)(?:_|$)"),
+        ("pose.hands", r"(?:^|_)(?:hand_on_|hands_on_|peace_sign|pointing|finger_to_)(?:_|$)"),
+        ("pose.gaze", r"(?:^|_)(?:looking_at_viewer|looking_away|looking_back|looking_up|looking_down)(?:_|$)"),
+        ("action.holding", r"(?:^|_)(?:holding|carrying|wielding)(?:_|$)"),
+        ("action.gripping", r"(?:^|_)(?:gripping|grabbing)(?:_|$)"),
+        ("action.clothing", r"(?:^|_)(?:skirt_lift|lifting_skirt|clothes_lift|undressing|adjusting_clothes)(?:_|$)"),
+        ("action.self_contact", _GACHA_EXPLICIT_PATTERNS[0]),
+        ("action.intimate", _GACHA_EXPLICIT_PATTERNS[1]),
+        ("action.movement", r"(?:^|_)(?:walking|running|jumping|dancing|fighting|reaching)(?:_|$)"),
+        ("action.interaction", r"(?:^|_)(?:hugging|kissing|handshake|headpat|carrying_person)(?:_|$)"),
+        ("camera.angle", r"(?:^|_)(?:low_angle|high_angle|dutch_angle|from_above|from_below|from_side)(?:_|$)"),
+        ("camera.framing", r"(?:^|_)(?:close-up|close_up|portrait|full_body|upper_body|cowboy_shot)(?:_|$)"),
+        ("expression.emotion", r"(?:^|_)(?:smile|grin|blush|crying|tears|angry|embarrassed|surprised)(?:_|$)"),
+        ("expression.mouth", r"(?:^|_)(?:open_mouth|closed_mouth|tongue|pout)(?:_|$)"),
+        ("expression.eyes", r"(?:^|_)(?:closed_eyes|half-closed_eyes|one_eye_closed)(?:_|$)"),
+    )
+    for facet, pattern in rules:
+        if re.search(pattern, value):
+            facets.add(facet)
+    return facets
+
+
+def _gacha_runtime_settings(overrides=None):
+    settings = dict(load_settings())
+    if isinstance(overrides, dict):
+        for key in (
+            "gacha_content_level", "gacha_holding_mode", "gacha_avoid_holding",
+            "gacha_excluded_tags", "gacha_context", "gacha_facet_modes",
+            "gacha_category_modes", "gacha_density", "gacha_allocation_mode",
+            "gacha_facet_group_preferences",
+        ):
+            if key in overrides:
+                settings[key] = overrides[key]
+    holding_mode = str(settings.get("gacha_holding_mode") or "").lower()
+    if holding_mode not in {"none", "daily", "weapon", "any"}:
+        holding_mode = "none" if bool(settings.get("gacha_avoid_holding", True)) else "any"
+    settings["gacha_holding_mode"] = holding_mode
+    return settings
+
+
+def _gacha_rating_level(item):
+    rating = str(item.get("rating") or "").lower()
+    if rating in {"s", "g", "safe", "general"}:
+        return 0
+    if rating in {"sensitive"}:
+        return 1
+    if rating in {"q", "adult", "questionable", "nsfw"}:
+        return 2
+    if rating in {"e", "explicit"}:
+        return 3
+    if item.get("nsfw") in {0, False}:
+        return 0
+    if item.get("nsfw") in {1, True}:
+        return 2
+    return None
+
+
+def _gacha_item_allowed(item, settings):
+    value = str(item.get("tag") or item.get("name") or "").strip().lower().replace(" ", "_")
+    facets = _infer_gacha_facets(item)
+    facet_modes = settings.get("gacha_facet_modes") or {}
+    if any(str(facet_modes.get(facet) or "") == "off" for facet in facets):
+        return False
+    is_holding = bool(
+        facets & {"action.holding", "action.gripping"}
+        or any(re.search(pattern, value) for pattern in _GACHA_HOLDING_PATTERNS)
+    )
+    if is_holding:
+        holding_mode = str(settings.get("gacha_holding_mode") or "none")
+        is_weapon = any(re.search(pattern, value) for pattern in _GACHA_WEAPON_PATTERNS)
+        if holding_mode == "none":
+            return False
+        if holding_mode == "daily" and is_weapon:
+            return False
+        if holding_mode == "weapon" and not is_weapon:
+            return False
+    patterns = [part.strip().lower().replace(" ", "_") for part in re.split(
+        r"[,，;；、\n]+", str(settings.get("gacha_excluded_tags") or "")
+    ) if part.strip()]
+    if any(fnmatch.fnmatchcase(value, pattern) for pattern in patterns):
+        return False
+    try:
+        allowed_level = max(0, min(3, int(settings.get("gacha_content_level", 0))))
+    except (TypeError, ValueError):
+        allowed_level = 0
+    item_level = _gacha_rating_level(item)
+    if item_level is None and any(re.search(pattern, value) for pattern in _GACHA_EXPLICIT_PATTERNS):
+        item_level = 3
+    if item_level is None or item_level > allowed_level:
+        return False
+    # Legacy binary adult labels cannot distinguish questionable from explicit;
+    # at level 2 keep the clearly explicit vocabulary out.
+    if allowed_level < 3 and any(re.search(pattern, value) for pattern in _GACHA_EXPLICIT_PATTERNS):
+        return False
+    return True
+
+
 def _normalized_category_counts(settings=None):
     raw = (settings or load_settings()).get("gacha_category_counts") or {}
     defaults = DEFAULT_SETTINGS["gacha_category_counts"]
@@ -1317,25 +2334,160 @@ def _normalized_category_counts(settings=None):
     return result
 
 
+_GACHA_DENSITY_PROFILES = {
+    # target is deliberately a range: users choose visual density, not a brittle
+    # exact tag count. Caps prevent one category from swallowing the prompt.
+    "compact": {
+        "range": (4, 6),
+        "caps": {"outfit": 2, "action": 2, "expression": 1, "scene": 1,
+                 "environment": 1, "composition": 1, "lighting": 1},
+    },
+    "balanced": {
+        "range": (7, 10),
+        "caps": {"outfit": 3, "action": 3, "expression": 2, "scene": 2,
+                 "environment": 2, "composition": 2, "lighting": 2},
+    },
+    "rich": {
+        "range": (11, 15),
+        "caps": {"outfit": 4, "action": 4, "expression": 3, "scene": 3,
+                 "environment": 3, "composition": 3, "lighting": 3},
+    },
+}
+
+_GACHA_BASE_WEIGHTS = {
+    "outfit": 1.65, "action": 1.55, "expression": 1.05, "scene": 1.2,
+    "environment": 0.9, "composition": 1.0, "lighting": 0.85,
+}
+
+_GACHA_FACET_GROUP_CATEGORY_BIASES = {
+    "character": {},  # Identity is supplied by character_tags and never invented here.
+    "styling": {"outfit": 1.8},
+    "expression": {"expression": 1.9},
+    "pose": {"action": 1.8},
+    "interaction": {"action": 1.6},
+    "adult": {"action": 1.5},
+    "world": {"scene": 1.55, "environment": 1.45},
+    "visual": {"composition": 1.55, "lighting": 1.45},
+}
+
+
+def _normalized_category_modes(settings=None):
+    raw = (settings or load_settings()).get("gacha_category_modes") or {}
+    return {
+        kind: str(raw.get(kind) or "auto") if str(raw.get(kind) or "auto") in {"auto", "required", "off"} else "auto"
+        for kind in PROMPT_KIND_LABELS
+    }
+
+
+def _planned_category_counts(settings=None, character_tags="", rng=None):
+    """Convert a compact creative intent into bounded per-category work."""
+    settings = settings or load_settings()
+    if str(settings.get("gacha_allocation_mode") or "smart") == "exact":
+        return _normalized_category_counts(settings)
+
+    rng = rng or random.Random()
+    density = str(settings.get("gacha_density") or "balanced")
+    profile = _GACHA_DENSITY_PROFILES.get(density, _GACHA_DENSITY_PROFILES["balanced"])
+    modes = _normalized_category_modes(settings)
+    enabled = [kind for kind in PROMPT_KIND_LABELS if modes[kind] != "off"]
+    if not enabled:
+        return {kind: 0 for kind in PROMPT_KIND_LABELS}
+
+    lower, upper = profile["range"]
+    target = rng.randint(lower, upper)
+    counts = {kind: (1 if modes[kind] == "required" else 0) for kind in PROMPT_KIND_LABELS}
+    weights = dict(_GACHA_BASE_WEIGHTS)
+    context = str(character_tags or "").lower().replace("_", " ")
+    context_parts = [part.strip(" ()[]{}") for part in re.split(r"[,，;；、\n]+", str(character_tags or ""))]
+    locked_kinds = {
+        _infer_prompt_kind(re.sub(r":\s*-?\d+(?:\.\d+)?$", "", part).strip(" ()[]{}"))
+        for part in context_parts if part.strip()
+    }
+    # Existing clothing/scene styling is treated as fixed unless the user made
+    # the corresponding category required. The draw complements the character
+    # instead of silently replacing their supplied design.
+    for locked_kind in {"outfit", "scene", "environment"} & locked_kinds:
+        if modes.get(locked_kind) == "auto":
+            counts[locked_kind] = 0
+            enabled = [kind for kind in enabled if kind != locked_kind]
+
+    # Context only biases allocation; it never invents a category or bypasses
+    # the user's off/required choices.
+    if re.search(r"portrait|close[ -]?up|face|headshot|肖像|特写", context):
+        weights.update(expression=1.8, composition=1.6, lighting=1.35, scene=0.55, environment=0.45)
+    if re.search(r"outdoor|forest|beach|street|city|nature|户外|森林|街道|海边", context):
+        weights.update(scene=1.65, environment=1.55, lighting=1.15)
+    if re.search(r"run|jump|fight|dance|dynamic|运动|奔跑|跳跃|战斗|舞蹈", context):
+        weights.update(action=2.2, composition=1.25)
+    if re.search(r"dress|uniform|fashion|outfit|服装|制服|时装", context):
+        weights.update(outfit=2.15, composition=1.2)
+
+    selected_groups = settings.get("gacha_facet_group_preferences") or []
+    if isinstance(selected_groups, str):
+        selected_groups = [selected_groups]
+    for group in selected_groups:
+        for kind, multiplier in _GACHA_FACET_GROUP_CATEGORY_BIASES.get(str(group), {}).items():
+            weights[kind] = weights.get(kind, 1.0) * multiplier
+
+    target = max(sum(counts.values()), min(target, sum(profile["caps"].get(kind, 1) for kind in enabled)))
+    while sum(counts.values()) < target:
+        candidates = [kind for kind in enabled if counts[kind] < profile["caps"].get(kind, 1)]
+        if not candidates:
+            break
+        chosen = rng.choices(candidates, weights=[max(0.05, weights.get(kind, 1.0)) for kind in candidates], k=1)[0]
+        counts[chosen] += 1
+    return counts
+
+
+def _normalized_facet_modes(settings=None):
+    raw = (settings or load_settings()).get("gacha_facet_modes") or {}
+    return {
+        key: value for key, value in ((str(key), str(value)) for key, value in raw.items())
+        if key in FACETS and value in {"prefer", "required", "off"}
+    }
+
+
+def _planned_facet_counts(settings=None, character_tags="", rng=None):
+    """Turn compact facet chips into optional/required one-tag anchors."""
+    settings = settings or load_settings()
+    rng = rng or random.Random()
+    modes = _normalized_facet_modes(settings)
+    counts = {key: 1 for key, mode in modes.items() if mode == "required"}
+    preferred = [key for key, mode in modes.items() if mode == "prefer"]
+    rng.shuffle(preferred)
+    density = str(settings.get("gacha_density") or "balanced")
+    preference_budget = {"compact": 1, "balanced": 2, "rich": 4}.get(density, 2)
+    for key in preferred[:preference_budget]:
+        if rng.random() < 0.75:
+            counts[key] = 1
+    if str(character_tags or "").strip():
+        counts = {key: value for key, value in counts.items()
+                  if key.split(".", 1)[0] not in {"identity", "body", "hair", "face"}}
+    return counts
+
+
 def _build_gacha_buckets():
     global _gacha_buckets
     if _gacha_buckets is not None:
         return _gacha_buckets
     buckets = {kind: [] for kind in PROMPT_KIND_LABELS}
-    for item in _load_tag_catalog():
-        tag = item.get("tag", "")
+    for item in _load_gacha_catalog():
+        tag = item.get("tag") or item.get("name") or ""
         if item.get("category") != "general" or not re.fullmatch(r"[a-z0-9_()'\-]+", tag):
             continue
         if any(re.search(pattern, tag) for pattern in (*_IDENTITY_TAG_PATTERNS, *_GACHA_EXCLUDED_PATTERNS)):
             continue
         kind = _infer_prompt_kind(tag, item.get("cn_name", ""))
         if kind:
-            buckets[kind].append(item)
+            normalized = dict(item)
+            normalized["facets"] = list(_infer_gacha_facets(normalized))
+            buckets[kind].append(normalized)
     _gacha_buckets = buckets
     return buckets
 
 
-def _weighted_pick(rows, count, rng, excluded, allow_nsfw=False):
+def _weighted_pick(rows, count, rng, excluded, settings=None):
+    settings = _gacha_runtime_settings(settings)
     try:
         min_count = max(0, int(load_settings().get("gacha_min_post_count", 5000)))
     except (TypeError, ValueError):
@@ -1343,7 +2495,7 @@ def _weighted_pick(rows, count, rng, excluded, allow_nsfw=False):
     candidates = [
         item for item in rows
         if item.get("tag") not in excluded
-        and (allow_nsfw or not item.get("nsfw"))
+        and _gacha_item_allowed(item, settings)
         and int(item.get("post_count") or 0) >= min_count
     ]
     chosen = []
@@ -1373,43 +2525,111 @@ def _is_gacha_source(item):
     return isinstance(item, dict) and str(item.get("source") or "").startswith("gacha")
 
 
-def _database_gacha(character_tags="", seed=-1, initial_items=None, missing_only=False):
-    """从 tags_enhanced.csv 动态抽卡；不加载 SentenceTransformer/LLM。"""
+def _database_gacha(character_tags="", seed=-1, initial_items=None, missing_only=False, constraints=None):
+    """从本地 SQLite 词库抽卡；CSV 仅在词库不可用时作为后备。"""
     global _gacha_counter
     _gacha_counter += 1
-    settings = load_settings()
+    settings = _gacha_runtime_settings(constraints)
+    allocation_mode = str(settings.get("gacha_allocation_mode") or "smart")
+    fine_counts = settings.get("gacha_facet_counts") or {}
+    if allocation_mode == "exact" and any(int(value or 0) > 0 for key, value in fine_counts.items() if key in FACETS):
+        result = _fine_library_gacha(character_tags, seed, initial_items, fine_counts, settings)
+        result["data_source"] = "sqlite"
+        result["allocation"] = "exact"
+        return result
     try:
         seed_value = int(seed)
     except (TypeError, ValueError):
         seed_value = -1
     rng = random.Random((time.time_ns() ^ _gacha_counter) if seed_value < 0 else seed_value + _gacha_counter - 1)
+    items = list(initial_items or [])
+    warnings = []
+    planned_facets = _planned_facet_counts(settings, character_tags, rng) if allocation_mode != "exact" else {}
+    if planned_facets:
+        facet_result = _fine_library_gacha(character_tags, seed_value, items, planned_facets, settings)
+        items = list(facet_result.get("tags") or items)
+        if facet_result.get("warning"):
+            warnings.append(str(facet_result["warning"]))
+
     excluded = {
         re.sub(r"\s+", "_", value.strip().lower())
         for value in re.split(r"[,，;；、\n]+", str(character_tags or "")) if value.strip()
     }
     if settings.get("gacha_avoid_duplicates", True):
         excluded.update(_gacha_history)
-    items = list(initial_items or [])
     excluded.update(item.get("tag", "") for item in items)
-    counts = _normalized_category_counts(settings)
+    counts = _planned_category_counts(settings, character_tags, rng)
     buckets = _build_gacha_buckets()
-    allow_nsfw = str(settings.get("rating_filter") or "general") not in {"general", "sensitive"}
     for kind, quota in counts.items():
         present = sum(1 for item in items if item.get("kind") == kind)
-        needed = max(0, quota - present) if missing_only else quota
-        for row in _weighted_pick(buckets.get(kind, []), needed, rng, excluded, allow_nsfw):
-            items.append(_gacha_item(row["tag"], kind, "gacha_database", row.get("cn_name"), row.get("post_count")))
+        needed = max(0, quota - present) if (missing_only or allocation_mode != "exact" or planned_facets) else quota
+        for row in _weighted_pick(buckets.get(kind, []), needed, rng, excluded, settings):
+            item = _gacha_item(row["tag"], kind, "gacha_database", row.get("cn_name"), row.get("post_count"))
+            item["facets"] = list(_infer_gacha_facets(row))
+            item["rating"] = row.get("rating", "unknown")
+            items.append(item)
     for item in items:
         if item.get("tag"):
             _gacha_history.append(item["tag"])
     if not items:
-        raise ValueError("标签数据文件没有形成可用抽卡池，请在设置中重新载入标签数据")
-    return {"name": "本地标签库随机组合", "tags": items, "provider": "database"}
+        raise ValueError("本地 SQLite 词库没有形成可用抽卡池；请完成首次播种，或审核相应细分类标签")
+    return {
+        "name": "本地标签库智能组合" if allocation_mode != "exact" else "本地标签库精确配额",
+        "tags": items,
+        "provider": "database",
+        "data_source": _gacha_catalog_source or "sqlite",
+        "allocation": allocation_mode,
+        "planned_counts": counts,
+        "warning": "；".join(filter(None, warnings)),
+    }
 
 
-def _danbooru_random_gacha(character_tags="", seed=-1):
+def _fine_library_gacha(character_tags, seed, initial_items, counts, settings=None):
+    """Reviewed facets replace heuristic buckets only when explicitly enabled."""
+    settings = _gacha_runtime_settings(settings)
+    quotas = {key: max(0, min(10, int(value))) for key, value in counts.items() if key in FACETS and int(value) > 0}
+    rows = Library(LIBRARY_PATH).sample_pool(quotas, int(settings.get("gacha_min_post_count", 5000)))
+    # Reviewed model annotations win, while high-confidence deterministic
+    # syntax rules make common pose/camera/holding controls useful before a
+    # large translation review backlog is completed.
+    reviewed_names = {row.get("tag") or row.get("name") for row in rows}
+    heuristic_rows = [
+        row for pool in _build_gacha_buckets().values() for row in pool
+        if (row.get("tag") or row.get("name")) not in reviewed_names
+        and set(_infer_gacha_facets(row)) & set(quotas)
+    ]
+    rows.extend(heuristic_rows)
+    items = list(initial_items or [])
+    excluded = set(re.sub(r"\s+", "_", tag.strip().lower()) for tag in re.split(r"[,，;；\n]+", character_tags) if tag.strip())
+    excluded.update(item.get("tag", "") for item in items)
+    seed_value = int(seed)
+    rng = random.Random(seed_value if seed_value >= 0 else time.time_ns())
+    if seed_value < 0 and settings.get("gacha_avoid_duplicates", True):
+        excluded.update(_gacha_history)
+    shortages = []
+    for facet, quota in quotas.items():
+        # A supplied fixed identity must not be silently changed by body/hair/character draws.
+        if character_tags.strip() and facet.split(".")[0] in {"identity", "body", "hair", "face"}:
+            shortages.append(FACETS[facet][0] + "：已锁定角色特征，跳过")
+            continue
+        pool = [r for r in rows if facet in r["facets"] and _gacha_item_allowed(r, settings)]
+        selected = _weighted_pick(pool, quota, rng, excluded, settings)
+        if len(selected) < quota:
+            shortages.append(f"{FACETS[facet][0]}：{len(selected)}/{quota}")
+        for r in selected:
+            tag = r.get("tag") or r.get("name") or ""
+            item = _gacha_item(tag, FACETS[facet][1], "gacha_library", r.get("cn_name", ""), r.get("post_count", 0))
+            item["facets"] = list(_infer_gacha_facets(r))
+            item["facet_labels"] = {key: FACETS[key][0] for key in item["facets"]}
+            items.append(item)
+    _gacha_history.extend(item["tag"] for item in items)
+    return {"name": "细分类智能抽卡", "tags": items, "provider": "database",
+            "warning": "；".join(shortages), "taxonomy_mode": "reviewed_plus_rules"}
+
+
+def _danbooru_random_gacha(character_tags="", seed=-1, constraints=None):
     """从随机 Danbooru 帖子的真实共现标签抽卡；无需选择画廊图片或加载模型。"""
-    settings = load_settings()
+    settings = _gacha_runtime_settings(constraints)
     try:
         seed_value = int(seed)
     except (TypeError, ValueError):
@@ -1431,16 +2651,21 @@ def _danbooru_random_gacha(character_tags="", seed=-1):
         for value in re.split(r"[,，;；、\n]+", str(character_tags or "")) if value.strip()
     }
     buckets = {kind: [] for kind in PROMPT_KIND_LABELS}
-    for tag in str(post.get("tag_string_general") or "").split():
+    post_tags = str(post.get("tag_string_general") or "").split()
+    metadata = Library(LIBRARY_PATH).lookup(post_tags) if os.path.isfile(LIBRARY_PATH) else {}
+    post_rating = str(post.get("rating") or "general")
+    for tag in post_tags:
         if tag in excluded or any(
             re.search(pattern, tag)
             for pattern in (*_IDENTITY_TAG_PATTERNS, *_GACHA_EXCLUDED_PATTERNS)
         ):
             continue
         kind = _infer_prompt_kind(tag, translations.get(tag, ""))
-        if kind:
+        candidate = dict(metadata.get(tag) or {"tag": tag, "rating": post_rating, "nsfw": post_rating not in {"g", "general", "safe", "sensitive"}})
+        candidate["facets"] = list(_infer_gacha_facets(candidate))
+        if kind and _gacha_item_allowed(candidate, settings):
             buckets[kind].append(tag)
-    counts = _normalized_category_counts(settings)
+    counts = _planned_category_counts(settings, character_tags, rng)
     items = []
     for kind, quota in counts.items():
         values = list(dict.fromkeys(buckets[kind]))
@@ -1448,7 +2673,7 @@ def _danbooru_random_gacha(character_tags="", seed=-1):
         for tag in values[:quota]:
             items.append(_gacha_item(tag, kind, "gacha_danbooru", translations.get(tag, "")))
     # 随机帖子缺少某些槽时用本地数据池补齐，仍然不加载任何模型。
-    result = _database_gacha(character_tags, seed, initial_items=items, missing_only=True)
+    result = _database_gacha(character_tags, seed, initial_items=items, missing_only=True, constraints=settings)
     result.update({
         "name": f"Danbooru 随机帖子 #{post.get('id', '?')}",
         "provider": "danbooru_random",
@@ -1476,11 +2701,13 @@ def _gacha_items_from_card(card, variant_index=None):
                 "source": "gacha",
                 "weight": 1.0,
                 "enabled": True,
+                "rating": "safe",
+                "nsfw": 0,
             })
     return items
 
 
-def _rule_gacha(character_tags="", seed=-1):
+def _rule_gacha(character_tags="", seed=-1, constraints=None):
     """根据前置角色/风格特征加权匹配，并按 seed/执行计数在同分卡组间轮换。"""
     global _gacha_counter
     _gacha_counter += 1
@@ -1499,10 +2726,12 @@ def _rule_gacha(character_tags="", seed=-1):
     card = pool[index]
     variant_index = (_gacha_counter - 1) % 4 if len(pool) == 1 else None
     name = card["name"] if variant_index is None else f"{card['name']} · 方案 {variant_index + 1}"
-    return {"name": name, "tags": _gacha_items_from_card(card, variant_index), "provider": "rules"}
+    settings = _gacha_runtime_settings(constraints)
+    items = [item for item in _gacha_items_from_card(card, variant_index) if _gacha_item_allowed(item, settings)]
+    return {"name": name, "tags": items, "provider": "rules"}
 
 
-def _gallery_gacha(selections, character_tags="", seed=-1):
+def _gallery_gacha(selections, character_tags="", seed=-1, constraints=None):
     """从当前已选画廊图片提取角色特征以外的 general 标签并组合一张卡。"""
     candidates = []
     for selection in selections or []:
@@ -1524,6 +2753,8 @@ def _gallery_gacha(selections, character_tags="", seed=-1):
         r"^\d+(?:girl|boy|other)s?$", r"^(solo|multiple_girls|multiple_boys)$",
         r"(?:^|_)(hair|eyes?|skin|breasts?|age|teen|adult|child|loli|shota)(?:_|$)",
     )
+    settings = _gacha_runtime_settings(constraints)
+    metadata = Library(LIBRARY_PATH).lookup(candidates) if os.path.isfile(LIBRARY_PATH) else {}
     filtered = []
     seen = set()
     for tag in candidates:
@@ -1532,6 +2763,10 @@ def _gallery_gacha(selections, character_tags="", seed=-1):
         if any(re.search(pattern, tag) for pattern in identity_patterns):
             continue
         if not re.fullmatch(r"[a-z0-9_()'\-]+", tag):
+            continue
+        candidate = dict(metadata.get(tag) or {"tag": tag, "rating": "unknown", "nsfw": None})
+        candidate["facets"] = list(_infer_gacha_facets(candidate))
+        if not _gacha_item_allowed(candidate, settings):
             continue
         seen.add(tag)
         filtered.append(tag)
@@ -1631,7 +2866,7 @@ def _extract_llm_json(text):
     if isinstance(data.get("tags"), dict):
         data = {**data, **data["tags"]}
     tags = []
-    for kind in ("outfit", "action", "scene", "composition", "lighting"):
+    for kind in ("outfit", "action", "expression", "scene", "environment", "composition", "lighting"):
         values = data.get(kind, [])
         if isinstance(values, str):
             values = re.split(r"[,，;；\n]+", values)
@@ -1654,30 +2889,132 @@ def _extract_llm_json(text):
     return {"name": str(data.get("name") or "AI 匹配卡"), "tags": tags}
 
 
-def _gacha_prompts(character_tags):
+def _normalize_llm_card(result, settings=None):
+    """Keep model planning creative while enforcing local Danbooru vocabulary and user intent."""
+    settings = settings or load_settings()
+    modes = _normalized_category_modes(settings)
+    density = str(settings.get("gacha_density") or "balanced")
+    profile = _GACHA_DENSITY_PROFILES.get(density, _GACHA_DENSITY_PROFILES["balanced"])
+    exact = str(settings.get("gacha_allocation_mode") or "smart") == "exact"
+    caps = _normalized_category_counts(settings) if exact else profile["caps"]
+    candidates = [item for item in (result.get("tags") or [])
+                  if isinstance(item, dict) and modes.get(str(item.get("kind") or ""), "auto") != "off"]
+    names = list(dict.fromkeys(str(item.get("tag") or "").strip() for item in candidates if item.get("tag")))
+    known, catalog_checked = {}, False
+    if names and os.path.isfile(LIBRARY_PATH):
+        try:
+            rows = Library(LIBRARY_PATH).lookup(names)
+            known = {
+                name: row for name, row in rows.items()
+                if str(row.get("category") or "") == "general" and not int(row.get("deprecated") or 0)
+            }
+            catalog_checked = True
+        except Exception:
+            known, catalog_checked = {}, False
+
+    output, counts, seen = [], {kind: 0 for kind in PROMPT_KIND_LABELS}, set()
+    upper = max(1, sum(max(0, int(value or 0)) for value in caps.values())) if exact else profile["range"][1]
+    for item in candidates:
+        tag, kind = str(item.get("tag") or "").strip(), str(item.get("kind") or "")
+        if not tag or tag in seen or kind not in counts or counts[kind] >= max(0, int(caps.get(kind, 0))):
+            continue
+        # When the local official index is available it is authoritative: a
+        # hallucinated model tag must not leak into the prompt.
+        if catalog_checked and tag not in known:
+            continue
+        row = known.get(tag)
+        normalized = dict(item)
+        if row is not None:
+            normalized["translation"] = str(row.get("cn_name") or normalized.get("translation") or "")
+            normalized["post_count"] = int(row.get("post_count") or 0)
+            normalized["rating"] = row.get("rating", "unknown")
+            normalized["nsfw"] = row.get("nsfw")
+            normalized["facets"] = list(_infer_gacha_facets(row))
+        if not _gacha_item_allowed(normalized, settings):
+            continue
+        output.append(normalized)
+        counts[kind] += 1
+        seen.add(tag)
+        if len(output) >= upper:
+            break
+    if not output:
+        raise ValueError("生成式模型没有给出本地 Danbooru 词库可验证的组合标签")
+    return {**result, "tags": output, "planned_counts": counts, "validated": catalog_checked}
+
+
+def _gacha_prompts(character_tags, settings=None):
+    settings = _gacha_runtime_settings(settings)
+    density = str(settings.get("gacha_density") or "balanced")
+    density_label = {"compact": "compact (about 4-6 tags)", "balanced": "balanced (about 7-10 tags)",
+                     "rich": "rich (about 11-15 tags)"}.get(density, "balanced (about 7-10 tags)")
+    modes = _normalized_category_modes(settings)
+    required = [kind for kind, mode in modes.items() if mode == "required"]
+    forbidden = [kind for kind, mode in modes.items() if mode == "off"]
+    facet_modes = _normalized_facet_modes(settings)
+    facet_intent = [f"{mode}:{FACETS[key][0]}" for key, mode in facet_modes.items()]
+    facet_groups = settings.get("gacha_facet_group_preferences") or []
+    if isinstance(facet_groups, str):
+        facet_groups = [facet_groups]
+    content_level = max(0, min(3, int(settings.get("gacha_content_level", 0) or 0)))
+    content_label = ("strict SFW/general", "SFW sensitive but non-explicit", "adult/questionable", "explicit adult")[content_level]
+    holding_mode = str(settings.get("gacha_holding_mode") or "none")
+    holding_label = {
+        "none": "do not add held items or weapons",
+        "daily": "held items may only be ordinary daily-life props, never weapons",
+        "weapon": "held items may only be weapons",
+        "any": "held items are unrestricted when coherent",
+    }.get(holding_mode, "do not add held items or weapons")
+    excluded = str(settings.get("gacha_excluded_tags") or "").strip()
     system_prompt = (
-        "You are a Danbooru prompt planner. Output a single JSON object only. "
+        "You are a conservative Danbooru prompt planner and compatibility editor. Output a single JSON object only. "
         "Never add markdown fences, analysis or prose."
     )
     user_prompt = (
-        "Create one coherent prompt card for the fixed character traits below. "
-        "Never repeat or change identity, face, hair, eye color, age, body traits, species or artist style. "
-        "Generate only compatible outfit, action, scene, composition and lighting tags. "
+        "Create one coherent prompt card that complements the fixed character traits below and, when supplied, the reference image. "
+        "Treat all supplied identity, face, hair, eye color, age, body traits, species, outfit, held objects and artist/style traits as locked. "
+        "Never repeat, replace, recolor or contradict locked traits; add only details that are genuinely missing. "
+        "Generate only mutually compatible outfit, action, expression, scene, environment, composition and lighting tags. "
+        "Avoid contradictory locations, poses, garments, times of day, camera angles and lighting. "
+        f"Use a {density_label} result; choose category counts yourself instead of padding every category. "
+        f"Required categories: {', '.join(required) or '(none)'}. Forbidden categories: {', '.join(forbidden) or '(none)'}. "
+        f"Preferred facet groups: {', '.join(map(str, facet_groups)) or '(automatic)'}. "
+        f"Fine-grained intent: {', '.join(facet_intent) or '(automatic)'}. "
+        f"Content ceiling: {content_label}. Held-object policy: {holding_label}. "
+        f"Forbidden tag/glob list: {excluded or '(none)'}. "
         "Use known lowercase Danbooru-style English tags. Return exactly these keys: "
-        "name, outfit, action, scene, composition, lighting. Each category must be a short JSON string array.\n"
+        "name, outfit, action, expression, scene, environment, composition, lighting. "
+        "Each category must be a short JSON string array and forbidden categories must be empty.\n"
         f"Fixed character/style traits: {character_tags or '(none)'}"
     )
     return system_prompt, user_prompt
 
 
+def _connected_model_gacha(character_tags, api_config=None, local_model=None,
+                           settings_override=None, images=None):
+    """Plan one coherent card with the explicitly connected canvas model."""
+    settings = _gacha_runtime_settings(settings_override)
+    system, prompt = _gacha_prompts(character_tags, settings)
+    content, label = _generate_text_from_ports(
+        system, prompt, api_config=api_config, local_model=local_model,
+        max_tokens=1000, temperature=0.3, images=images,
+    )
+    result = _normalize_llm_card(_extract_llm_json(content), settings)
+    result["provider"] = "connected_model"
+    result["model"] = label
+    result["allocation"] = "smart"
+    return result
+
+
 def _llm_gacha(
     character_tags, provider, profile_name, local_url, local_model,
     comfy_model="", comfy_device="auto", comfy_dtype="bf16", timeout=45,
+    settings_override=None, images=None,
 ):
     import requests
     from . import api_config_manager as config_manager
 
-    system_prompt, prompt = _gacha_prompts(character_tags)
+    runtime_settings = _gacha_runtime_settings(settings_override)
+    system_prompt, prompt = _gacha_prompts(character_tags, runtime_settings)
 
     if provider == "comfyui_model":
         if load_settings().get("exclusive_model_memory", True):
@@ -1690,7 +3027,7 @@ def _llm_gacha(
             device=comfy_device, dtype=comfy_dtype,
             max_new_tokens=600, temperature=0.85, top_p=0.95,
         )
-        result = _extract_llm_json(content)
+        result = _normalize_llm_card(_extract_llm_json(content), runtime_settings)
         result["provider"] = provider
         return result
 
@@ -1711,17 +3048,30 @@ def _llm_gacha(
     if key:
         headers["Authorization"] = f"Bearer {key}"
     endpoint = base_url if base_url.rstrip("/").endswith("/chat/completions") else f"{base_url}/chat/completions"
+    user_content = prompt
+    image_inputs = [image for image in (images or []) if isinstance(image, torch.Tensor)]
+    if image_inputs and re.search(
+        r"(?:vision|(?:^|[-_.])vl(?:[-_.]|$)|qwen[^/]*vl|llava|pixtral|internvl|gpt-4o|gpt-5|gemma[-_.]?[34])",
+        model, flags=re.I,
+    ):
+        from .local_llm_node import _tensor_to_base64
+        encoded = _tensor_to_base64(image_inputs[0], max_size=1024, quality=88, batch_mode="first")
+        if encoded:
+            user_content = [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded[0]}},
+                {"type": "text", "text": prompt},
+            ]
     response = requests.post(
         endpoint, headers=headers,
         json={"model": model, "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ], "temperature": 0.9, "max_tokens": 600},
         timeout=max(10, min(120, int(timeout))),
     )
     response.raise_for_status()
     content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    result = _extract_llm_json(content)
+    result = _normalize_llm_card(_extract_llm_json(content), runtime_settings)
     result["provider"] = provider
     return result
 
@@ -1745,23 +3095,23 @@ async def route_gacha(request):
         character_tags = str(data.get("character_tags") or "")
         seed = data.get("seed", -1)
         if provider == "database":
-            result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+            result = await asyncio.to_thread(_database_gacha, character_tags, seed, None, False, data)
         elif provider == "danbooru_random":
             try:
-                result = await asyncio.to_thread(_danbooru_random_gacha, character_tags, seed)
+                result = await asyncio.to_thread(_danbooru_random_gacha, character_tags, seed, data)
             except Exception as error:
-                result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+                result = await asyncio.to_thread(_database_gacha, character_tags, seed, None, False, data)
                 result["warning"] = f"在线随机不可用，已回退本地标签库: {error}"
         elif provider == "rules":
-            result = _rule_gacha(character_tags, seed)
+            result = _rule_gacha(character_tags, seed, data)
         elif provider == "gallery":
             try:
-                result = _gallery_gacha(data.get("selections") or [], character_tags, seed)
+                result = _gallery_gacha(data.get("selections") or [], character_tags, seed, data)
             except Exception as error:
-                result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+                result = await asyncio.to_thread(_database_gacha, character_tags, seed, None, False, data)
                 result["warning"] = f"画廊标签不可用，已回退本地标签库: {error}"
         elif not bool(settings.get("enable_model_calls", False)):
-            result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+            result = await asyncio.to_thread(_database_gacha, character_tags, seed, None, False, data)
             result["warning"] = "语言模型/API 调用总开关已关闭，未加载模型并回退本地标签库"
         else:
             try:
@@ -1773,10 +3123,11 @@ async def route_gacha(request):
                     data.get("comfy_model") or settings.get("gacha_comfy_model", ""),
                     data.get("comfy_device") or settings.get("gacha_comfy_device", "auto"),
                     data.get("comfy_dtype") or settings.get("gacha_comfy_dtype", "bf16"),
+                    45, data, None,
                 )
             except Exception as error:
                 logger.warning(f"[DanbooruSearch] AI 抽卡失败，回退本地标签库: {error}")
-                result = await asyncio.to_thread(_database_gacha, character_tags, seed)
+                result = await asyncio.to_thread(_database_gacha, character_tags, seed, None, False, data)
                 result["warning"] = f"AI 不可用，已回退本地标签库: {error}"
         return web.json_response({"success": True, **result})
     except Exception as error:
@@ -1797,6 +3148,11 @@ async def route_get_cache(request):
             "gallery_collapsed": bool(settings.get("default_gallery_collapsed", False)),
             "auto_gacha": False,
             "gacha_context": "",
+            "gacha_content_level": int(settings.get("gacha_content_level", 0) or 0),
+            "gacha_holding_mode": str(settings.get("gacha_holding_mode") or "none"),
+            "gacha_excluded_tags": str(settings.get("gacha_excluded_tags") or ""),
+            "release_model_after_output": False,
+            "model_release_request": "",
         })
     return web.json_response({
         "success": True,
@@ -1806,6 +3162,11 @@ async def route_get_cache(request):
         "gallery_collapsed": bool(entry.get("gallery_collapsed", False)),
         "auto_gacha": bool(entry.get("auto_gacha", False)),
         "gacha_context": str(entry.get("gacha_context", "")),
+        "gacha_content_level": int(entry.get("gacha_content_level", 0) or 0),
+        "gacha_holding_mode": str(entry.get("gacha_holding_mode") or "none"),
+        "gacha_excluded_tags": str(entry.get("gacha_excluded_tags", "")),
+        "release_model_after_output": bool(entry.get("release_model_after_output", False)),
+        "model_release_request": str(entry.get("model_release_request", "")),
     })
 
 
@@ -1820,6 +3181,11 @@ async def route_post_cache(request):
             "gallery_collapsed": bool(data.get("gallery_collapsed", False)),
             "auto_gacha": bool(data.get("auto_gacha", False)),
             "gacha_context": str(data.get("gacha_context", "")),
+            "gacha_content_level": max(0, min(3, int(data.get("gacha_content_level", 0) or 0))),
+            "gacha_holding_mode": str(data.get("gacha_holding_mode") or "none"),
+            "gacha_excluded_tags": str(data.get("gacha_excluded_tags", "")),
+            "release_model_after_output": bool(data.get("release_model_after_output", False)),
+            "model_release_request": str(data.get("model_release_request", "")),
         }
         return web.json_response({"success": True})
     except Exception as e:
@@ -1877,6 +3243,37 @@ def _download_image_as_tensor(url):
     return torch.from_numpy(arr)
 
 
+def _format_prompt_variant(tags, variant="sdxl", content_level=0):
+    """Render stable prompt strings without changing the generic tag output."""
+    values = [str(tag or "").strip() for tag in tags if str(tag or "").strip()]
+    identities = {re.sub(r"\s+", " ", value.replace("_", " ").lower()) for value in values}
+    if variant == "anima":
+        try:
+            level = max(0, min(3, int(content_level or 0)))
+        except (TypeError, ValueError):
+            level = 0
+        rating = ("safe", "sensitive", "questionable", "explicit")[level]
+        prefix = ["masterpiece", "best quality", "score_7", rating]
+        # Anima uses readable spaces for ordinary tags. score_N remains the
+        # documented exception and weighted expressions stay intact.
+        body = [re.sub(r"(?<!score)_", " ", value.lower()) for value in values]
+    else:
+        prefix = ["masterpiece", "best quality", "highres"]
+        body = values
+    result = [value for value in prefix if value.replace("_", " ") not in identities]
+    result.extend(body)
+    return ", ".join(result)
+
+
+def _release_connected_generation_model(local_model, reason="manual"):
+    if not isinstance(local_model, dict):
+        return {"released": 0, "reason": reason}
+    from .local_llm_node import release_local_model_handle
+    result = release_local_model_handle(local_model)
+    result["reason"] = reason
+    return result
+
+
 class DanbooruVueSearchNode:
     """Danbooru 语义搜索 + 图库浏览节点。"""
 
@@ -1891,20 +3288,29 @@ class DanbooruVueSearchNode:
                 "character_tags": ("STRING", {"forceInput": True}),
                 # 必须由工作流显式开启；与设置总开关同时为真才允许加载 LLM/API。
                 "enable_language_model": ("BOOLEAN", {"forceInput": True}),
+                # 词库翻译/细分类只使用画布显式连接的模型；本地端口优先。
+                "api_config": ("API_CONFIG", {"forceInput": True}),
+                "local_model": ("EAGLE_LOCAL_LLM_MODEL", {"forceInput": True}),
+                # Separate from gallery images: this can guide a connected VLM
+                # and is returned unchanged on image_passthrough.
+                "reference_image": ("IMAGE", {"forceInput": True}),
             },
+            "hidden": {"node_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("images", "tags")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("images", "tags", "sdxl_prompt", "anima_prompt", "image_passthrough")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle/工具"
-    OUTPUT_NODE = False
+    # 设置面板可显式请求一次词库写入，因此即使没有下游也应执行。
+    OUTPUT_NODE = True
 
     @classmethod
-    def IS_CHANGED(cls, selection_data, character_tags="", enable_language_model=False):
+    def IS_CHANGED(cls, selection_data, character_tags="", enable_language_model=False, **kwargs):
         try:
-            if selection_data and bool(json.loads(selection_data).get("auto_gacha", False)):
-                # 自动抽卡需要每次队列执行，不使用 ComfyUI 结果缓存。
+            controls = json.loads(selection_data) if selection_data else {}
+            if bool(controls.get("auto_gacha", False)) or bool(controls.get("library_enrichment_enabled", False)):
+                # 自动抽卡与已启用的词库补全都需要每次队列执行。
                 return float("nan")
         except Exception:
             pass
@@ -1975,7 +3381,8 @@ class DanbooruVueSearchNode:
             return rendered
         return f"({rendered}:{weight:g})"
 
-    def execute(self, selection_data, character_tags="", enable_language_model=False):
+    def execute(self, selection_data, character_tags="", enable_language_model=False,
+                api_config=None, local_model=None, reference_image=None, node_id=None):
         # 解析前端写入的选中数据
         selections = []
         selected_tags = None
@@ -1989,8 +3396,33 @@ class DanbooruVueSearchNode:
         except Exception:
             pass
 
+        library_fill_request = parsed.get("library_fill_request")
+        if isinstance(library_fill_request, dict):
+            try:
+                _run_library_port_fill(
+                    library_fill_request, node_id,
+                    api_config=api_config, local_model=local_model,
+                )
+            except Exception as error:
+                # Image/tag output stays usable; the settings panel exposes the
+                # exact one-shot job error and the same request can be retried.
+                logger.warning(f"[DanbooruSearch] 词库模型填充未完成: {error}")
+        elif bool(parsed.get("library_enrichment_enabled", False)):
+            try:
+                _run_library_port_fill(
+                    {
+                        "continuous": True,
+                        "batch": parsed.get("library_enrichment_batch", 20),
+                    },
+                    node_id, api_config=api_config, local_model=local_model,
+                )
+            except Exception as error:
+                # One bounded batch per normal queue; this never starts a
+                # self-running loop. A failed batch remains the next candidate.
+                logger.warning(f"[DanbooruSearch] 已启用的词库模型补全未完成: {error}")
+
         if bool(parsed.get("auto_gacha", False)):
-            settings = load_settings()
+            settings = _gacha_runtime_settings(parsed)
             provider = str(settings.get("gacha_provider") or "database")
             context = ", ".join(filter(None, [
                 str(character_tags or "").strip(),
@@ -2001,25 +3433,42 @@ class DanbooruVueSearchNode:
                 ),
             ]))
             try:
-                if provider == "database":
-                    card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                connected_planner = (
+                    str(settings.get("gacha_allocation_mode") or "smart") == "smart"
+                    and bool(settings.get("gacha_model_planning", True))
+                    and bool(enable_language_model)
+                    and bool(settings.get("enable_model_calls", False))
+                    and (local_model is not None or api_config is not None)
+                )
+                if connected_planner:
+                    try:
+                        card = _connected_model_gacha(
+                            context, api_config=api_config, local_model=local_model,
+                            settings_override=parsed, images=[reference_image] if reference_image is not None else None,
+                        )
+                    except Exception as error:
+                        logger.warning(f"[DanbooruSearch] 连接模型规划失败，回退本地智能规则: {error}")
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), constraints=parsed)
+                        card["warning"] = f"连接模型规划不可用，已回退本地智能规则: {error}"
+                elif provider == "database":
+                    card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), constraints=parsed)
                 elif provider == "danbooru_random":
                     try:
-                        card = _danbooru_random_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                        card = _danbooru_random_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), parsed)
                     except Exception as error:
                         logger.warning(f"[DanbooruSearch] 在线抽卡失败，回退本地标签库: {error}")
-                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), constraints=parsed)
                 elif provider == "rules":
-                    card = _rule_gacha(context, parsed.get("gacha_seed", -1))
+                    card = _rule_gacha(context, parsed.get("gacha_seed", -1), parsed)
                 elif provider == "gallery":
                     try:
-                        card = _gallery_gacha(selections, context, parsed.get("gacha_seed", -1))
+                        card = _gallery_gacha(selections, context, parsed.get("gacha_seed", -1), parsed)
                     except Exception as error:
                         logger.warning(f"[DanbooruSearch] 画廊标签抽卡失败，回退本地标签库: {error}")
-                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), constraints=parsed)
                 elif not (bool(enable_language_model) and bool(settings.get("enable_model_calls", False))):
                     # 两级开关防止节点加载时或误执行时占用本地模型/API。
-                    card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                    card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), constraints=parsed)
                 else:
                     try:
                         card = _llm_gacha(
@@ -2028,10 +3477,11 @@ class DanbooruVueSearchNode:
                             settings.get("gacha_comfy_model", ""),
                             settings.get("gacha_comfy_device", "auto"),
                             settings.get("gacha_comfy_dtype", "bf16"),
+                            45, parsed, [reference_image] if reference_image is not None else None,
                         )
                     except Exception as error:
                         logger.warning(f"[DanbooruSearch] 自动 AI 抽卡失败，回退本地标签库: {error}")
-                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)))
+                        card = _database_gacha(context, parsed.get("gacha_seed", settings.get("gacha_seed", -1)), constraints=parsed)
                 selected_tags = [item for item in (selected_tags or []) if not _is_gacha_source(item)]
                 selected_tags.extend(card.get("tags", []))
             except Exception as error:
@@ -2108,8 +3558,26 @@ class DanbooruVueSearchNode:
                 # 重复时显式权重优先，允许顶部编辑器覆盖前置无权重标签。
                 unique_tags[positions[key]] = rendered
         tags_str = ", ".join(unique_tags)
+        try:
+            content_level = max(0, min(3, int(parsed.get("gacha_content_level", output_settings.get("gacha_content_level", 0)) or 0)))
+        except (TypeError, ValueError):
+            content_level = 0
+        sdxl_prompt = _format_prompt_variant(unique_tags, "sdxl", content_level)
+        anima_prompt = _format_prompt_variant(unique_tags, "anima", content_level)
+        passthrough = reference_image if isinstance(reference_image, torch.Tensor) else torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
-        return (batch, tags_str)
+        release_request = str(parsed.get("model_release_request") or "").strip()
+        release_once = bool(release_request) and release_request not in _model_release_seen
+        release_after = bool(parsed.get("release_model_after_output", False))
+        if release_once or release_after:
+            if release_request:
+                _model_release_seen.append(release_request)
+            released = _release_connected_generation_model(
+                local_model, "manual" if release_once else "after_output"
+            )
+            logger.info(f"[DanbooruSearch] 生成模型释放策略执行完成: {released}")
+
+        return (batch, tags_str, sdxl_prompt, anima_prompt, passthrough)
 
 
 NODE_CLASS_MAPPINGS = {

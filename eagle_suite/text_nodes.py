@@ -8,12 +8,45 @@ import os
 import re
 import random
 import glob
+import json
 from pathlib import Path
 
 from .logger import logger
 
 
-# ── 1. 保存字符串到文件 ───────────────────────────────────────────────────────
+# ── 1. 精简文本 ───────────────────────────────────────────────────────────────
+
+class EagleText:
+    """只有一个编辑框和一个标准 STRING 输出的轻量文本节点。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "dynamicPrompts": True,
+                    "placeholder": "text",
+                    "tooltip": "纯文本输入，不处理、不截断、不改变空白。",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle/文本"
+    DESCRIPTION = (
+        "最小文本节点：一个多行编辑框、一个 STRING 输出。"
+        "需要外接优先、替换、分行、统计或 JSON 工具时使用智能文本工作台。"
+    )
+
+    def execute(self, text=""):
+        return (text,)
+
+
+# ── 2. 保存字符串到文件 ───────────────────────────────────────────────────────
 
 class EagleSaveString:
     """将字符串保存到文本文件"""
@@ -141,6 +174,8 @@ class EagleConcatStrings:
     RETURN_NAMES = ("text",)
     FUNCTION = "concat"
     CATEGORY = "🦅 Eagle/文本"
+    DEPRECATED = True
+    DESCRIPTION = "旧固定四路拼接；新工作流请使用“多重文本切换”的输出全部模式。"
 
     def concat(self, separator, text_1="", text_2="", text_3="", text_4=""):
         parts = [p.strip() for p in [text_1, text_2, text_3, text_4] if p and str(p).strip()]
@@ -331,29 +366,194 @@ class EaglePromptPreset:
         return (", ".join(parts),)
 
 
+# ── 9. 智能文本工作台 ─────────────────────────────────────────────────────────
+
+class EagleTextStudio:
+    """可编辑、可外接并带结果预览的现代文本处理节点。"""
+
+    SOURCE_MODES = ["外接优先", "编辑框", "编辑框 + 外接", "外接 + 编辑框"]
+    TRANSFORMS = [
+        "原样",
+        "去除首尾空白",
+        "压缩空白",
+        "删除空行",
+        "行去重",
+        "行排序（升序）",
+        "行排序（降序）",
+        "JSON 美化",
+        "JSON 压缩",
+    ]
+    REPLACE_MODES = ["关闭", "普通替换", "正则替换"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "dynamicPrompts": True,
+                    "placeholder": "输入文本；也可以连接外部文本",
+                }),
+                "source_mode": (cls.SOURCE_MODES, {"default": "外接优先"}),
+                "separator": ("STRING", {
+                    "default": ",",
+                    "multiline": False,
+                    "tooltip": "拼接时使用，默认为英文逗号；支持 \\n、\\t 和 \\r 转义",
+                }),
+                "transform": (cls.TRANSFORMS, {"default": "原样"}),
+                "replace_mode": (cls.REPLACE_MODES, {"default": "关闭"}),
+                "find_text": ("STRING", {"default": "", "multiline": False}),
+                "replace_text": ("STRING", {"default": "", "multiline": False}),
+                "case_sensitive": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "input_text": ("STRING", {"forceInput": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "INT", "INT", "BOOLEAN")
+    RETURN_NAMES = ("text", "lines", "stats_json", "char_count", "line_count", "json_valid")
+    OUTPUT_IS_LIST = (False, True, False, False, False, False)
+    FUNCTION = "process"
+    OUTPUT_NODE = True
+    CATEGORY = "🦅 Eagle/文本"
+
+    @staticmethod
+    def _decode_separator(value):
+        """只解释常见分隔符转义，避免 unicode_escape 破坏中文。"""
+        value = str(value or "")
+        replacements = {r"\n": "\n", r"\t": "\t", r"\r": "\r", r"\\": "\\"}
+        return re.sub(r"\\(?:n|t|r|\\)", lambda match: replacements[match.group(0)], value)
+
+    @staticmethod
+    def _join(parts, separator):
+        return separator.join(str(part) for part in parts if part is not None and str(part) != "")
+
+    @staticmethod
+    def _word_count(value):
+        # 拉丁/数字连续串算一个词；每个中日韩字符算一个词，适合中英文混排提示词。
+        latin_words = re.findall(r"[A-Za-z0-9_]+(?:['’-][A-Za-z0-9_]+)*", value)
+        cjk_chars = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", value)
+        return len(latin_words) + len(cjk_chars)
+
+    def process(
+        self,
+        text,
+        source_mode,
+        separator,
+        transform,
+        replace_mode,
+        find_text,
+        replace_text,
+        case_sensitive,
+        input_text=None,
+    ):
+        editor_text = str(text or "")
+        external_text = "" if input_text is None else str(input_text)
+        actual_separator = self._decode_separator(separator)
+
+        if source_mode == "编辑框":
+            result = editor_text
+        elif source_mode == "编辑框 + 外接":
+            result = self._join((editor_text, external_text), actual_separator)
+        elif source_mode == "外接 + 编辑框":
+            result = self._join((external_text, editor_text), actual_separator)
+        else:  # 外接优先
+            result = external_text if external_text != "" else editor_text
+
+        notices = []
+        if replace_mode != "关闭" and find_text:
+            try:
+                if replace_mode == "正则替换":
+                    flags = 0 if case_sensitive else re.IGNORECASE
+                    result = re.sub(find_text, replace_text, result, flags=flags)
+                elif case_sensitive:
+                    result = result.replace(find_text, replace_text)
+                else:
+                    result = re.sub(re.escape(find_text), lambda _match: replace_text, result, flags=re.IGNORECASE)
+            except re.error as exc:
+                notices.append(f"正则表达式无效：{exc}")
+
+        try:
+            if transform == "去除首尾空白":
+                result = result.strip()
+            elif transform == "压缩空白":
+                result = re.sub(r"\s+", " ", result).strip()
+            elif transform == "删除空行":
+                result = "\n".join(line for line in result.splitlines() if line.strip())
+            elif transform == "行去重":
+                result = "\n".join(dict.fromkeys(line for line in result.splitlines() if line.strip()))
+            elif transform in ("行排序（升序）", "行排序（降序）"):
+                lines = [line for line in result.splitlines() if line.strip()]
+                result = "\n".join(sorted(
+                    lines,
+                    key=lambda line: line.casefold(),
+                    reverse=transform == "行排序（降序）",
+                ))
+            elif transform in ("JSON 美化", "JSON 压缩"):
+                payload = json.loads(result)
+                if transform == "JSON 美化":
+                    result = json.dumps(payload, ensure_ascii=False, indent=2)
+                else:
+                    result = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            notices.append(f"JSON 处理失败：{exc}")
+
+        output_lines = result.splitlines() if result else []
+        non_empty_lines = [line for line in output_lines if line.strip()]
+        try:
+            json.loads(result)
+            json_valid = bool(result.strip())
+        except (json.JSONDecodeError, TypeError, ValueError):
+            json_valid = False
+
+        status = "；".join(notices) if notices else "处理完成"
+        stats = {
+            "characters": len(result),
+            "bytes_utf8": len(result.encode("utf-8")),
+            "lines": len(output_lines),
+            "non_empty_lines": len(non_empty_lines),
+            "words": self._word_count(result),
+            "json_valid": json_valid,
+            "status": status,
+        }
+        stats_json = json.dumps(stats, ensure_ascii=False, indent=2)
+        stats_label = (
+            f"{stats['characters']} 字符 · {stats['lines']} 行 · "
+            f"{stats['words']} 词 · UTF-8 {stats['bytes_utf8']} B"
+        )
+        return {
+            "ui": {"text": [result], "stats": [stats_label], "status": [status]},
+            "result": (result, output_lines, stats_json, len(result), len(output_lines), json_valid),
+        }
+
+
 # ── 导出 ──────────────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS_TEXT = {
+    "EagleText": EagleText,
     "EagleSaveString": EagleSaveString,
     "EagleLoadTextFiles": EagleLoadTextFiles,
-    "EagleConcatStrings": EagleConcatStrings,
     "EagleSplitString": EagleSplitString,
     "EagleRandomLine": EagleRandomLine,
     "EagleTextSwitch": EagleTextSwitch,
-    "EagleTemplateReplace": EagleTemplateReplace,
+    "EagleTextStudio": EagleTextStudio,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS_TEXT = {
+    "EagleText": "🦅 文本",
     "EagleSaveString": "🦅 保存字符串",
     "EagleLoadTextFiles": "🦅 加载文本文件",
-    "EagleConcatStrings": "🦅 拼接文本",
     "EagleSplitString": "🦅 分割文本",
     "EagleRandomLine": "🦅 随机选择文本",
     "EagleTextSwitch": "🦅 文本条件分支",
-    "EagleTemplateReplace": "🦅 模板替换",
+    "EagleTextStudio": "🦅 智能文本工作台",
 }
 
 __all__ = [
+    "EagleText",
+    "EagleTextStudio",
     "NODE_CLASS_MAPPINGS_TEXT",
     "NODE_DISPLAY_NAME_MAPPINGS_TEXT",
 ]

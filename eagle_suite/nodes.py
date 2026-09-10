@@ -20,9 +20,14 @@ from .lora_gallery import EagleLoraGalleryNode
 from .advanced_video_saver import EagleAdvancedVideoSaver
 from .danbooru_search import DanbooruVueSearchNode
 from .text_switch_node import EagleTextSwitchMulti
+from .latent_switch_node import EagleLatentSwitchMulti
 from .unified_media_browser import UnifiedMediaBrowser
 from .video_preview_node import EagleVideoGifPreviewNode
-from .h3_director_node import EagleH3DirectorNode, EagleH3MediaPortsNode
+from .media_timeline_editor import EagleMediaTimelineEditor
+from .h3_director_node import (
+    EagleH3DirectorNode,
+    EagleH3MediaBridgeNode,
+)
 from .h3_pipeline import (
     NODE_CLASS_MAPPINGS_H3PIPELINE,
     NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE,
@@ -58,6 +63,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleBatchVideoLoader":    EagleBatchVideoLoader,
     "EagleVideoFrameExtractor": EagleVideoFrameExtractor,
     "EagleVideoInfo":           EagleVideoInfo,
+    "EagleMediaTimelineEditor": EagleMediaTimelineEditor,
 
     # API
     "EagleAPIUnifiedNode": EagleAPIUnifiedNode,
@@ -77,7 +83,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleLoraGalleryNode": EagleLoraGalleryNode,
     "UnifiedMediaBrowser": UnifiedMediaBrowser,
     "EagleH3DirectorNode": EagleH3DirectorNode,
-    "EagleH3MediaPortsNode": EagleH3MediaPortsNode,
+    "EagleH3MediaBridgeNode": EagleH3MediaBridgeNode,
     "EagleDirectorSkillNode": EagleDirectorSkillNode,
     "EagleMemoryReleaseNode": EagleMemoryReleaseNode,
 
@@ -87,6 +93,9 @@ NODE_CLASS_MAPPINGS = {
     # 文本
     "EagleTextSwitchMulti": EagleTextSwitchMulti,
     "EaglePromptVariablesNode": EaglePromptVariablesNode,
+
+    # Latent
+    "EagleLatentSwitchMulti": EagleLatentSwitchMulti,
 
     # 工具
     "EagleAudioList":       EagleAudioList,
@@ -116,6 +125,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleBatchVideoLoader":    "🦅 批量视频加载",
     "EagleVideoFrameExtractor": "🦅 视频帧提取",
     "EagleVideoInfo":           "🦅 视频信息",
+    "EagleMediaTimelineEditor": "🦅 媒体剪辑台",
 
     # API
     "EagleAPIUnifiedNode": "🦅 API 多功能调用",
@@ -135,7 +145,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleLoraGalleryNode": "🦅 LoRA Gallery",
     "UnifiedMediaBrowser": "🦅 统一媒体浏览器",
     "EagleH3DirectorNode": "🦅 H3 导演台",
-    "EagleH3MediaPortsNode": "🦅 H3 媒体集成端口",
+    "EagleH3MediaBridgeNode": "🦅 H3 标准媒体桥",
     "EagleDirectorSkillNode": "🦅 导演技能库",
     "EagleMemoryReleaseNode": "🦅 模型显存释放",
     # Danbooru
@@ -144,6 +154,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
    # 文本
     "EagleTextSwitchMulti": "🦅 多重文本切换",
     "EaglePromptVariablesNode": "🦅 变量输入",
+
+    # Latent
+    "EagleLatentSwitchMulti": "🦅 多重 Latent 随机切换",
 
     # 工具
     "EagleAudioList":     "🦅 音频浏览器",
@@ -158,22 +171,6 @@ NODE_DISPLAY_NAME_MAPPINGS.update(NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE)
 # 各实现文件仍可以保留自身 CATEGORY 作为独立调试默认值，
 # 但插件正常加载时以这里为唯一的最终分类，避免节点散落到多个根菜单。
 MENU_ROOT = "🦅 Eagle Suite"
-
-_H3_CORE_KEYS = (
-    "EagleH3PlanNode",
-    "EagleH3NativeLoopStartNode",
-    "EagleH3ShotContextNode",
-    "EagleH3CheckpointReviewNode",
-    "EagleH3NativeLoopEndNode",
-)
-_H3_TOOL_KEYS = (
-    "EagleH3ExportPNGSequenceNode",
-    "EagleH3SeamProbeNode",
-    "EagleH3SmartSplitNode",
-)
-_H3_REFERENCE_KEYS = (
-    "EagleH3ReferenceConditionNode",
-)
 
 _CATEGORY_GROUPS = {
     f"{MENU_ROOT}/Eagle": (
@@ -197,6 +194,7 @@ _CATEGORY_GROUPS = {
         EagleBatchVideoLoader,
         EagleVideoFrameExtractor,
         EagleVideoInfo,
+        EagleMediaTimelineEditor,
         EagleVideoGifPreviewNode,
         GifCompressorNode,
     ),
@@ -217,26 +215,19 @@ _CATEGORY_GROUPS = {
     f"{MENU_ROOT}/文本": (
         EagleTextSwitchMulti,
         EaglePromptVariablesNode,
+        EaglePromptPresets,
+        EagleStringRows,
         *tuple(NODE_CLASS_MAPPINGS_TEXT.values()),
     ),
     f"{MENU_ROOT}/工具": (
-        EaglePromptPresets,
-        EagleStringRows,
         EagleMemoryReleaseNode,
+        EagleLatentSwitchMulti,
     ),
     f"{MENU_ROOT}/H3 导演台": (
         EagleH3DirectorNode,
-        EagleH3MediaPortsNode,
+        EagleH3MediaBridgeNode,
         EagleDirectorSkillNode,
-    ),
-    f"{MENU_ROOT}/H3 导演台/核心流程": tuple(
-        NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_CORE_KEYS
-    ),
-    f"{MENU_ROOT}/H3 导演台/参考条件": tuple(
-        NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_REFERENCE_KEYS
-    ),
-    f"{MENU_ROOT}/H3 导演台/工具": tuple(
-        NODE_CLASS_MAPPINGS_H3PIPELINE[key] for key in _H3_TOOL_KEYS
+        *tuple(NODE_CLASS_MAPPINGS_H3PIPELINE.values()),
     ),
 }
 
@@ -244,6 +235,6 @@ for _category, _node_classes in _CATEGORY_GROUPS.items():
     for _node_class in _node_classes:
         _node_class.CATEGORY = _category
 
-del _category, _node_classes, _node_class, _H3_CORE_KEYS, _H3_REFERENCE_KEYS, _H3_TOOL_KEYS
+del _category, _node_classes, _node_class
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

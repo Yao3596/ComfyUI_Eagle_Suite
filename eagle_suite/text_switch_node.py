@@ -15,7 +15,7 @@ import random
 
 # 前端最多支持动态增减到这个数量的输入端口（Python 侧要把 optional 全部声明出来，
 # 前端才能在这个上限内自由增减；需要更多可以调大这个数字，两边要保持一致）。
-MAX_INPUTS = 32
+MAX_INPUTS = 9
 INPUT_PREFIX = "字符串_"
 
 

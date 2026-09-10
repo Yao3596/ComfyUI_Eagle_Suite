@@ -129,6 +129,8 @@ def encode_api_key(raw: str) -> str:
             import keyring
             reference = hashlib.sha256(text.encode("utf-8")).hexdigest()
             keyring.set_password(_KEYRING_SERVICE, reference, text)
+            if keyring.get_password(_KEYRING_SERVICE, reference) != text:
+                raise RuntimeError("凭据库写入后校验失败")
             return _KEYRING_PREFIX + reference
         except Exception as error:
             logger.warning(f"[APIConfigManager] 系统凭据库不可用，回退 DPAPI: {error}")
@@ -481,10 +483,12 @@ def get_profile_for_frontend(name: str) -> dict:
     profile = get_profile(name)
     if not profile:
         return {}
+    stored_key = profile.get("api_key", "")
     return {
         "name": str(name or "").strip(),
         "api_key": "",
-        "api_key_set": bool(profile.get("api_key")),
+        "api_key_set": bool(stored_key),
+        "credential_available": bool(decode_api_key(stored_key)) if stored_key else False,
         "base_url": profile.get("base_url", ""),
         "model": profile.get("model", ""),
         "model_type": normalize_model_type(

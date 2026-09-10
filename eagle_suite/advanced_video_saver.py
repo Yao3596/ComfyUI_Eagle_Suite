@@ -170,12 +170,13 @@ class EagleAdvancedVideoSaver:
             images = None  # 忽略 images
         
         # === 1. 解析保存目标 ===
-        save_to_eagle = bool(eagle_folder.strip())
-        save_to_local = bool(local_save_path.strip())
-        save_to_output = not save_to_local  # 如果没指定本地路径，保存到默认 output
-        
-        if not save_to_eagle and not save_to_local and not save_to_output:
-            return self._error_result("❌ 请至少指定 Eagle 文件夹或本地保存路径")
+        eagle_folder = str(eagle_folder or "").strip()
+        local_save_path = str(local_save_path or "").strip()
+        save_to_eagle = bool(eagle_folder)
+        save_to_local = bool(local_save_path)
+        # 没有显式本地路径时，始终以 ComfyUI/output 作为持久文件落点；
+        # Eagle-only 模式也需要该文件承载 VIDEO 输出与前端预览。
+        save_to_output = not save_to_local
         
         # 解析 Eagle 文件夹 ID
         folder_id = None
@@ -195,8 +196,12 @@ class EagleAdvancedVideoSaver:
                 if not folder_id:
                     return self._error_result(f"❌ 找不到 Eagle 文件夹: {value}")
             elif itype == "local_path":
-                logger.warning("检测到 Eagle 文件夹处填写了本地路径，已忽略 Eagle 保存")
+                logger.warning("检测到 Eagle 文件夹处填写了本地路径，改为本地保存")
                 save_to_eagle = False
+                if not save_to_local:
+                    local_save_path = str(value)
+                    save_to_local = True
+                    save_to_output = False
         
         # 创建输出目录
         if save_to_output:
@@ -410,9 +415,9 @@ class EagleAdvancedVideoSaver:
         
         # === 9. 生成视频预览 ===
         ui_result = {}
-        if preview and unique_id:
+        if preview:
             logger.debug("生成视频预览")
-            ui_result = self._generate_preview(final_path, unique_id, filename)
+            ui_result = self._generate_preview(final_path, unique_id or "node", filename)
         
         # === 10. 清理临时文件 ===
         temp_owner.cleanup()
@@ -423,6 +428,8 @@ class EagleAdvancedVideoSaver:
             save_result += f"🦅 Eagle: {eagle_result}{folder_correction}\n"
         if save_to_local:
             save_result += f"📁 本地: {local_save_path}\n"
+        elif save_to_output:
+            save_result += f"📁 ComfyUI 默认 output: {output_path}\n"
         save_result += f"🧩 视频内工作流: {'成功，可直接由支持视频元数据的 ComfyUI 读取' if embed_result['success'] else '该格式不可靠，已使用 PNG 伴随文件'}\n"
         if workflow_png:
             save_result += f"🖼️ 工作流 PNG: {workflow_png}\n"
@@ -701,14 +708,20 @@ class EagleAdvancedVideoSaver:
         try:
             output_dir = folder_paths.get_output_directory()
             
-            if str(video_path.parent) == output_dir:
+            try:
+                in_output = video_path.parent.resolve() == Path(output_dir).resolve()
+            except Exception:
+                in_output = os.path.abspath(str(video_path.parent)) == os.path.abspath(str(output_dir))
+
+            if in_output:
                 return {
-                    "videos": [{
+                    "images": [{
                         "filename": video_path.name,
                         "subfolder": "",
                         "type": "output",
                         "format": self._video_mime_type(video_path.suffix.lstrip('.'))
-                    }]
+                    }],
+                    "animated": (True,),
                 }
             else:
                 temp_dir = folder_paths.get_temp_directory()
@@ -727,12 +740,13 @@ class EagleAdvancedVideoSaver:
                     shutil.copy2(video_path, preview_path)
                 
                 return {
-                    "videos": [{
+                    "images": [{
                         "filename": preview_filename,
                         "subfolder": "",
                         "type": "temp",
                         "format": self._video_mime_type(video_path.suffix.lstrip('.'))
-                    }]
+                    }],
+                    "animated": (True,),
                 }
         except Exception as e:
             logger.warning(f"预览生成失败: {str(e)}")

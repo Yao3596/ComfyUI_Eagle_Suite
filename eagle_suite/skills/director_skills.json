@@ -104,6 +104,25 @@
     "created_at": "2026-08-25T16:45:06.57806",
     "updated_at": "2026-08-25T16:45:06.57806"
   },
+  "pro-v1-video-to-image-edit": {
+    "id": "pro-v1-video-to-image-edit",
+    "name": "参考视频驱动图像编辑",
+    "category": "video_to_image_editing",
+    "tasks": [
+      "script",
+      "shots"
+    ],
+    "tags": [
+      "video-reference",
+      "image-editing",
+      "identity-lock",
+      "motion-transfer"
+    ],
+    "content": "# 参考视频驱动图像编辑\n\n## Purpose\n以参考图片提供主体身份、造型与材质，以参考视频提供动作节奏、姿态演变、镜头路径和构图变化；输出描述的是目标画面，不复述素材。\n\n## Required Inputs\n- 至少一张身份/外观参考图片；用 `<Picture N>` 指定其所有权。\n- 可选参考视频；用 `<Video N>` 指定动作、时间、运镜或构图所有权。\n- 若无视频，只执行静态图像编辑；若无图片，明确禁止声称身份被严格锁定。\n\n## Reference Ownership\n- Picture owns：身份、脸、发型、服装、配色、材质、稳定配饰。\n- Video owns：动作相位、姿态演变、镜头轨迹、速度曲线、时间节奏。\n- 文本 owns：允许发生的编辑目标、环境、灯光和例外规则。\n\n## Immutable Locks\n除非用户明确要求，人物身份、物种特征、脸部结构、发型、服装结构、身体比例与画风保持不变。\n\n## Editable Dimensions\n只编辑用户点名的姿态、表情、镜头、环境、灯光或局部物体；未点名维度继承 Picture。\n\n## Motion/Camera Transfer\n从 Video 提取可迁移的动作阶段、重心变化、遮挡关系、镜头方向、幅度、速度和结束构图；不要复制视频中的人物外貌或无关物体。\n\n## Prompt Construction Order\n1. 声明 Picture 与 Video 的所有权。\n2. 写目标主体及严格保留项。\n3. 写从 Video 迁移的动作/姿态/运镜。\n4. 写允许改变的环境、光线和构图。\n5. 写禁止变化与结束状态。\n\n## Forbidden Changes\n禁止无依据新增角色、肢体、手持物、文字、水印、服饰部件或背景主体；禁止把参考视频人物外观覆盖到参考图片主体。\n\n## Validation Checklist\n- 身份与服装是否仍由 Picture 控制？\n- 动作、镜头和节奏是否能追溯到 Video？\n- 是否只改了用户允许的维度？\n- 是否删除了无关手持物、角色和视频背景？\n- 结尾构图是否明确且可执行？",
+    "filmstrip": [],
+    "created_at": "2026-09-10T00:00:00",
+    "updated_at": "2026-09-10T00:00:00"
+  },
   "pro-v1-sound-dialogue": {
     "id": "pro-v1-sound-dialogue",
     "name": "台词、表演与声音叙事",

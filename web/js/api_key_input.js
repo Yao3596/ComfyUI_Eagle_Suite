@@ -234,7 +234,9 @@ function _showProfileDialog(title, initial = {}, onSave) {
             value: initial.model_type || 'llm',
             options: Object.entries(_MODEL_TYPE_LABELS),
         },
-        { key: 'api_key', label: 'API Key', type: 'password', value: _decodeKey(initial.api_key || '') },
+        { key: 'api_key', label: initial.api_key_set
+            ? (initial.credential_available === false ? 'API Key（已保存引用失效，请重新输入）' : 'API Key（已保存，留空保持不变）')
+            : 'API Key', type: 'password', value: _decodeKey(initial.api_key || '') },
         { key: 'base_url', label: 'Base URL', type: 'text', value: initial.base_url || '' },
         { key: 'model', label: '模型名称（同时作为 api_config 根键）', type: 'text', value: initial.model || '' },
     ];
@@ -261,15 +263,75 @@ function _showProfileDialog(title, initial = {}, onSave) {
             width: 100%; padding: 8px 10px; border: 1px solid #444; border-radius: 5px;
             background: #121216; color: #e0e0e0; font-size: 13px; box-sizing: border-box;
         `;
-        if (f.key === 'model' && initial.lockName) {
-            inp.disabled = true;
-            inp.style.opacity = '0.6';
-        }
         row.appendChild(lbl);
         row.appendChild(inp);
         box.appendChild(row);
         inputs[f.key] = inp;
     });
+
+    const probeRow = document.createElement('div');
+    probeRow.style.cssText = 'margin:2px 0 12px;';
+    const probeButton = document.createElement('button');
+    probeButton.type = 'button';
+    probeButton.textContent = '🔌 检查连通并读取模型';
+    probeButton.style.cssText = 'width:100%;padding:8px;border:1px solid #42638f;border-radius:5px;background:#203551;color:#dceaff;cursor:pointer;';
+    const probeStatus = document.createElement('div');
+    probeStatus.style.cssText = 'display:none;margin-top:7px;padding:7px 9px;border-radius:5px;background:#111820;color:#9fb3c9;font-size:11px;line-height:1.5;word-break:break-word;';
+    const remoteSelect = document.createElement('select');
+    remoteSelect.style.cssText = 'display:none;width:100%;margin-top:7px;padding:8px 10px;border:1px solid #42638f;border-radius:5px;background:#121216;color:#e0e0e0;font-size:13px;box-sizing:border-box;';
+    remoteSelect.addEventListener('change', () => {
+        if (remoteSelect.value) inputs.model.value = remoteSelect.value;
+    });
+    probeButton.addEventListener('click', async () => {
+        const baseUrl = String(inputs.base_url.value || '').trim();
+        if (!baseUrl) {
+            probeStatus.style.display = 'block';
+            probeStatus.style.color = '#ffb77a';
+            probeStatus.textContent = '请先填写 Base URL';
+            return;
+        }
+        probeButton.disabled = true;
+        probeButton.textContent = '⏳ 正在检查 /models…';
+        probeStatus.style.display = 'block';
+        probeStatus.style.color = '#9fb3c9';
+        probeStatus.textContent = '只读取模型列表，不会发送聊天或生图请求。';
+        remoteSelect.style.display = 'none';
+        try {
+            const data = await _callApi('/api_loader/fetch_models', {
+                profile_name: initial.source_profile || initial.name || '',
+                api_key: String(inputs.api_key.value || '').trim(),
+                base_url: baseUrl,
+                model_type: inputs.model_type.value,
+            });
+            const models = Array.isArray(data.models) ? data.models : [];
+            remoteSelect.innerHTML = '';
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                remoteSelect.appendChild(option);
+            });
+            const current = String(inputs.model.value || '').trim();
+            if (models.includes(current)) remoteSelect.value = current;
+            else if (models.length) remoteSelect.value = models[0];
+            if (models.length) {
+                remoteSelect.style.display = 'block';
+                remoteSelect.dispatchEvent(new Event('change'));
+            }
+            const currentFound = current && models.includes(current);
+            probeStatus.style.color = '#7ee0a5';
+            probeStatus.textContent = `✅ API 连通 | ${data.elapsed_ms ?? '?'} ms | 发现 ${models.length} 个模型` +
+                (current ? ` | 原模型${currentFound ? '存在' : '不在返回列表中'}` : '');
+        } catch (error) {
+            probeStatus.style.color = '#ff8f8f';
+            probeStatus.textContent = '❌ ' + (error.message || String(error));
+        } finally {
+            probeButton.disabled = false;
+            probeButton.textContent = '🔌 重新检查并刷新模型';
+        }
+    });
+    probeRow.append(probeButton, remoteSelect, probeStatus);
+    box.appendChild(probeRow);
 
     const ft = document.createElement('div');
     ft.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;margin-top:18px;';
@@ -560,11 +622,14 @@ async function _editProfile(node) {
     }
 
     const ok = await _showProfileDialog('✏️ 编辑 API 模型', {
+        name: currentName,
+        source_profile: currentName,
         api_key: profile.api_key,
+        api_key_set: profile.api_key_set,
+        credential_available: profile.credential_available,
         base_url: profile.base_url,
         model: profile.model,
         model_type: profile.model_type || 'llm',
-        lockName: true,
     }, async result => {
         if (!result.base_url || !result.model) {
             alert('Base URL 和 Model 不能为空');

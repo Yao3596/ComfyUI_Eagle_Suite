@@ -27,8 +27,17 @@ const MODE_OPTIONS = [
 const CATEGORY_OPTIONS = [
   { value: "all",       label: "全部类别" },
   { value: "general",   label: "General" },
+  { value: "artist",    label: "Artist" },
   { value: "character", label: "Character" },
   { value: "copyright", label: "Copyright" },
+  { value: "meta",      label: "Meta" },
+];
+
+const GALLERY_SORT_OPTIONS = [
+  { value: "id_desc", label: "最新" },
+  { value: "score", label: "评分热门" },
+  { value: "favcount", label: "收藏热门" },
+  { value: "random", label: "随机" },
 ];
 
 const RATING_OPTIONS = [
@@ -49,6 +58,7 @@ const TAG_CATEGORIES = [
 ];
 
 const PAGE_LIMIT = 40;
+const libraryFacetLabels = reactive({});
 
 const TAG_KIND_LABELS = {
   semantic: "语义", detail: "图片", manual: "手动", gacha: "抽卡",
@@ -59,6 +69,20 @@ const PROMPT_KIND_LABELS = {
   outfit: "服装", action: "动作", expression: "表情", scene: "场景",
   environment: "环境", composition: "构图", lighting: "光照",
 };
+
+const GACHA_FACET_GROUPS = [
+  { key: "character", label: "人物锁定", prefixes: ["identity", "body", "hair", "face"] },
+  { key: "styling", label: "换装", prefixes: ["clothing"] },
+  { key: "expression", label: "面部表情", prefixes: ["expression"] },
+  { key: "pose", label: "身体姿态", prefixes: ["pose"] },
+  { key: "interaction", label: "动作交互", prefixes: ["action"], excludeKeys: ["action.self_contact", "action.intimate"] },
+  { key: "adult", label: "成人内容", keys: ["action.self_contact", "action.intimate"] },
+  { key: "world", label: "场景环境", prefixes: ["scene", "environment"] },
+  { key: "visual", label: "镜头画面", prefixes: ["camera", "lighting", "style"] },
+];
+
+const GACHA_MODE_LABELS = { auto: "自动", required: "必选", off: "禁用" };
+const GACHA_FACET_MODE_LABELS = { "": "自动", prefer: "偏好", required: "必选", off: "禁用" };
 
 const TAG_MAJOR_GROUPS = [
   { key: "character", label: "人物" },
@@ -89,8 +113,28 @@ function applyDanbooruUiSettings(settings = {}) {
   danbooruUiSettings.groupOutputTags = false;
 }
 
+async function readJsonResponse(response, label = "服务") {
+  const raw = await response.text();
+  if (!raw.trim()) {
+    throw new Error(`${label}返回空响应；前后端版本可能不一致，请重启 ComfyUI 后刷新浏览器`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    throw new Error(`${label}返回非 JSON（HTTP ${response.status}）：${raw.slice(0, 160)}`);
+  }
+}
+
 function inferTagTaxonomy(value) {
   const item = typeof value === "string" ? { tag: value } : (value || {});
+  if (Array.isArray(item.facets) && item.facets.length) {
+    const facet = item.facets[0];
+    Object.assign(TAG_SUBGROUP_LABELS, item.facet_labels || libraryFacetLabels);
+    const major = { identity: "character", body: "character", hair: "character", face: "character",
+      clothing: "styling", pose: "action", action: "action", expression: "action", scene: "world",
+      environment: "world", camera: "visual", lighting: "visual", style: "visual" }[facet.split(".")[0]];
+    if (major) return { major, sub: facet };
+  }
   const tag = String(item.tag || "").toLowerCase().replace(/\s+/g, "_");
   const cn = String(item.translation || item.cn_name || translationCache[tag] || "").toLowerCase();
   const text = tag + "_" + cn;
@@ -189,6 +233,8 @@ function normalizeTagItem(value, defaults = {}) {
     translation: resolveTranslation(tag, raw.translation),
     category: raw.category || defaults.category || "general",
     kind: raw.kind || defaults.kind || "general",
+    facets: Array.isArray(raw.facets) ? raw.facets.slice() : [],
+    facet_labels: raw.facet_labels || {},
     source: raw.source || defaults.source || "manual",
     // Weight is intentionally not clamped. Advanced prompt syntaxes may use
     // values outside the usual -2..2 range; only reject non-finite values.
@@ -367,6 +413,7 @@ const TagSearchPanel = {
     const errorMsg = ref("");
     const results = ref([]);
     const keywords = ref([]);
+    const searchSummary = ref("");
     const selected = ref([]);
     const related = ref([]);
     const relatedLoading = ref(false);
@@ -394,18 +441,25 @@ const TagSearchPanel = {
           }),
         });
 
-        const data = await res.json();
+        const data = await readJsonResponse(res, "本地标签搜索接口");
 
         if (data.success) {
           results.value = data.results || [];
           keywords.value = data.keywords || [];
+          const source = data.data_source || {};
+          const semanticText = source.semantic
+            ? `；向量 ${source.semantic}${source.semantic_rows ? ` ${Number(source.semantic_rows).toLocaleString()} 条` : ""}`
+            : "";
+          searchSummary.value = `检索来源：精确 ${source.direct || "未知"}${semanticText}`;
         } else {
           errorMsg.value = data.error || "搜索失败";
           results.value = [];
+          searchSummary.value = "";
         }
       } catch (e) {
         errorMsg.value = "请求失败: " + e.message;
         results.value = [];
+        searchSummary.value = "";
       } finally {
         loading.value = false;
       }
@@ -420,6 +474,7 @@ const TagSearchPanel = {
           cn_name: item.cn_name,
           category: item.category,
           kind: item.kind,
+          facets: item.facets, facet_labels: item.facet_labels,
           score: item.score,
         });
       }
@@ -455,7 +510,7 @@ const TagSearchPanel = {
             body: JSON.stringify({ tags, limit: 50, show_nsfw: showNsfw.value }),
           });
 
-          const data = await res.json();
+          const data = await readJsonResponse(res, "关联标签接口");
           if (data.success) {
             related.value = data.results || [];
           }
@@ -474,6 +529,7 @@ const TagSearchPanel = {
         cn_name: item.cn_name,
         category: item.category,
         kind: item.kind,
+        facets: item.facets, facet_labels: item.facet_labels,
         score: item.cooc_score,
       });
       loadRelated();
@@ -485,6 +541,7 @@ const TagSearchPanel = {
           translation: s.cn_name || "",
           category: String(s.category || "general").toLowerCase(),
           kind: s.kind || "semantic",
+          facets: s.facets, facet_labels: s.facet_labels,
           source: "semantic",
           weight: 1,
           enabled: true,
@@ -508,7 +565,7 @@ const TagSearchPanel = {
         h("div", { class: "dbs-search-box" }, [
           h("textarea", {
             class: "dbs-input",
-            placeholder: "描述你想要的画面，例如：一个在雨中奔跑的少女",
+            placeholder: "本地标签库查词（中/英文），例如：一个在雨中奔跑的少女",
             value: query.value,
             onInput: e => { query.value = e.target.value; },
             onKeydown: e => {
@@ -550,6 +607,7 @@ const TagSearchPanel = {
           keywords.value.length > 0
             ? h("div", { class: "dbs-keywords" }, "分词: " + keywords.value.join(" / "))
             : null,
+          searchSummary.value ? h("div", { class: "dbs-keywords" }, searchSummary.value) : null,
         ]),
 
         h("div", { class: "dbs-results" }, [
@@ -562,6 +620,7 @@ const TagSearchPanel = {
             : h("div", { class: "dbs-table" }, results.value.map(r => {
                 return h("div", {
                   class: ["dbs-row", selectedTags.value[r.tag] ? "selected" : ""],
+                  title: [r.tag, r.cn_name, r.wiki].filter(Boolean).join("\n"),
                   onClick: () => toggleSelect(r),
                 }, [
                   h("input", {
@@ -575,6 +634,7 @@ const TagSearchPanel = {
                   h("span", { class: "dbs-tag", title: r.tag }, r.tag),
                   h("span", { class: "dbs-cn" }, r.cn_name || ""),
                   h("span", { class: "dbs-cat dbs-cat-" + (r.category || "").toLowerCase() }, r.category || ""),
+                  h("span", { class: "dbs-count", title: "Danbooru 作品数" }, r.count ? Number(r.count).toLocaleString() : ""),
                   h("span", { class: "dbs-score" }, r.score != null ? r.score.toFixed(2) : ""),
                 ]);
               })),
@@ -893,6 +953,12 @@ const GalleryPanel = {
     const selected = reactive(new Set());
     const selectedPosts = ref([]);
     const ratingFilter = ref("general");
+    const sortOrder = ref("id_desc");
+    const minScore = ref(0);
+    const minFavorites = ref(0);
+    const poolQuery = ref("");
+    const poolResults = ref([]);
+    const poolLoading = ref(false);
     const pageLimit = ref(PAGE_LIMIT);
     const lazyLoadImages = ref(true);
 
@@ -931,6 +997,9 @@ const GalleryPanel = {
             page: pageNum,
             limit: pageLimit.value,
             rating_filter: ratingFilter.value,
+            sort_order: sortOrder.value,
+            min_score: Math.max(0, Number(minScore.value) || 0),
+            min_favorites: Math.max(0, Number(minFavorites.value) || 0),
           }),
         });
 
@@ -974,6 +1043,31 @@ const GalleryPanel = {
       if (loading.value || loadingMore.value || !hasMore.value) return;
       page.value++;
       fetchPage(page.value, false);
+    }
+
+    async function searchPools() {
+      if (!poolQuery.value.trim() || poolLoading.value) return;
+      poolLoading.value = true;
+      errorMsg.value = "";
+      try {
+        const response = await fetch("/danbooru_search/api/pools", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: poolQuery.value, category: "series", limit: 20 }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || "Pool 搜索失败");
+        poolResults.value = data.pools || [];
+      } catch (error) {
+        errorMsg.value = "Pool 搜索失败: " + error.message;
+        poolResults.value = [];
+      } finally { poolLoading.value = false; }
+    }
+
+    function usePool(pool) {
+      tags.value = `pool:${pool.id}`;
+      poolQuery.value = String(pool.name || "").replaceAll("_", " ");
+      poolResults.value = [];
+      doSearch();
     }
 
     function onScroll(e) {
@@ -1088,9 +1182,43 @@ const GalleryPanel = {
             onChange: e => { ratingFilter.value = e.target.value; },
           }, RATING_OPTIONS.map(o => h("option", { value: o.value }, o.label))),
 
+          h("select", {
+            class: "dbg-select",
+            value: sortOrder.value,
+            title: "Danbooru 官方 order 排序",
+            onChange: e => { sortOrder.value = e.target.value; doSearch(); },
+          }, GALLERY_SORT_OPTIONS.map(o => h("option", { value: o.value }, o.label))),
+
           h("button", { class: "dbg-btn primary", onClick: doSearch }, loading.value ? "搜索中…" : "🔍 搜索"),
 
           h("div", { class: "dbg-page-info" }, posts.value.length > 0 ? ("已加载 " + posts.value.length + " 张") : ""),
+        ]),
+
+        h("div", { class: "dbg-filter-bar" }, [
+          h("label", {}, ["最低评分 ", h("input", {
+            class: "dbg-number", type: "number", min: 0, value: minScore.value,
+            onInput: e => { minScore.value = Math.max(0, Number(e.target.value) || 0); },
+            onKeydown: e => { if (e.key === "Enter") doSearch(); },
+          })]),
+          h("label", {}, ["最低收藏 ", h("input", {
+            class: "dbg-number", type: "number", min: 0, value: minFavorites.value,
+            onInput: e => { minFavorites.value = Math.max(0, Number(e.target.value) || 0); },
+            onKeydown: e => { if (e.key === "Enter") doSearch(); },
+          })]),
+          h("div", { class: "dbg-pool-search" }, [
+            h("input", {
+              class: "dbg-pool-input", value: poolQuery.value,
+              placeholder: "系列 Pool 名称",
+              onInput: e => { poolQuery.value = e.target.value; poolResults.value = []; },
+              onKeydown: e => { if (e.key === "Enter") { e.preventDefault(); searchPools(); } },
+            }),
+            h("button", { class: "dbg-btn", disabled: poolLoading.value, onClick: searchPools }, poolLoading.value ? "查找中…" : "查系列"),
+            poolResults.value.length ? h("div", { class: "dbg-pool-results" }, poolResults.value.map(pool => h("button", {
+              title: `${pool.category || "pool"} · ${pool.post_count || 0} 张`,
+              onClick: () => usePool(pool),
+            }, [h("span", {}, String(pool.name || "").replaceAll("_", " ")), h("small", {}, pool.post_count || 0)]))) : null,
+          ]),
+          h("span", {}, "热门/收藏由服务端筛选；Pool 仅点击查找时请求。"),
         ]),
 
         h("div", {
@@ -1526,15 +1654,165 @@ const SelectionBar = {
 // 子组件：设置弹窗
 // ════════════════════════════════════════════════════════════════════════════
 
+const TagLibraryPanel = {
+  name: "TagLibraryPanel",
+  props: {
+    node: { type: Object, required: true },
+  },
+  setup(props) {
+    const info = ref(null), error = ref(""), busy = ref(false);
+    const pages = ref(10), batch = ref(20);
+    const enrichmentEnabled = ref(false);
+    let timer = null, alive = true;
+    function selectionWidget() {
+      return (props.node.widgets || []).find(item => item.name === "selection_data");
+    }
+    function readSelectionPayload() {
+      try { return JSON.parse(selectionWidget()?.value || "{}"); }
+      catch (_) { return {}; }
+    }
+    function saveEnrichmentState(enabled) {
+      const widget = selectionWidget();
+      if (!widget) throw new Error("找不到 selection_data，刷新页面或重新创建节点后再试。");
+      const payload = readSelectionPayload();
+      payload.library_enrichment_enabled = !!enabled;
+      payload.library_enrichment_batch = Math.min(50, Math.max(1, Number(batch.value) || 1));
+      delete payload.library_fill_request;
+      widget.value = JSON.stringify(payload);
+      if (typeof widget.callback === "function") widget.callback(widget.value, widget, props.node);
+      props.node.graph?.change?.();
+      props.node.graph?.setDirtyCanvas?.(true, true);
+      enrichmentEnabled.value = !!enabled;
+    }
+    async function refresh() {
+      clearTimeout(timer);
+      try {
+        const res = await fetch("/danbooru_search/library");
+        const data = await readJsonResponse(res, "词库状态接口");
+        if (!res.ok || !data.success) throw new Error(data.error || "读取词库状态失败");
+        if (!alive) return;
+        info.value = data;
+        Object.assign(libraryFacetLabels, data.facets || {});
+        if (data.job.running) timer = setTimeout(refresh, 2500);
+      } catch (e) { if (alive) error.value = e.message; }
+    }
+    async function run(action, extra = {}) {
+      busy.value = true; error.value = "";
+      try {
+        const res = await fetch("/danbooru_search/library", { method: "POST",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, pages: pages.value, batch: batch.value, ...extra }) });
+        const data = await readJsonResponse(res, "词库任务接口");
+        if (!res.ok || !data.success) throw new Error(data.error || "任务失败");
+        if (action === "review") {
+          for (const key of Object.keys(translationCache)) delete translationCache[key];
+        }
+        await refresh();
+      } catch (e) { error.value = e.message; }
+      finally { busy.value = false; }
+    }
+    function inputConnected(name) {
+      const input = (props.node?.inputs || []).find(item => item?.name === name);
+      return !!input && (input.link != null || (Array.isArray(input.links) && input.links.length > 0));
+    }
+    async function togglePortFill() {
+      error.value = "";
+      if (enrichmentEnabled.value) {
+        try {
+          saveEnrichmentState(false);
+          error.value = "已关闭模型词库补全；正在执行的单批不会强制中断。";
+        } catch (e) { error.value = e.message; }
+        return;
+      }
+      if (!inputConnected("local_model") && !inputConnected("api_config")) {
+        error.value = "请先在节点左侧连接 local_model 或 api_config；本地模型端口优先。";
+        return;
+      }
+      busy.value = true;
+      try {
+        saveEnrichmentState(true);
+        await app.queuePrompt(0);
+        error.value = "✅ 已启用并提交首批；以后每次正常执行工作流时只处理一批。";
+        setTimeout(refresh, 800);
+      } catch (e) {
+        try { saveEnrichmentState(false); } catch (_) {}
+        error.value = "提交模型填充失败：" + e.message;
+      } finally {
+        busy.value = false;
+      }
+    }
+    onMounted(() => {
+      const payload = readSelectionPayload();
+      enrichmentEnabled.value = !!payload.library_enrichment_enabled;
+      if (Number(payload.library_enrichment_batch) > 0) {
+        batch.value = Math.min(50, Math.max(1, Number(payload.library_enrichment_batch)));
+      }
+      refresh();
+    });
+    onBeforeUnmount(() => { alive = false; clearTimeout(timer); });
+    return () => {
+      const data = info.value, running = busy.value || data?.job?.running;
+      const button = (label, action) => h("button", { class: "dbs-btn", disabled: running, onClick: () => run(action) }, label);
+      const bootstrap = data?.bootstrap || {};
+      const progress = data?.job?.progress || {};
+      const progressLabel = progress.stage === "groups" ? "Wiki 标签组" : progress.stage === "tags" ? "官方标签" : progress.stage === "seed" ? "随附词表" : "准备中";
+      return h("section", { class: "dbs-setting-section" }, [
+        h("h4", {}, "本地词库 · 同步 / 翻译 / 审核"),
+        h("p", { class: "dbs-setting-desc" }, "首次初始化依次导入随附词表、续传 Wiki 分组和官方标签，只读取元数据、不抓图片。完成阶段不会重复执行；中断后从事务断点继续。"),
+        data ? h("p", {}, `本地 ${data.status.total} 条 · 原表译名 ${data.status.translated} 条 · API 更新 ${data.status.official} 条 · Wiki 组 ${data.status.groups} 个 · 已审核 ${data.status.annotations.approved || 0} 条 · 待审核 ${data.status.annotations.pending || 0} 条`) : null,
+        data ? h("div", { class: ["dbs-bootstrap-card", bootstrap.ready ? "ready" : "pending"] }, [
+          h("strong", {}, bootstrap.ready ? "✅ 首次词库初始化已完成" : "⏳ 首次词库尚未完成"),
+          h("span", {}, bootstrap.ready
+            ? `官方标签与 Wiki 组均已抵达结束页；建议约 ${bootstrap.refresh_days || 30} 天后再手动刷新。`
+            : `当前阶段：${bootstrap.stage === "groups" ? "Wiki 标签组" : "官方标签"}；已保存官方记录 ${bootstrap.tag_records || 0} 条。`),
+          h("button", { class: "dbs-btn primary", disabled: running || bootstrap.ready, onClick: () => run("bootstrap") }, bootstrap.tag_records ? "继续首次初始化" : "开始首次初始化"),
+        ]) : null,
+        h("div", { class: "dbs-setting-checks" }, [button("导入/补充随附词表", "seed"),
+          h("label", {}, ["每轮页数 ", h("input", { type: "number", min: 0, value: pages.value, style: { width: "80px" }, onInput: e => { pages.value = Math.max(0, Number(e.target.value) || 0); } })]),
+          button("手动同步/续传官方标签", "tags"), button("手动同步/续传 Wiki 组", "groups"),
+        ]),
+        h("p", { class: "dbs-setting-desc" }, "一键首次初始化会运行到结束；手动同步默认 10 页，每页至多 1000 条，0 表示运行到结束。请求节奏读取已保存的连接设置；429/5xx 退避，403、跳转或验证页立即停止。"),
+        h("div", { class: "dbs-setting-checks" }, [
+          h("label", {}, ["翻译单批 ", h("input", { type: "number", min: 1, max: 50, value: batch.value, style: { width: "80px" }, onInput: e => { batch.value = Math.min(50, Math.max(1, Number(e.target.value) || 1)); } })]),
+          button("④ 检索本批官方释义", "wiki"),
+          h("button", {
+            class: ["dbs-btn", enrichmentEnabled.value ? "danger" : "primary"],
+            disabled: busy.value,
+            onClick: togglePortFill,
+          }, enrichmentEnabled.value ? "模型补全：已启用 · 点击关闭" : "模型补全：已关闭 · 点击启用"),
+          button("导出 JSONL + 已审核 Markdown", "export"),
+          h("button", { class: "dbs-btn", disabled: !data?.job?.running, onClick: () => run("stop") }, "停止采集并保留断点"),
+          h("button", { class: "dbs-btn", onClick: refresh }, "刷新状态"),
+        ]),
+        h("p", { class: "dbs-setting-desc" }, "这不是首次连接或数据库校验。开关只控制“每次工作流执行时，用画布已连接模型翻译/细分类一批”；local_model 优先，未连接时才用 api_config。结果先进入待审核，不会自动采用，也不会自行循环排队。"),
+        h("p", { role: "status" }, data?.job?.message || "读取中…"),
+        data?.job?.running ? h("p", { class: "dbs-library-progress" }, `${progressLabel} · 本轮 ${progress.pages_this_run || 0} 页 · 已记录 ${progress.records || 0} 条 · 断点 ${progress.cursor || "准备中"}`) : null,
+        error.value ? h("p", { role: "alert" }, error.value) : null,
+        ...(data?.pending || []).map(item => h("div", { class: "dbs-status-card", key: item.name }, [
+          h("strong", {}, item.name + " → " + (item.cn_name || "译名不确定")),
+          h("span", {}, item.facets.map(key => libraryFacetLabels[key] || key).join("、") || "尚未分类"),
+          h("span", {}, `评级 ${item.rating} · 置信度 ${item.confidence} · ${item.model}`),
+          h("span", {}, item.note),
+          h("div", { class: "dbs-setting-checks" }, [
+            h("button", { class: "dbs-btn", disabled: running, onClick: () => run("review", { name: item.name, approve: true }) }, "核对无误，采用"),
+            h("button", { class: "dbs-btn", disabled: running, onClick: () => run("review", { name: item.name, approve: false }) }, "拒绝"),
+          ]),
+        ])),
+      ]);
+    };
+  },
+};
+
 const SettingsDialog = {
   name: "SettingsDialog",
   props: {
     visible: Boolean,
     onClose: Function,
     onSaved: Function,
+    initialTab: String,
+    node: { type: Object, required: true },
   },
   setup(props) {
-    const activeTab = ref("general");
+    const activeTab = ref(props.initialTab || "general");
     const tagDisplayLanguage = ref("bilingual");
     const groupOutputTags = ref(false);
     const includeSelectedImageTags = ref(true);
@@ -1548,14 +1826,32 @@ const SettingsDialog = {
     const hideAi = ref(true);
     const proxyUrl = ref("");
     const apiBaseUrl = ref("https://danbooru.donmai.us");
+    const libraryRequestInterval = ref(3);
+    const libraryRequestJitter = ref(1);
+    const libraryPauseEveryPages = ref(25);
+    const libraryPauseSeconds = ref(15);
+    const libraryRefreshDays = ref(30);
     const enableModelCalls = ref(false);
     const searchMode = ref("hybrid");
     const searchTopK = ref(80);
     const searchResultLimit = ref(80);
     const searchPopularityWeight = ref(0.15);
     const searchTagTypes = ref(["General", "Artist", "Copyright", "Character", "Meta"]);
+    const semanticUseLibrary = ref(true);
+    const semanticLibraryLimit = ref(60000);
+    const semanticLibraryMinPostCount = ref(100);
+    const semanticTestStatus = ref("");
+    const testingSemantic = ref(false);
     const gachaProvider = ref("database");
     const gachaCounts = ref({ outfit: 2, action: 2, expression: 1, scene: 2, environment: 2, composition: 1, lighting: 1 });
+    const gachaFacetCounts = ref({});
+    const gachaAllocationMode = ref("smart");
+    const gachaDensity = ref("balanced");
+    const gachaCategoryModes = ref(Object.fromEntries(Object.keys(PROMPT_KIND_LABELS).map(key => [key, "auto"])));
+    const gachaFacetModes = ref({});
+    const gachaModelPlanning = ref(true);
+    const selectedGachaFacetGroups = ref(["styling"]);
+    const libraryModelProvider = ref("comfyui_model");
     const gachaAvoidDuplicates = ref(true);
     const gachaSeed = ref(-1);
     const gachaOnlineQuery = ref("");
@@ -1572,11 +1868,33 @@ const SettingsDialog = {
     const lazyLoadImages = ref(true);
     const gachaProfiles = ref([]);
     const localModels = ref([]);
+    const ollamaModels = ref([]);
     const tagDataStatus = ref(null);
     const reloadingTags = ref(false);
     const saving = ref(false);
     const errorMsg = ref("");
     const importInput = ref(null);
+
+    async function scanOllama() {
+      try {
+        const res = await fetch("/danbooru_search/ollama_models");
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || "Ollama 连接失败");
+        ollamaModels.value = data.models || [];
+        gachaLocalUrl.value = data.base_url;
+        libraryModelProvider.value = "local_openai";
+        const names = ollamaModels.value.map(model => model.name);
+        if (!names.includes(gachaLocalModel.value)) {
+          gachaLocalModel.value = names.find(name => /^qwen.*27b/i.test(name))
+            || names.find(name => /^gemma.*12b/i.test(name))
+            || names[0]
+            || "";
+        }
+        errorMsg.value = gachaLocalModel.value
+          ? `✅ 已连接 Ollama，发现 ${names.length} 个模型，已选 ${gachaLocalModel.value}；保存后生效`
+          : "Ollama 已连接，但未发现可用模型";
+      } catch (e) { errorMsg.value = e.message; }
+    }
 
     const tabs = [
       ["general", "通用"], ["connection", "Danbooru 连接"], ["search", "搜索与匹配"],
@@ -1598,14 +1916,32 @@ const SettingsDialog = {
       hideAi.value = s.hide_ai !== false;
       proxyUrl.value = s.proxy_url || "";
       apiBaseUrl.value = s.api_base_url || "https://danbooru.donmai.us";
+      libraryRequestInterval.value = Number(s.library_request_interval ?? 3);
+      libraryRequestJitter.value = Number(s.library_request_jitter ?? 1);
+      libraryPauseEveryPages.value = Number(s.library_pause_every_pages ?? 25);
+      libraryPauseSeconds.value = Number(s.library_pause_seconds ?? 15);
+      libraryRefreshDays.value = Number(s.library_refresh_days ?? 30);
       searchMode.value = s.search_mode || "hybrid";
       searchTopK.value = Number(s.search_top_k || 80);
       searchResultLimit.value = Number(s.search_result_limit || 80);
       searchPopularityWeight.value = Number(s.search_popularity_weight ?? 0.15);
       searchTagTypes.value = Array.isArray(s.search_tag_types) ? s.search_tag_types.slice() : ["General", "Artist", "Copyright", "Character", "Meta"];
+      semanticUseLibrary.value = s.semantic_use_library !== false;
+      semanticLibraryLimit.value = Number(s.semantic_library_limit || 60000);
+      semanticLibraryMinPostCount.value = Number(s.semantic_library_min_post_count ?? 100);
       enableModelCalls.value = s.enable_model_calls === true;
       gachaProvider.value = s.gacha_provider || "database";
       gachaCounts.value = { ...gachaCounts.value, ...(s.gacha_category_counts || {}) };
+      gachaFacetCounts.value = { ...(s.gacha_facet_counts || {}) };
+      gachaAllocationMode.value = s.gacha_allocation_mode || "smart";
+      gachaDensity.value = s.gacha_density || "balanced";
+      gachaCategoryModes.value = { ...gachaCategoryModes.value, ...(s.gacha_category_modes || {}) };
+      gachaFacetModes.value = { ...(s.gacha_facet_modes || {}) };
+      selectedGachaFacetGroups.value = Array.isArray(s.gacha_facet_group_preferences)
+        ? [...new Set(s.gacha_facet_group_preferences.filter(key => GACHA_FACET_GROUPS.some(group => group.key === key)))]
+        : ["styling"];
+      gachaModelPlanning.value = s.gacha_model_planning !== false;
+      libraryModelProvider.value = s.library_model_provider || "comfyui_model";
       gachaAvoidDuplicates.value = s.gacha_avoid_duplicates !== false;
       gachaSeed.value = Number(s.gacha_seed ?? -1);
       gachaOnlineQuery.value = s.gacha_online_query || "";
@@ -1631,11 +1967,25 @@ const SettingsDialog = {
         default_gallery_collapsed: defaultGalleryCollapsed.value, model_path: modelPath.value,
         danbooru_username: username.value, danbooru_api_key: apiKey.value,
         rating_filter: ratingFilter.value, hide_ai: hideAi.value, proxy_url: proxyUrl.value,
-        api_base_url: apiBaseUrl.value, search_mode: searchMode.value,
+        api_base_url: apiBaseUrl.value,
+        library_request_interval: libraryRequestInterval.value,
+        library_request_jitter: libraryRequestJitter.value,
+        library_pause_every_pages: libraryPauseEveryPages.value,
+        library_pause_seconds: libraryPauseSeconds.value,
+        library_refresh_days: libraryRefreshDays.value,
+        search_mode: searchMode.value,
         search_top_k: searchTopK.value, search_result_limit: searchResultLimit.value,
         search_popularity_weight: searchPopularityWeight.value, search_tag_types: searchTagTypes.value,
+        semantic_use_library: semanticUseLibrary.value,
+        semantic_library_limit: semanticLibraryLimit.value,
+        semantic_library_min_post_count: semanticLibraryMinPostCount.value,
         enable_model_calls: enableModelCalls.value, gacha_provider: gachaProvider.value,
         gacha_category_counts: gachaCounts.value, gacha_avoid_duplicates: gachaAvoidDuplicates.value,
+        gacha_facet_counts: gachaFacetCounts.value, library_model_provider: libraryModelProvider.value,
+        gacha_allocation_mode: gachaAllocationMode.value, gacha_density: gachaDensity.value,
+        gacha_category_modes: gachaCategoryModes.value, gacha_facet_modes: gachaFacetModes.value,
+        gacha_facet_group_preferences: selectedGachaFacetGroups.value,
+        gacha_model_planning: gachaModelPlanning.value,
         gacha_seed: gachaSeed.value, gacha_online_query: gachaOnlineQuery.value,
         gacha_min_post_count: gachaMinPostCount.value, gacha_api_profile: gachaApiProfile.value,
         gacha_local_url: gachaLocalUrl.value, gacha_local_model: gachaLocalModel.value,
@@ -1650,7 +2000,7 @@ const SettingsDialog = {
       errorMsg.value = "";
       try {
         const res = await fetch("/danbooru_search/settings");
-        const data = await res.json();
+        const data = await readJsonResponse(res, "设置接口");
 
         if (data.success && data.settings) {
           applySettings(data.settings);
@@ -1658,16 +2008,19 @@ const SettingsDialog = {
           errorMsg.value = data.error || "读取设置失败";
         }
         const profilesRes = await fetch("/danbooru_search/gacha_profiles");
-        const profilesData = await profilesRes.json();
+        const profilesData = await readJsonResponse(profilesRes, "模型配置接口");
         gachaProfiles.value = profilesData.success && Array.isArray(profilesData.profiles) ? profilesData.profiles : [];
         const [modelsRes, statusRes] = await Promise.all([
           fetch("/danbooru_search/local_models"),
           fetch("/danbooru_search/tag_data_status"),
         ]);
-        const modelsData = await modelsRes.json();
-        const statusData = await statusRes.json();
+        const modelsData = await readJsonResponse(modelsRes, "本地模型接口");
+        const statusData = await readJsonResponse(statusRes, "标签状态接口");
         localModels.value = modelsData.success && Array.isArray(modelsData.models) ? modelsData.models : [];
         tagDataStatus.value = statusData.success ? statusData.data : null;
+        const libraryRes = await fetch("/danbooru_search/library");
+        const libraryData = await readJsonResponse(libraryRes, "词库接口");
+        if (libraryData.success) Object.assign(libraryFacetLabels, libraryData.facets || {});
       } catch (e) {
         errorMsg.value = "读取设置失败: " + e.message;
       }
@@ -1683,7 +2036,7 @@ const SettingsDialog = {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(collectSettings()),
         });
-        const data = await res.json();
+        const data = await readJsonResponse(res, "设置保存接口");
         if (!res.ok || !data.success) {
           throw new Error(data.error || ("HTTP " + res.status));
         }
@@ -1703,8 +2056,16 @@ const SettingsDialog = {
       reloadingTags.value = true;
       errorMsg.value = "";
       try {
-        const res = await fetch("/danbooru_search/reload_tag_data", { method: "POST" });
-        const data = await res.json();
+        const res = await fetch("/danbooru_search/reload_tag_data", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            semantic_use_library: semanticUseLibrary.value,
+            semantic_library_limit: semanticLibraryLimit.value,
+            semantic_library_min_post_count: semanticLibraryMinPostCount.value,
+          }),
+        });
+        const data = await readJsonResponse(res, "标签数据刷新接口");
         if (!res.ok || !data.success) throw new Error(data.error || ("HTTP " + res.status));
         tagDataStatus.value = data.data || null;
         Object.keys(translationCache).forEach(key => { delete translationCache[key]; });
@@ -1713,6 +2074,27 @@ const SettingsDialog = {
         errorMsg.value = "标签重载失败: " + error.message;
       } finally {
         reloadingTags.value = false;
+      }
+    }
+
+    async function testSemanticModel() {
+      if (testingSemantic.value) return;
+      testingSemantic.value = true;
+      semanticTestStatus.value = "正在加载编码器并校验中英文向量…";
+      try {
+        const res = await fetch("/danbooru_search/test_semantic_model", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model_path: modelPath.value }),
+        });
+        const data = await readJsonResponse(res, "向量模型校验接口");
+        if (!res.ok || !data.success) throw new Error(data.error || ("HTTP " + res.status));
+        const value = data.result || {};
+        semanticTestStatus.value = `✅ 校验通过 · ${value.dimension || "?"} 维 · ${value.device || "?"} · 中英相似度 ${value.bilingual_similarity ?? "?"} · ${value.seconds ?? "?"} 秒`;
+      } catch (error) {
+        semanticTestStatus.value = "❌ " + error.message;
+      } finally {
+        testingSemantic.value = false;
       }
     }
 
@@ -1755,6 +2137,37 @@ const SettingsDialog = {
       event.target.value = "";
     }
 
+    function cycleGachaCategory(kind) {
+      const current = gachaCategoryModes.value[kind] || "auto";
+      const next = current === "auto" ? "required" : current === "required" ? "off" : "auto";
+      gachaCategoryModes.value = { ...gachaCategoryModes.value, [kind]: next };
+    }
+
+    function cycleGachaFacet(key) {
+      const current = gachaFacetModes.value[key] || "";
+      const next = current === "" ? "prefer" : current === "prefer" ? "required" : current === "required" ? "off" : "";
+      const updated = { ...gachaFacetModes.value };
+      if (next) updated[key] = next;
+      else delete updated[key];
+      gachaFacetModes.value = updated;
+    }
+
+    function facetsForGroup(groupKey) {
+      const group = GACHA_FACET_GROUPS.find(item => item.key === groupKey) || GACHA_FACET_GROUPS[0];
+      return Object.entries(libraryFacetLabels).filter(([key]) => {
+        if (Array.isArray(group.keys)) return group.keys.includes(key);
+        const matches = (group.prefixes || []).includes(String(key).split(".", 1)[0]);
+        return matches && !(group.excludeKeys || []).includes(key);
+      });
+    }
+
+    function toggleGachaFacetGroup(groupKey) {
+      const current = selectedGachaFacetGroups.value;
+      selectedGachaFacetGroups.value = current.includes(groupKey)
+        ? current.filter(key => key !== groupKey)
+        : [...current, groupKey];
+    }
+
     watch(() => props.visible, (visible) => {
       if (visible) loadSettings();
     }, { immediate: true });
@@ -1792,6 +2205,13 @@ const SettingsDialog = {
           row("隐藏 AI 图片", h("input", { type: "checkbox", checked: hideAi.value, onChange: e => { hideAi.value = e.target.checked; } }), "在响应后过滤，不占用匿名 API 的标签额度"),
           h("button", { class: "dbs-btn", onClick: testDanbooru }, "测试连接"),
         ]),
+        section("词库同步节奏", [
+          row("请求基础间隔（秒）", numberInput(libraryRequestInterval.value, v => { libraryRequestInterval.value = Math.max(2, Math.min(60, v || 2)); }, 2, 60, 0.5), "每次元数据请求之间至少等待该时间"),
+          row("随机抖动（秒）", numberInput(libraryRequestJitter.value, v => { libraryRequestJitter.value = Math.max(0, Math.min(30, v || 0)); }, 0, 30, 0.5), "用于平滑多个客户端同时请求，不用于规避识别"),
+          row("每隔多少页长休息", numberInput(libraryPauseEveryPages.value, v => { libraryPauseEveryPages.value = Math.max(0, Math.min(1000, v || 0)); }, 0, 1000), "0 表示关闭周期性长休息"),
+          row("长休息秒数", numberInput(libraryPauseSeconds.value, v => { libraryPauseSeconds.value = Math.max(0, Math.min(600, v || 0)); }, 0, 600, 1)),
+          row("完整刷新提醒（天）", numberInput(libraryRefreshDays.value, v => { libraryRefreshDays.value = Math.max(1, Math.min(365, v || 30)); }, 1, 365), "只提醒，不会在打开节点时自动联网"),
+        ], "推荐保持默认：3–4 秒一次、每 25 页额外休息约 15 秒。修改后先保存，再启动首次初始化。"),
       ];
       else if (activeTab.value === "search") panel = [
         section("搜索与排序", [
@@ -1803,36 +2223,105 @@ const SettingsDialog = {
         ], "直接搜索不加载模型；语义/混合搜索才按需加载语义编码器。"),
       ];
       else if (activeTab.value === "data") panel = [
-        section("标签数据", [
+        h(TagLibraryPanel, { node: props.node }),
+        section("本地检索数据源", [
           h("div", { class: "dbs-status-card" }, tagDataStatus.value?.tags?.exists ? [
-            h("strong", {}, (tagDataStatus.value.translations_in_memory || 0) + " 条标签"),
-            h("span", {}, "更新: " + (tagDataStatus.value.tags.modified || "未知")),
+            h("strong", {}, `SQLite ${Number(tagDataStatus.value?.library?.tags || 0).toLocaleString()} 条 · CSV 种子可用`),
+            h("span", {}, `数据库丰富条目 ${Number(tagDataStatus.value?.library?.enriched || 0).toLocaleString()} · 已审核 ${Number(tagDataStatus.value?.library?.approved || 0).toLocaleString()}`),
+            h("span", {}, `当前向量候选 ${Number(tagDataStatus.value?.semantic_catalog?.rows || 0).toLocaleString()} 条${tagDataStatus.value?.semantic_catalog_dirty ? " · 等待更新" : ""}`),
             h("code", { title: tagDataStatus.value.tags.path }, tagDataStatus.value.tags.path),
           ] : "未找到 tags_enhanced.csv"),
-          h("button", { class: "dbs-btn", disabled: reloadingTags.value, onClick: reloadTagData }, reloadingTags.value ? "重载中…" : "重新载入 CSV / Parquet"),
-        ]),
+          row("SQLite 加入向量索引", h("input", { type: "checkbox", checked: semanticUseLibrary.value, onChange: e => { semanticUseLibrary.value = e.target.checked; } }), "关闭时仅使用随附 CSV"),
+          row("向量候选上限", numberInput(semanticLibraryLimit.value, v => { semanticLibraryLimit.value = Math.max(1000, Math.min(250000, v || 60000)); }, 1000, 250000, 1000), "默认 60,000；完整数据库仍可直接查找"),
+          row("英文标签最低热度", numberInput(semanticLibraryMinPostCount.value, v => { semanticLibraryMinPostCount.value = Math.max(0, v || 0); }, 0, 1000000, 10), "有中文、释义或审核分类的标签不受此门槛影响"),
+          h("button", { class: "dbs-btn", disabled: reloadingTags.value, onClick: reloadTagData }, reloadingTags.value ? "合并中…" : "刷新 SQLite + CSV 向量数据源"),
+        ], "直接检索会查询完整 tags.sqlite3；语义检索使用数据库优先的有界快照，CSV 只负责补缺。限制候选数是为了避免四路 1024 维向量耗尽内存/显存。"),
         section("语义编码器（只用于语义搜索）", [
           row("已扫描模型", select(modelPath.value, v => { modelPath.value = v; }, [["", "默认 BAAI/bge-m3"], ...localModels.value.filter(model => model.semantic).map(model => [model.name, model.name])])),
           row("自定义路径", h("input", { class: "dbs-input-line", value: modelPath.value, placeholder: "models/LLM/...、models/text_encoders/... 或绝对路径", onInput: e => { modelPath.value = e.target.value; } })),
-          h("button", { class: "dbs-btn danger", onClick: () => unloadModel("semantic") }, "卸载语义模型"),
-        ], "下拉值保存为 ComfyUI models 相对路径；也支持自定义绝对目录。纯 CLIP/T5 可能不兼容 SentenceTransformer。"),
+          h("div", { class: "dbs-setting-actions" }, [
+            h("button", { class: "dbs-btn primary", disabled: testingSemantic.value, onClick: testSemanticModel }, testingSemantic.value ? "检测中…" : "检测中英向量模型"),
+            h("button", { class: "dbs-btn danger", onClick: () => unloadModel("semantic") }, "卸载语义模型"),
+          ]),
+          semanticTestStatus.value ? h("p", { class: "dbs-setting-desc", role: "status" }, semanticTestStatus.value) : null,
+        ], "检测会验证模型能否产生有限、归一化的中英文文本向量，并显示维度与跨语言相似度；不会在检测时重建完整标签索引。纯 CLIP/T5 通常不兼容 SentenceTransformer。"),
       ];
       else if (activeTab.value === "gacha") panel = [
+        section("智能组合规划", [
+          row("分配方式", select(gachaAllocationMode.value, v => { gachaAllocationMode.value = v; }, [
+            ["smart", "智能自适应（推荐）"], ["exact", "高级精确数量"],
+          ]), gachaAllocationMode.value === "smart" ? "每次按语境与密度在范围内动态分配，不机械凑满每个分类" : "用于严格复现旧工作流或专项数据测试"),
+          gachaAllocationMode.value === "smart" ? row("提示词密度", select(gachaDensity.value, v => { gachaDensity.value = v; }, [
+            ["compact", "精简 · 约 4–6 个"], ["balanced", "均衡 · 约 7–10 个"], ["rich", "丰富 · 约 11–15 个"],
+          ]), "这是复杂度范围，不是强制精确数量") : null,
+          gachaAllocationMode.value === "smart" ? h("div", { class: "dbs-gacha-intent" }, [
+            h("div", { class: "dbs-gacha-intent-head" }, [h("strong", {}, "大类意图"), h("small", {}, "点击循环：自动 → 必选 → 禁用")]),
+            h("div", { class: "dbs-gacha-mode-grid" }, Object.entries(PROMPT_KIND_LABELS).map(([kind, label]) => {
+              const mode = gachaCategoryModes.value[kind] || "auto";
+              return h("button", { class: ["dbs-gacha-mode", "mode-" + mode], onClick: () => cycleGachaCategory(kind) }, [
+                h("span", {}, label), h("small", {}, GACHA_MODE_LABELS[mode] || "自动"),
+              ]);
+            })),
+          ]) : null,
+          gachaAllocationMode.value === "smart" ? row("生成式模型参与规划", h("input", { type: "checkbox", checked: gachaModelPlanning.value, onChange: e => { gachaModelPlanning.value = e.target.checked; } }), "仅在总开关、enable_language_model 与左侧 local_model/api_config 同时启用时使用；语义向量模型仍只负责检索") : null,
+        ], "规则规划器会根据人物描述、画面密度、必选/禁用类别计算动态范围；生成式模型可进一步处理服装、动作、场景和镜头之间的兼容性。"),
+        gachaAllocationMode.value === "smart" ? section("细分类偏好", [
+          h("div", { class: "dbs-gacha-facet-tabs" }, GACHA_FACET_GROUPS.map(group => h("button", {
+            class: selectedGachaFacetGroups.value.includes(group.key) ? "active" : "",
+            onClick: () => { toggleGachaFacetGroup(group.key); },
+          }, (selectedGachaFacetGroups.value.includes(group.key) ? "✓ " : "") + group.label))),
+          selectedGachaFacetGroups.value.length
+            ? h("div", { class: "dbs-gacha-facet-blocks" }, selectedGachaFacetGroups.value.map(groupKey => {
+                const group = GACHA_FACET_GROUPS.find(item => item.key === groupKey);
+                const facets = facetsForGroup(groupKey);
+                return h("div", { class: "dbs-gacha-facet-block", key: groupKey }, [
+                  h("div", { class: "dbs-gacha-facet-group-title" }, group?.label || groupKey),
+                  h("div", { class: "dbs-gacha-facet-grid" }, facets.length
+                    ? facets.map(([key, label]) => {
+                        const mode = gachaFacetModes.value[key] || "";
+                        const shortLabel = String(label).split("/").slice(1).join("/") || label;
+                        return h("button", { class: ["dbs-gacha-facet", mode ? "mode-" + mode : ""], onClick: () => cycleGachaFacet(key), title: label }, [
+                          h("span", {}, shortLabel), h("small", {}, GACHA_FACET_MODE_LABELS[mode]),
+                        ]);
+                      })
+                    : [h("span", { class: "dbs-settings-note" }, "该组尚无已审核细分类；完成词库分类审核后会自动出现。")]),
+                ]);
+              }))
+            : h("div", { class: "dbs-settings-note", style: "padding:10px 12px" }, "未选择细分类大类：将完全由智能规划器自动分配。"),
+          h("div", { class: "dbs-setting-actions" }, [
+            h("span", { class: "dbs-settings-note" }, "上方大类可多选并参与规划权重；下方细项点击循环：自动 → 偏好 → 必选 → 禁用。角色特征已连接时仍跳过人物身份类。"),
+            h("button", { class: "dbs-btn small", onClick: () => { gachaFacetModes.value = {}; selectedGachaFacetGroups.value = []; } }, "清空偏好"),
+          ]),
+        ]) : null,
         section("抽卡来源", [
           row("生成方式", select(gachaProvider.value, v => { gachaProvider.value = v; }, [
-            ["database", "本地标签数据文件（零模型 / 零网络）"],
-            ["danbooru_random", "Danbooru 随机帖子（零模型）"],
+            ["database", "本地 SQLite 词库 · 智能组合（零网络）"],
+            ["danbooru_random", "Danbooru 真实共现组合（零模型）"],
             ["gallery", "已选画廊图片（可选来源）"],
-            ["api_profile", "api_config.json 的 LLM Profile", !enableModelCalls.value],
-            ["local_openai", "本地 OpenAI 兼容服务", !enableModelCalls.value],
-            ["comfyui_model", "ComfyUI 本地生成模型", !enableModelCalls.value],
+            ["api_profile", "生成式 LLM · API Profile", !enableModelCalls.value],
+            ["local_openai", "生成式 LLM · 本地兼容服务", !enableModelCalls.value],
+            ["comfyui_model", "生成式 LLM · ComfyUI 本地模型", !enableModelCalls.value],
           ])),
           gachaProvider.value === "danbooru_random" ? row("在线基础标签", h("input", { class: "dbs-input-line", value: gachaOnlineQuery.value, placeholder: "可留空；匿名访问建议最多填写 1 个标签", onInput: e => { gachaOnlineQuery.value = e.target.value; } })) : null,
           row("最低标签热度", numberInput(gachaMinPostCount.value, v => { gachaMinPostCount.value = Math.max(0, v || 0); }, 0, 1000000, 100), "仅影响本地标签库，过滤冷门噪声标签"),
           row("避免近期重复", h("input", { type: "checkbox", checked: gachaAvoidDuplicates.value, onChange: e => { gachaAvoidDuplicates.value = e.target.checked; } })),
           row("随机种子", numberInput(gachaSeed.value, v => { gachaSeed.value = Number.isFinite(v) ? v : -1; }, -1, 2147483647), "-1 每次随机；固定值便于复现"),
-        ], "本地标签库和 Danbooru 在线随机都不需要选择图片，也不会加载模型。在线随机从同一帖子取共现标签，不足的分类由本地库补齐。"),
-        section("类别配额", [h("div", { class: "dbs-gacha-counts" }, Object.entries(PROMPT_KIND_LABELS || { outfit: "服装", action: "动作", expression: "表情", scene: "场景", environment: "环境", composition: "构图", lighting: "光照" }).map(([kind, label]) => h("label", {}, [h("span", {}, label), numberInput(gachaCounts.value[kind] ?? 0, v => { gachaCounts.value = { ...gachaCounts.value, [kind]: Math.max(0, Math.min(5, v || 0)) }; }, 0, 5)])))]),
+        ], "运行时统一从 tags.sqlite3 取词；随附 CSV 只负责首次播种及数据库不可用时回退。真实共现保留同一作品中的自然搭配；生成式 LLM 规划后仍由本地词库校验。"),
+        gachaAllocationMode.value === "exact" ? section("高级精确配额", [
+          h("details", { open: true, class: "dbs-gacha-exact" }, [
+            h("summary", {}, "大类精确数量"),
+            h("div", { class: "dbs-gacha-counts" }, Object.entries(PROMPT_KIND_LABELS).map(([kind, label]) => h("label", {}, [
+              h("span", {}, label), numberInput(gachaCounts.value[kind] ?? 0, v => { gachaCounts.value = { ...gachaCounts.value, [kind]: Math.max(0, Math.min(5, v || 0)) }; }, 0, 5),
+            ]))),
+          ]),
+          h("details", { class: "dbs-gacha-exact" }, [
+            h("summary", {}, `已审核细分类数量 · ${Object.keys(libraryFacetLabels).length} 项`),
+            h("div", { class: "dbs-gacha-facet-counts" }, Object.entries(libraryFacetLabels).map(([key, label]) => h("label", {}, [
+              h("span", { title: label }, label), numberInput(gachaFacetCounts.value[key] || 0, v => { gachaFacetCounts.value = { ...gachaFacetCounts.value, [key]: Math.max(0, Math.min(10, v || 0)) }; }, 0, 10),
+            ]))),
+          ]),
+          h("button", { class: "dbs-btn", onClick: () => { gachaFacetCounts.value = {}; } }, "清空细分类精确数量"),
+        ], "只有精确模式读取这些数字；任意细分类数量大于 0 时沿用旧行为并替代大类数量。") : null,
       ];
       else if (activeTab.value === "models") panel = [
         section("调用总开关", [
@@ -1844,12 +2333,13 @@ const SettingsDialog = {
           row("抽卡 Profile", select(gachaApiProfile.value, v => { gachaApiProfile.value = v; }, [["", "使用当前激活 LLM"], ...gachaProfiles.value.map(profile => [profile.name, profile.name + (profile.model ? " · " + profile.model : "")])])),
         ], "这里只读取 api_config.json 的安全摘要；新增、编辑和删除仍由 Eagle API 配置加载器统一同步。"),
         section("本地服务与 ComfyUI 生成模型", [
+          h("button", { class: "dbs-btn", onClick: scanOllama }, "检测本机 Ollama / 列出模型"),
+          ollamaModels.value.length ? row("Ollama 模型", select(gachaLocalModel.value, v => { gachaLocalModel.value = v; }, [["", "请选择"], ...ollamaModels.value.map(model => [model.name, model.name])])) : null,
           row("服务 URL", h("input", { class: "dbs-input-line", value: gachaLocalUrl.value, onInput: e => { gachaLocalUrl.value = e.target.value; } })),
           row("服务模型名", h("input", { class: "dbs-input-line", value: gachaLocalModel.value, onInput: e => { gachaLocalModel.value = e.target.value; } })),
           row("ComfyUI 模型", select(gachaComfyModel.value, v => { gachaComfyModel.value = v; }, [["", "请选择本地生成模型"], ...localModels.value.filter(model => model.generative).map(model => [model.name, model.name])])),
           h("div", { class: "dbs-inline-settings" }, [row("设备", select(gachaComfyDevice.value, v => { gachaComfyDevice.value = v; }, [["auto", "auto"], ["cuda", "cuda"], ["cpu", "cpu"]])), row("精度", select(gachaComfyDtype.value, v => { gachaComfyDtype.value = v; }, [["bf16", "bf16"], ["fp16", "fp16"], ["fp32", "fp32"]]))]),
-          h("button", { class: "dbs-btn danger", onClick: () => unloadModel("language") }, "卸载本地生成模型"),
-        ], "models/LLM 与 models/text_encoders 会同时扫描；只有配置声明为生成架构的模型进入此下拉。"),
+        ], "本节只保留给自动 AI 抽卡等旧设置流程。词库翻译/细分类改用 Danbooru 节点左侧 local_model 或 api_config 端口；Ollama 可在 API 配置加载器中使用 http://127.0.0.1:11434/v1，API Key 可留空。"),
       ];
       else panel = [
         section("工作区", [
@@ -1904,12 +2394,26 @@ const DanbooruSearchApp = {
     const selectedPosts = ref([]);
     const selectedOutputTags = ref([]);
     const settingsOpen = ref(false);
+    const settingsTab = ref("general");
+    const libraryBootstrap = ref(null);
     const galleryCollapsed = ref(false);
     const lastGachaCard = ref("");
     const gachaLoading = ref(false);
     const gachaStatus = ref("");
     const autoGacha = ref(false);
     const gachaContext = ref("");
+    const gachaContentLevel = ref(0);
+    const gachaHoldingMode = ref("none");
+    const gachaExcludedTags = ref("");
+    const releaseModelAfterOutput = ref(false);
+    const modelReleaseRequest = ref("");
+
+    const contentLevelLabels = ["SFW 安全", "SFW 轻微", "NSFW 成人", "NSFW 明确"];
+
+    function inputConnected(name) {
+      const input = (props.node?.inputs || []).find(item => item?.name === name);
+      return !!input && (input.link != null || (Array.isArray(input.links) && input.links.length > 0));
+    }
 
     function addOutputTags(items, defaults = {}) {
       selectedOutputTags.value = mergeTagItems(selectedOutputTags.value, items, defaults);
@@ -1965,6 +2469,10 @@ const DanbooruSearchApp = {
           body: JSON.stringify({
             character_tags: [gachaContext.value, currentContext].filter(Boolean).join(", "),
             selections: selectedPosts.value,
+            gacha_context: gachaContext.value,
+            gacha_content_level: gachaContentLevel.value,
+            gacha_holding_mode: gachaHoldingMode.value,
+            gacha_excluded_tags: gachaExcludedTags.value,
           }),
         });
         const raw = await response.text();
@@ -1978,8 +2486,10 @@ const DanbooruSearchApp = {
         lastGachaCard.value = data.name || "新组合";
         const kept = selectedOutputTags.value.filter(item => !isGachaItem(item));
         selectedOutputTags.value = mergeTagItems(kept, data.tags || [], { source: "gacha" });
-        const providerLabels = { database: "本地标签库", danbooru_random: "Danbooru 在线共现", gallery: "已选画廊标签组合", rules: "旧版规则卡" };
-        gachaStatus.value = data.warning ? data.warning : (providerLabels[data.provider] || "语言模型智能编排");
+        const providerLabels = { database: "本地 SQLite 标签库", danbooru_random: "Danbooru 在线共现", gallery: "已选画廊标签组合", rules: "旧版规则卡" };
+        const sourceLabels = { sqlite: "SQLite 数据库", csv: "随附 CSV 回退", parquet: "Parquet 回退" };
+        const source = sourceLabels[data.data_source] ? ` · 来源：${sourceLabels[data.data_source]}` : "";
+        gachaStatus.value = data.warning ? data.warning + source : (providerLabels[data.provider] || "生成式模型智能编排") + source;
         syncSelection();
       } catch (error) {
         gachaStatus.value = "抽卡失败：" + error.message;
@@ -1995,6 +2505,23 @@ const DanbooruSearchApp = {
       syncSelection();
     }
 
+    async function requestModelRelease() {
+      if (!inputConnected("local_model")) {
+        gachaStatus.value = "未连接 local_model；API 服务模型由服务端管理，Danbooru 节点不能远程卸载。";
+        return;
+      }
+      modelReleaseRequest.value = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      syncSelection();
+      try {
+        await app.queuePrompt(0);
+        modelReleaseRequest.value = "";
+        syncSelection();
+        gachaStatus.value = "已提交本地生成模型释放请求；本次节点执行完成后释放显存。";
+      } catch (error) {
+        gachaStatus.value = "提交释放请求失败：" + error.message;
+      }
+    }
+
     function syncSelection() {
       const nodeId = String(props.node.id);
 
@@ -2005,6 +2532,11 @@ const DanbooruSearchApp = {
         gallery_collapsed: galleryCollapsed.value,
         auto_gacha: autoGacha.value,
         gacha_context: gachaContext.value,
+        gacha_content_level: gachaContentLevel.value,
+        gacha_holding_mode: gachaHoldingMode.value,
+        gacha_excluded_tags: gachaExcludedTags.value,
+        release_model_after_output: releaseModelAfterOutput.value,
+        model_release_request: modelReleaseRequest.value,
       };
 
       fetch("/danbooru_search/cache_selection", {
@@ -2015,15 +2547,27 @@ const DanbooruSearchApp = {
 
       const widget = (props.node.widgets || []).find(w => w.name === "selection_data");
       if (widget) {
+        let controls = {};
+        try { controls = JSON.parse(widget.value || "{}"); } catch (_) { controls = {}; }
         widget.value = JSON.stringify({
           selections: selectedPosts.value,
           selected_tags: selectedOutputTags.value,
           gallery_collapsed: galleryCollapsed.value,
           auto_gacha: autoGacha.value,
           gacha_context: gachaContext.value,
+          gacha_content_level: gachaContentLevel.value,
+          gacha_holding_mode: gachaHoldingMode.value,
+          gacha_excluded_tags: gachaExcludedTags.value,
+          release_model_after_output: releaseModelAfterOutput.value,
+          model_release_request: modelReleaseRequest.value,
+          // Settings-panel workflow controls live in the same hidden widget.
+          // Preserve them when the editor changes tags or image selections.
+          library_enrichment_enabled: !!controls.library_enrichment_enabled,
+          library_enrichment_batch: Math.min(50, Math.max(1, Number(controls.library_enrichment_batch) || 20)),
         });
         if (typeof widget.callback === "function") widget.callback(widget.value, widget, props.node);
         if (props.node.graph) {
+          props.node.graph.change?.();
           props.node.graph.setDirtyCanvas(true, true);
         }
       }
@@ -2031,23 +2575,60 @@ const DanbooruSearchApp = {
 
     function restoreSelection() {
       const nodeId = String(props.node.id);
+      let workflowPayload = null;
 
       // 服务端缓存重启后会丢失，先从工作流隐藏 widget 恢复。
       try {
         const widget = (props.node.widgets || []).find(w => w.name === "selection_data");
         const saved = JSON.parse(widget?.value || "{}");
+        if (saved && typeof saved === "object" && (
+          Array.isArray(saved.selections) || Array.isArray(saved.selected_tags) ||
+          Object.prototype.hasOwnProperty.call(saved, "gallery_collapsed") ||
+          Object.prototype.hasOwnProperty.call(saved, "auto_gacha") ||
+          Object.prototype.hasOwnProperty.call(saved, "gacha_context") ||
+          Object.prototype.hasOwnProperty.call(saved, "gacha_content_level") ||
+          Object.prototype.hasOwnProperty.call(saved, "gacha_holding_mode")
+        )) workflowPayload = saved;
         if (Array.isArray(saved.selections)) selectedPosts.value = saved.selections;
         if (Array.isArray(saved.selected_tags)) selectedOutputTags.value = saved.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
         galleryCollapsed.value = !!saved.gallery_collapsed;
         autoGacha.value = !!saved.auto_gacha;
         if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
         gachaContext.value = saved.gacha_context || "";
+        gachaContentLevel.value = Math.max(0, Math.min(3, Number(saved.gacha_content_level) || 0));
+        gachaHoldingMode.value = ["none", "daily", "weapon", "any"].includes(saved.gacha_holding_mode) ? saved.gacha_holding_mode : "none";
+        gachaExcludedTags.value = saved.gacha_excluded_tags || "";
+        releaseModelAfterOutput.value = !!saved.release_model_after_output;
+        modelReleaseRequest.value = saved.model_release_request || "";
       } catch (_) {
         // 旧工作流值损坏时忽略，仍继续尝试服务端缓存。
       }
 
+      // 工作流内的值必须优先于按 node_id 保存的进程内缓存。不同工作流可以
+      // 复用相同节点编号；如果让缓存覆盖，切换工作流时就会串到另一份状态。
+      if (workflowPayload) {
+        fetch("/danbooru_search/cache_selection", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            node_id: nodeId,
+            selections: selectedPosts.value,
+            selected_tags: selectedOutputTags.value,
+            gallery_collapsed: galleryCollapsed.value,
+            auto_gacha: autoGacha.value,
+            gacha_context: gachaContext.value,
+            gacha_content_level: gachaContentLevel.value,
+            gacha_holding_mode: gachaHoldingMode.value,
+            gacha_excluded_tags: gachaExcludedTags.value,
+            release_model_after_output: releaseModelAfterOutput.value,
+            model_release_request: modelReleaseRequest.value,
+          }),
+        }).catch(() => {});
+        return;
+      }
+
       fetch("/danbooru_search/cache_selection?node_id=" + encodeURIComponent(nodeId))
-        .then(r => r.json())
+        .then(r => readJsonResponse(r, "节点状态缓存接口"))
         .then(data => {
           if (data.success && data.found !== false) {
             if (Array.isArray(data.selections)) selectedPosts.value = data.selections;
@@ -2056,20 +2637,43 @@ const DanbooruSearchApp = {
             if (typeof data.auto_gacha === "boolean") autoGacha.value = data.auto_gacha;
             if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
             if (typeof data.gacha_context === "string") gachaContext.value = data.gacha_context;
+            if (Number.isFinite(Number(data.gacha_content_level))) gachaContentLevel.value = Math.max(0, Math.min(3, Number(data.gacha_content_level)));
+            if (["none", "daily", "weapon", "any"].includes(data.gacha_holding_mode)) gachaHoldingMode.value = data.gacha_holding_mode;
+            if (typeof data.gacha_excluded_tags === "string") gachaExcludedTags.value = data.gacha_excluded_tags;
+            if (typeof data.release_model_after_output === "boolean") releaseModelAfterOutput.value = data.release_model_after_output;
+            if (typeof data.model_release_request === "string") modelReleaseRequest.value = data.model_release_request;
           }
         })
         .catch(() => {});
     }
 
+    props.node._eagleRestoreUiState = restoreSelection;
+
     onMounted(async () => {
       try {
-        const response = await fetch("/danbooru_search/settings");
-        const data = await response.json();
-        if (response.ok && data.success && data.settings) applyDanbooruUiSettings(data.settings);
+        const [settingsResponse, libraryResponse] = await Promise.all([
+          fetch("/danbooru_search/settings"),
+          fetch("/danbooru_search/library"),
+        ]);
+        const data = await readJsonResponse(settingsResponse, "设置接口");
+        if (settingsResponse.ok && data.success && data.settings) {
+          applyDanbooruUiSettings(data.settings);
+          gachaContentLevel.value = Math.max(0, Math.min(3, Number(data.settings.gacha_content_level) || 0));
+          gachaHoldingMode.value = ["none", "daily", "weapon", "any"].includes(data.settings.gacha_holding_mode) ? data.settings.gacha_holding_mode : "none";
+          gachaExcludedTags.value = data.settings.gacha_excluded_tags || "";
+        }
+        const libraryData = await readJsonResponse(libraryResponse, "词库接口");
+        if (libraryResponse.ok && libraryData.success) libraryBootstrap.value = libraryData.bootstrap || null;
       } catch (_) {
         // 设置读取失败不阻断节点加载，使用模块内默认值。
       }
       setTimeout(restoreSelection, 500);
+    });
+
+    onBeforeUnmount(() => {
+      if (props.node._eagleRestoreUiState === restoreSelection) {
+        delete props.node._eagleRestoreUiState;
+      }
     });
 
     return () => {
@@ -2083,7 +2687,7 @@ const DanbooruSearchApp = {
             onToggleCollapse: () => { galleryCollapsed.value = !galleryCollapsed.value; syncSelection(); },
             onGacha: drawGacha,
             onClearGacha: clearGacha,
-            onOpenSettings: () => { settingsOpen.value = true; },
+            onOpenSettings: () => { settingsTab.value = "general"; settingsOpen.value = true; },
             gachaName: lastGachaCard.value,
             gachaLoading: gachaLoading.value,
             autoGacha: autoGacha.value,
@@ -2100,6 +2704,12 @@ const DanbooruSearchApp = {
           }),
         ]),
 
+        libraryBootstrap.value && !libraryBootstrap.value.ready ? h("div", { class: "dbs-first-run-banner" }, [
+          h("strong", {}, "本地标签库尚未完成首次初始化"),
+          h("span", {}, `已保存官方标签 ${libraryBootstrap.value.tag_records || 0} 条；可以继续使用现有词表，也可后台续传完整元数据。`),
+          h("button", { class: "dbs-btn primary", onClick: () => { settingsTab.value = "data"; settingsOpen.value = true; } }, "打开首次初始化"),
+        ]) : null,
+
         galleryCollapsed.value ? h("div", { class: "dbs-collapsed-tools" }, [
           h("section", { class: "dbs-collapsed-panel" }, [
             h("div", { class: "dbs-collapsed-title" }, "标签检索与同步"),
@@ -2110,12 +2720,48 @@ const DanbooruSearchApp = {
             h("textarea", {
               class: "dbs-query-input",
               value: gachaContext.value,
-              placeholder: "可选：补充画风、题材、禁用内容等。执行工作流时会优先读取左侧 character_tags 端口。",
+              placeholder: "可选语义要求：补充画风、题材与搭配偏好。仅连接生成式模型时理解自由文本；硬排除请使用下方控件。",
               onInput: e => { gachaContext.value = e.target.value; },
               onChange: syncSelection,
             }),
+            h("div", { class: "dbs-runtime-constraints" }, [
+              h("label", { class: "dbs-runtime-field" }, [
+                h("span", {}, `内容尺度 · ${contentLevelLabels[gachaContentLevel.value]}`),
+                h("input", {
+                  type: "range", min: 0, max: 3, step: 1, value: gachaContentLevel.value,
+                  onInput: e => { gachaContentLevel.value = Number(e.target.value); }, onChange: syncSelection,
+                }),
+              ]),
+              h("label", { class: "dbs-runtime-field" }, [
+                h("span", {}, "手持物品"),
+                h("select", { value: gachaHoldingMode.value, onChange: e => { gachaHoldingMode.value = e.target.value; syncSelection(); } }, [
+                  h("option", { value: "none" }, "不增加持物"),
+                  h("option", { value: "daily" }, "仅生活道具"),
+                  h("option", { value: "weapon" }, "仅武器"),
+                  h("option", { value: "any" }, "不限（按搭配）"),
+                ]),
+              ]),
+              h("label", { class: "dbs-runtime-field grow" }, [
+                h("span", {}, "硬排除标签 / 通配符"),
+                h("input", {
+                  class: "dbs-input-line", value: gachaExcludedTags.value,
+                  placeholder: "例如：holding_*, knife, weapon",
+                  onInput: e => { gachaExcludedTags.value = e.target.value; }, onChange: syncSelection,
+                }),
+              ]),
+            ]),
+            h("div", { class: "dbs-runtime-model" }, [
+              h("label", {}, [h("input", {
+                type: "checkbox", checked: releaseModelAfterOutput.value,
+                onChange: e => { releaseModelAfterOutput.value = e.target.checked; syncSelection(); },
+              }), " 输出后自动卸载本地 LLM"]),
+              h("button", { class: "dbs-btn danger small", onClick: requestModelRelease }, "立即卸载本地 LLM"),
+              h("span", { class: "dbs-settings-note" }, inputConnected("reference_image")
+                ? "参考图已连接：VLM 会读取图像；纯文本模型只读取角色提示词。"
+                : "可连接 reference_image；图像会从 image_passthrough 原样输出。"),
+            ]),
             h(TagCategoryManager, { tags: selectedOutputTags.value, onChange: updateOutputTags }),
-            h("div", { class: "dbs-settings-note" }, "抽卡只生成角色固定特征以外的服装、动作、场景、构图与光照；双击标签可暂时屏蔽输出。"),
+            h("div", { class: "dbs-settings-note" }, "character_tags 中已有身份、体型、造型、服装和物品会作为锁定条件；本地 SQLite 严格执行尺度、持物、禁用分类与标签通配符，生成式模型额外理解上方自由文本。"),
             gachaStatus.value ? h("div", { class: ["dbs-gacha-status", gachaStatus.value.startsWith("抽卡失败") ? "error" : ""] }, gachaStatus.value) : null,
           ]),
         ]) : h("div", { class: "dbs-layout" }, [
@@ -2143,6 +2789,8 @@ const DanbooruSearchApp = {
         settingsOpen.value
           ? h(SettingsDialog, {
               visible: true,
+              initialTab: settingsTab.value,
+              node: props.node,
               onClose: () => { settingsOpen.value = false; },
               onSaved: applyDanbooruUiSettings,
             })
@@ -2180,7 +2828,8 @@ const CSS = `
   border-bottom: 1px solid #333;
   min-height: 72px;
   max-height: 250px;
-  overflow: visible;
+  /* 大批量标签必须留在自己的面板内，不能越过分隔线盖住画廊。 */
+  overflow: hidden;
   flex-shrink: 0;
 }
 
@@ -2198,6 +2847,9 @@ const CSS = `
   height: 100%;
 }
 .dbs-preview-bar.collapsed { flex:0 0 auto; max-height:280px; min-height:0; }
+.dbs-first-run-banner { display:flex; align-items:center; gap:9px; padding:7px 12px; flex:0 0 auto; border-bottom:1px solid #5b4929; background:#2a2418; color:#d9c59c; }
+.dbs-first-run-banner strong { color:#f1d79f; white-space:nowrap; }
+.dbs-first-run-banner span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 .dbsb-wrap.vertical { flex-direction: column; align-items: stretch; gap: 8px; height: auto; }
 .dbsb-title { font-weight: 700; color: #eee; padding: 4px 2px; }
@@ -2231,8 +2883,9 @@ const CSS = `
 .dbte-sub-tabs { padding-top:4px; border-top:1px solid #292d35; }
 .dbte-sub-tabs button { background:#1c2026; }
 .dbte-taxonomy button span { min-width:15px; padding:0 4px; border-radius:8px; background:#101216; color:#8e99a9; text-align:center; }
-.dbte-list { position:relative; display: flex; flex-wrap: wrap; align-items:flex-start; align-content:flex-start; gap: 5px; overflow-y: auto; }
-.dbte.expanded .dbte-list { align-content: flex-start; max-height:145px; }
+.dbte-list { position:relative; display:flex; flex-wrap:wrap; align-items:flex-start; align-content:flex-start; gap:5px; max-height:145px; overflow-y:auto; overflow-x:hidden; scrollbar-width:thin; scrollbar-color:#465262 transparent; }
+.dbte-list::-webkit-scrollbar { width:6px; }
+.dbte-list::-webkit-scrollbar-thumb { background:#465262; border-radius:4px; }
 .dbte-empty { color: #666; padding: 6px; }
 .dbte-chip { position:relative; display: inline-flex; align-items: center; gap: 4px; min-height:31px; border: 1px solid #466985; background: #203746; border-radius: 5px; padding: 3px 6px; cursor:grab; user-select:none; }
 .dbte-chip:active { cursor:grabbing; }
@@ -2283,10 +2936,23 @@ const CSS = `
 .dbs-collapsed-title { font-weight:700; color:#ddd; margin-bottom:7px; }
 .dbs-gacha-context { display:flex; flex-direction:column; gap:7px; }
 .dbs-gacha-context .dbs-query-input { flex:0 0 92px; min-height:92px; }
+.dbs-runtime-constraints { display:grid; grid-template-columns:minmax(150px,.75fr) minmax(130px,.55fr) minmax(220px,1.2fr); gap:7px; }
+.dbs-runtime-field { display:flex; flex-direction:column; gap:4px; min-width:0; color:#aeb5c1; font-size:10px; }
+.dbs-runtime-field input[type="range"] { width:100%; accent-color:#4f91df; }
+.dbs-runtime-field select,.dbs-runtime-field .dbs-input-line { width:100%; min-width:0; box-sizing:border-box; }
+.dbs-runtime-model { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:6px 7px; border:1px solid #303641; border-radius:6px; background:#171a20; }
+.dbs-runtime-model label { display:flex; align-items:center; gap:5px; color:#b8bec8; white-space:nowrap; }
+.dbs-runtime-model .dbs-settings-note { margin:0; flex:1; min-width:220px; }
 .dbs-gacha-status { color:#76c99a; padding:6px; border-radius:4px; background:#173124; overflow-wrap:anywhere; }
 .dbs-gacha-status.error { color:#ff8c8c; background:#351b1b; }
 .dbs-settings-separator { margin:15px 0 8px; padding-top:10px; border-top:1px solid #3b3b43; font-weight:700; color:#d7b4ed; }
 .dbs-settings-note { margin-top:6px; color:#8b8b96; font-size:10px; line-height:1.45; }
+.dbs-bootstrap-card { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:10px 12px; padding:9px 10px; border:1px solid #5c4c2f; border-radius:7px; background:#292318; }
+.dbs-bootstrap-card.ready { border-color:#376348; background:#192a20; }
+.dbs-bootstrap-card strong { color:#f0d59a; }
+.dbs-bootstrap-card.ready strong { color:#92d4aa; }
+.dbs-bootstrap-card span { flex:1; min-width:260px; color:#aeb4c0; }
+.dbs-library-progress { margin:8px 12px; padding:7px 9px; border-radius:5px; background:#16263a; color:#8dc2ff; font-family:Consolas,monospace; overflow-wrap:anywhere; }
 .dbs-tag-data-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
 .dbs-tag-data-row .dbs-settings-note { margin:0; }
 .dbs-data-path { margin-top:5px; color:#6f7683; font:9px/1.4 Consolas,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -2296,7 +2962,7 @@ const CSS = `
 .dbs-model-master-switch strong { color:#eee; }
 .dbs-model-master-switch small { color:#9a91a5; }
 @media (max-width: 900px) { .dbte-body.has-inspector { grid-template-columns:1fr; } }
-@media (max-width: 760px) { .dbs-collapsed-tools { grid-template-columns:1fr; } .dbte-tip { display:none; } }
+@media (max-width: 760px) { .dbs-collapsed-tools { grid-template-columns:1fr; } .dbs-runtime-constraints { grid-template-columns:1fr; } .dbte-tip { display:none; } }
 
 .dbsb-list {
   display: flex;
@@ -2503,6 +3169,7 @@ const CSS = `
 .dbs-cat-character { background: #4a3a5a; }
 .dbs-cat-copyright { background: #3a4a5a; }
 
+.dbs-count { width:52px; flex:0 0 auto; text-align:right; color:#7f8794; font-size:9px; }
 .dbs-score { width: 36px; flex-shrink: 0; text-align: right; color: #888; font-size: 10px; }
 
 .dbs-empty, .dbs-empty-small, .dbs-error {
@@ -2639,6 +3306,37 @@ const CSS = `
 .dbg-btn.primary:hover { background: #4a7eb5; }
 
 .dbg-page-info { font-size: 11px; color: #888; }
+.dbg-filter-bar {
+  display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px;
+  padding:5px 12px; border-bottom:1px solid #2d2f36; background:#191a1f;
+  color:#8f96a3; font-size:10px; flex:0 0 auto;
+}
+.dbg-filter-bar label { display:flex; align-items:center; gap:5px; white-space:nowrap; }
+.dbg-filter-bar > span { flex:1; min-width:180px; text-align:right; }
+.dbg-number {
+  width:64px; padding:3px 5px; border:1px solid #343842; border-radius:4px;
+  background:#101116; color:#ddd; font-size:10px;
+}
+.dbg-number:focus { outline:none; border-color:#4a7de0; }
+.dbg-pool-search { position:relative; display:flex; align-items:center; gap:5px; }
+.dbg-pool-input {
+  width:120px; min-width:90px; padding:3px 5px; border:1px solid #343842;
+  border-radius:4px; background:#101116; color:#ddd; font-size:10px;
+}
+.dbg-pool-input:focus { outline:none; border-color:#4a7de0; }
+.dbg-pool-results {
+  position:absolute; z-index:80; top:calc(100% + 5px); left:0; width:260px;
+  max-height:220px; overflow:auto; padding:4px; border:1px solid #464c58;
+  border-radius:6px; background:#15171d; box-shadow:0 8px 24px #000a;
+}
+.dbg-pool-results button {
+  width:100%; display:flex; align-items:center; gap:8px; padding:6px 7px;
+  border:0; border-radius:4px; background:transparent; color:#d4d8e0;
+  text-align:left; cursor:pointer;
+}
+.dbg-pool-results button:hover { background:#273448; }
+.dbg-pool-results button span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbg-pool-results button small { color:#8993a3; }
 
 .dbg-grid {
   flex: 1;
@@ -2899,6 +3597,32 @@ const CSS = `
 .dbs-gacha-counts label { display:flex; align-items:center; gap:6px; margin:0; color:#bbb; }
 .dbs-gacha-counts label span { flex:1; }
 .dbs-gacha-counts .dbs-input-line { width:54px; margin:0; }
+.dbs-gacha-intent { margin:10px 12px; padding:10px; border:1px solid #343945; border-radius:7px; background:#181a20; }
+.dbs-gacha-intent-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.dbs-gacha-intent-head small { color:#777f8e; }
+.dbs-gacha-facet-blocks { display:flex; flex-direction:column; gap:8px; padding:8px 12px; }
+.dbs-gacha-facet-block { border:1px solid #343945; border-radius:7px; background:#171a20; overflow:hidden; }
+.dbs-gacha-facet-group-title { padding:7px 10px; border-bottom:1px solid #303540; color:#9fc7f2; font-weight:650; }
+.dbs-gacha-facet-block .dbs-gacha-facet-grid { padding:8px; }
+.dbs-gacha-mode-grid { display:grid; grid-template-columns:repeat(4,minmax(92px,1fr)); gap:7px; }
+.dbs-gacha-mode,.dbs-gacha-facet { min-width:0; display:flex; align-items:center; justify-content:space-between; gap:7px; padding:7px 9px;
+  border:1px solid #414651; border-radius:6px; background:#262930; color:#d7dbe4; cursor:pointer; }
+.dbs-gacha-mode small,.dbs-gacha-facet small { color:#8e96a5; white-space:nowrap; }
+.dbs-gacha-mode.mode-required,.dbs-gacha-facet.mode-required { background:#23466a; border-color:#4d90cf; color:#fff; }
+.dbs-gacha-mode.mode-required small,.dbs-gacha-facet.mode-required small { color:#a9d7ff; }
+.dbs-gacha-mode.mode-off { opacity:.62; background:#292326; border-color:#5a4147; text-decoration:line-through; }
+.dbs-gacha-facet.mode-prefer { background:#303823; border-color:#668443; }
+.dbs-gacha-facet-tabs { display:flex; flex-wrap:wrap; gap:6px; padding:10px 12px 8px; border-bottom:1px solid #30323a; }
+.dbs-gacha-facet-tabs button { padding:6px 11px; border:1px solid #414651; border-radius:6px; background:#25282f; color:#c9ced8; cursor:pointer; }
+.dbs-gacha-facet-tabs button.active { background:#315b91; border-color:#5791d3; color:#fff; }
+.dbs-gacha-facet-grid { display:grid; grid-template-columns:repeat(4,minmax(110px,1fr)); gap:7px; max-height:210px; overflow:auto; padding:10px 12px; }
+.dbs-gacha-facet { font-size:11px; }
+.dbs-gacha-exact { margin:10px 12px; border:1px solid #363a44; border-radius:6px; background:#181a20; }
+.dbs-gacha-exact > summary { padding:9px 11px; color:#cbd1db; cursor:pointer; }
+.dbs-gacha-facet-counts { display:grid; grid-template-columns:repeat(3,minmax(150px,1fr)); gap:7px; max-height:300px; overflow:auto; padding:9px; border-top:1px solid #30333b; }
+.dbs-gacha-facet-counts label { min-width:0; display:grid; grid-template-columns:minmax(0,1fr) 52px; gap:6px; align-items:center; padding:6px 7px; border:1px solid #30343d; border-radius:5px; color:#aeb5c1; }
+.dbs-gacha-facet-counts label span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dbs-gacha-facet-counts .dbs-input-line { width:52px; margin:0; }
 .dbcm { margin-top:10px; border:1px solid #3a3d46; border-radius:8px; background:#18191e; overflow:hidden; }
 .dbcm-head { display:flex; align-items:baseline; gap:10px; padding:9px 11px; border-bottom:1px solid #30323a; }
 .dbcm-head strong { color:#e4e8ef; }
@@ -2928,7 +3652,7 @@ const CSS = `
 .dbs-settings-message { padding:7px 14px; color:#ff9a9a; background:#351e22; border-top:1px solid #53343a; flex-shrink:0; }
 .dbs-settings-message.ok { color:#82d8a6; background:#183326; border-color:#295440; }
 .dbs-settings-footer { margin:0; padding:10px 14px; flex-shrink:0; background:#1c1d22; }
-@media (max-width:760px) { .dbs-settings-shell { grid-template-columns:130px minmax(0,1fr); } .dbs-setting-row { grid-template-columns:1fr; gap:4px; } .dbs-gacha-counts { grid-template-columns:repeat(2,1fr); } }
+@media (max-width:760px) { .dbs-settings-shell { grid-template-columns:130px minmax(0,1fr); } .dbs-setting-row { grid-template-columns:1fr; gap:4px; } .dbs-gacha-counts,.dbs-gacha-mode-grid,.dbs-gacha-facet-grid,.dbs-gacha-facet-counts { grid-template-columns:repeat(2,1fr); } }
 
 .dbs-detail-body { display:grid; grid-template-columns:minmax(300px, 44%) minmax(0, 1fr); gap:14px; flex:1; min-height:0; overflow:hidden; }
 
@@ -3113,11 +3837,16 @@ app.registerExtension({
         style.textContent = CSS;
 
           container = document.createElement("div");
-          container.style.cssText = "width:100%;max-width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;position:relative;";
+          container.style.cssText = "width:1180px;max-width:none;min-width:0;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;position:relative;";
 
         const widget = this.addDOMWidget("danbooru_search_vue", "div", container, {
           serialize: false,
+          // This is a full canvas application, not an editable parameter.
+          // ComfyUI 1.49's right panel otherwise mounts WidgetLegacy and writes
+          // its narrow sidebar width back to widget.width, clipping the canvas UI.
+          canvasOnly: true,
         });
+        widget.width = undefined;
         this._dbsWidget = widget;
 
         vueApp = createApp(DanbooruSearchApp, { node: this });
@@ -3133,33 +3862,36 @@ app.registerExtension({
             const currentSize = size || this.size || [1200, 700];
             const nodeWidth = Math.max(640, Number(currentSize[0]) || 1200);
             const nodeHeight = Math.max(480, Number(currentSize[1]) || 700);
-            const hgt = Math.max(400, nodeHeight - 80);
+            const width = Math.max(620, nodeWidth - 20);
+            // 标题和四个输入端口属于 LiteGraph 原生区域。DOM 只占剩余
+            // 视口；内部三栏各自滚动，内容量不能反向改变节点高度。
+            const hgt = Math.max(300, nodeHeight - 150);
 
-            container.style.width = "100%";
-            container.style.maxWidth = "100%";
+            container.style.width = width + "px";
+            container.style.maxWidth = "none";
             container.style.minWidth = "0";
             container.style.height = hgt + "px";
 
             const host = container.parentElement;
             if (host) {
-              host.style.width = "100%";
-              host.style.maxWidth = "100%";
+              host.style.width = width + "px";
+              host.style.maxWidth = "none";
               host.style.minWidth = "0";
+              host.style.height = hgt + "px";
+              host.style.maxHeight = hgt + "px";
               host.style.boxSizing = "border-box";
               host.style.overflow = "hidden";
             }
-
-            widget.computeSize = () => {
-              // LiteGraph can pass only the remaining row width while selecting a
-              // node.  Binding the Vue host to that value caused the panel to be
-              // cut in half after a click.
-              return [Math.max(100, nodeWidth - 20), hgt];
-            };
             return hgt;
           };
+          // Do not derive computeSize from node.size. New ComfyUI measures every
+          // DOM widget while laying out the graph; feeding node height back as
+          // widget height makes the native input-row height accumulate forever.
+          // The fixed container/host height above is the measurement boundary.
           this._dbsSyncLayout = syncWidgetLayout;
           syncWidgetLayout(this.size);
           requestAnimationFrame(() => syncWidgetLayout(this.size));
+          setTimeout(() => syncWidgetLayout(this.size), 250);
 
           const onResize = this.onResize;
           this.onResize = function (size) {
@@ -3170,6 +3902,16 @@ app.registerExtension({
           const onConfigure = this.onConfigure;
           this.onConfigure = function () {
             onConfigure?.apply(this, arguments);
+            this.properties = this.properties || {};
+            if (Number(this.properties.eagle_dbs_layout_version || 0) < 2) {
+              // Recover old workflows whose feedback loop already persisted a
+              // several-thousand-pixel height. This runs once; later deliberate
+              // user resizing is preserved by the version marker.
+              const restoredWidth = Math.max(640, Number(this.size?.[0]) || 1200);
+              const restoredHeight = Number(this.size?.[1]) || 700;
+              if (restoredHeight > 1200) this.setSize([restoredWidth, 760]);
+              this.properties.eagle_dbs_layout_version = 2;
+            }
             hideWidget(this);
             requestAnimationFrame(() => this._dbsSyncLayout?.(this.size));
           };

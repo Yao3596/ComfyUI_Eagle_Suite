@@ -315,6 +315,293 @@ def _matches_aspect_ratio(file_path, aspect_ratio):
         return True
 
 
+def _sort_media_files(files, sort_by="name", sort_dir="asc"):
+    """使执行时的未选批次与浏览器列表使用完全相同的排序语义。"""
+    sort_by = str(sort_by or "name")
+    reverse = str(sort_dir or "asc") == "desc"
+    tie_breaker = lambda item: os.path.normcase(os.path.abspath(item["path"]))
+    if sort_by == "modified":
+        key = lambda item: (item["modified"], tie_breaker(item))
+    elif sort_by == "size":
+        key = lambda item: (item["size"], tie_breaker(item))
+    else:
+        key = lambda item: (item["name"].lower(), tie_breaker(item))
+    files.sort(key=key, reverse=reverse)
+    return files
+
+
+def _decode_metadata_json(value):
+    """Decode ComfyUI's PNG text chunks without rejecting already-decoded data."""
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value
+
+
+def _unique_texts(values):
+    result = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _is_prompt_link(value, nodes):
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) >= 2
+        and str(value[0]) in nodes
+        and isinstance(value[1], int)
+    )
+
+
+def _collect_api_prompt_text(value, nodes, visited=None):
+    """Follow an API-format prompt link and collect only prompt-bearing strings."""
+    visited = visited if visited is not None else set()
+    if isinstance(value, str):
+        return [value]
+    if _is_prompt_link(value, nodes):
+        node_id = str(value[0])
+        if node_id in visited:
+            return []
+        visited.add(node_id)
+        node = nodes.get(node_id) or {}
+        inputs = node.get("inputs") if isinstance(node, dict) else {}
+        if not isinstance(inputs, dict):
+            return []
+
+        texts = []
+        # Literal prompt fields are intentionally restricted. Model/checkpoint names
+        # are strings too, but must never leak into the positive prompt output.
+        for key, item in inputs.items():
+            name = str(key).lower()
+            if any(token in name for token in ("text", "prompt", "string")):
+                if isinstance(item, str):
+                    texts.append(item)
+                elif _is_prompt_link(item, nodes):
+                    texts.extend(_collect_api_prompt_text(item, nodes, visited))
+        # Conditioning combiners normally contain only links, so following every
+        # upstream link here is safe while literal values remain filtered above.
+        for item in inputs.values():
+            if _is_prompt_link(item, nodes):
+                texts.extend(_collect_api_prompt_text(item, nodes, visited))
+        return _unique_texts(texts)
+    if isinstance(value, (list, tuple)):
+        texts = []
+        for item in value:
+            texts.extend(_collect_api_prompt_text(item, nodes, visited))
+        return _unique_texts(texts)
+    return []
+
+
+def _extract_api_graph_prompts(prompt_graph):
+    """Extract positive/negative text from ComfyUI's execution prompt graph."""
+    if not isinstance(prompt_graph, dict):
+        return "", ""
+    nodes = {str(key): value for key, value in prompt_graph.items() if isinstance(value, dict)}
+    if not nodes:
+        return "", ""
+
+    positive_roots = []
+    negative_roots = []
+    for node in nodes.values():
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for key, value in inputs.items():
+            name = str(key).lower()
+            if name in ("positive", "positive_prompt"):
+                positive_roots.append(value)
+            elif name in ("negative", "negative_prompt"):
+                negative_roots.append(value)
+
+    positives = []
+    negatives = []
+    for root in positive_roots:
+        positives.extend(_collect_api_prompt_text(root, nodes, set()))
+    for root in negative_roots:
+        negatives.extend(_collect_api_prompt_text(root, nodes, set()))
+
+    negatives = _unique_texts(negatives)
+    positives = _unique_texts(positives)
+    if not positives:
+        # Some guider/custom sampler graphs do not expose an input literally named
+        # "positive". Fall back to text encoders, excluding known negative text.
+        candidates = []
+        for node_id, node in nodes.items():
+            class_type = str(node.get("class_type") or "").lower()
+            if "textencode" in class_type or "cliptext" in class_type:
+                candidates.extend(_collect_api_prompt_text([node_id, 0], nodes, set()))
+        positives = [text for text in _unique_texts(candidates) if text not in set(negatives)]
+    return "\n\n".join(positives), "\n\n".join(negatives)
+
+
+def _workflow_link_source(value, link_sources):
+    try:
+        return link_sources.get(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_workflow_prompt_text(node_id, nodes, link_sources, visited=None):
+    """Follow a frontend workflow-format link to CLIP/text nodes."""
+    visited = visited if visited is not None else set()
+    node_id = str(node_id)
+    if node_id in visited:
+        return []
+    visited.add(node_id)
+    node = nodes.get(node_id) or {}
+    node_type = str(node.get("type") or node.get("class_type") or "").lower()
+    texts = []
+    if any(token in node_type for token in ("textencode", "cliptext", "prompt", "string")):
+        for value in node.get("widgets_values") or []:
+            if isinstance(value, str) and value.strip():
+                texts.append(value)
+
+    for input_slot in node.get("inputs") or []:
+        if not isinstance(input_slot, dict):
+            continue
+        source_id = _workflow_link_source(input_slot.get("link"), link_sources)
+        if source_id is not None:
+            texts.extend(_collect_workflow_prompt_text(source_id, nodes, link_sources, visited))
+    return _unique_texts(texts)
+
+
+def _extract_workflow_graph_prompts(workflow):
+    """Extract prompts when an image contains only the frontend workflow graph."""
+    if not isinstance(workflow, dict) or not isinstance(workflow.get("nodes"), list):
+        return "", ""
+    nodes = {
+        str(node.get("id")): node
+        for node in workflow["nodes"]
+        if isinstance(node, dict) and node.get("id") is not None
+    }
+    link_sources = {}
+    for link in workflow.get("links") or []:
+        if isinstance(link, (list, tuple)) and len(link) >= 2:
+            try:
+                link_sources[int(link[0])] = str(link[1])
+            except (TypeError, ValueError):
+                continue
+
+    positive_roots = []
+    negative_roots = []
+    for node in nodes.values():
+        for input_slot in node.get("inputs") or []:
+            if not isinstance(input_slot, dict):
+                continue
+            source_id = _workflow_link_source(input_slot.get("link"), link_sources)
+            if source_id is None:
+                continue
+            name = str(input_slot.get("name") or "").lower()
+            if name in ("positive", "positive_prompt"):
+                positive_roots.append(source_id)
+            elif name in ("negative", "negative_prompt"):
+                negative_roots.append(source_id)
+
+    positives = []
+    negatives = []
+    for root in positive_roots:
+        positives.extend(_collect_workflow_prompt_text(root, nodes, link_sources, set()))
+    for root in negative_roots:
+        negatives.extend(_collect_workflow_prompt_text(root, nodes, link_sources, set()))
+    negatives = _unique_texts(negatives)
+    positives = _unique_texts(positives)
+    if not positives:
+        candidates = []
+        for node_id, node in nodes.items():
+            node_type = str(node.get("type") or "").lower()
+            if "textencode" in node_type or "cliptext" in node_type:
+                candidates.extend(_collect_workflow_prompt_text(node_id, nodes, link_sources, set()))
+        positives = [text for text in _unique_texts(candidates) if text not in set(negatives)]
+    return "\n\n".join(positives), "\n\n".join(negatives)
+
+
+def _extract_parameters_prompts(parameters):
+    """Parse the common Automatic1111 parameters text block."""
+    if not isinstance(parameters, str) or not parameters.strip():
+        return "", ""
+    text = parameters.strip()
+    negative_marker = "\nNegative prompt:"
+    settings_marker = "\nSteps:"
+    if negative_marker in text:
+        positive, remainder = text.split(negative_marker, 1)
+        negative = remainder.split(settings_marker, 1)[0]
+        return positive.strip(), negative.strip()
+    return text.split(settings_marker, 1)[0].strip(), ""
+
+
+def _read_image_prompt_metadata(file_path):
+    """Return embedded positive/negative prompts, preferring the executable graph."""
+    metadata = {}
+    try:
+        with Image.open(file_path) as image:
+            for key in ("prompt", "workflow", "parameters", "Comment", "comment", "Description"):
+                if key in image.info:
+                    metadata[key] = _decode_metadata_json(image.info[key])
+    except Exception as error:
+        logger.debug(f"[UnifiedMediaBrowser] 无法读取图片元数据 {file_path}: {error}")
+
+    # Eagle saver optionally emits `<image>.json`; use it only to fill absent keys.
+    sidecar_path = file_path + ".json"
+    if os.path.isfile(sidecar_path):
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as sidecar_file:
+                sidecar = json.load(sidecar_file)
+            if isinstance(sidecar, dict):
+                for key, value in sidecar.items():
+                    metadata.setdefault(key, value)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            logger.debug(f"[UnifiedMediaBrowser] 忽略无效元数据旁车 {sidecar_path}: {error}")
+
+    prompt_graph = metadata.get("prompt") or metadata.get("inputs")
+    if isinstance(prompt_graph, dict) and isinstance(prompt_graph.get("prompt"), dict):
+        prompt_graph = prompt_graph["prompt"]
+    positive, negative = _extract_api_graph_prompts(prompt_graph)
+
+    workflow = metadata.get("workflow") or metadata.get("comfy_workflow")
+    if not positive:
+        workflow_positive, workflow_negative = _extract_workflow_graph_prompts(workflow)
+        positive = workflow_positive
+        negative = negative or workflow_negative
+
+    if not positive:
+        for key in ("positive_prompt", "positive", "tags", "prompt"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                positive = value.strip()
+                break
+            if isinstance(value, list):
+                positive = ", ".join(str(item).strip() for item in value if str(item).strip())
+                if positive:
+                    break
+
+    if not positive:
+        parameters = metadata.get("parameters")
+        if not isinstance(parameters, str):
+            parameters = metadata.get("Comment") or metadata.get("comment") or metadata.get("Description")
+        parameter_positive, parameter_negative = _extract_parameters_prompts(parameters)
+        positive = parameter_positive
+        negative = negative or parameter_negative
+
+    return {"positive": positive.strip(), "negative": negative.strip()}
+
+
 def _build_folder_tree(directory, _visited=None, _depth=0):
     """构建文件夹树结构（滑动双栏用）"""
     if _depth > 32:
@@ -420,13 +707,7 @@ async def list_media(request):
         if keyword:
             files = [f for f in files if keyword in f["name"].lower()]
 
-        reverse = (sort_dir == "desc")
-        if sort_by == "name":
-            files.sort(key=lambda x: x["name"].lower(), reverse=reverse)
-        elif sort_by == "modified":
-            files.sort(key=lambda x: x["modified"], reverse=reverse)
-        elif sort_by == "size":
-            files.sort(key=lambda x: x["size"], reverse=reverse)
+        _sort_media_files(files, sort_by, sort_dir)
 
         total = len(files)
         page_data = files[offset:offset + limit]
@@ -564,6 +845,9 @@ class UnifiedMediaBrowser:
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 999999}),
                 "random_seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
                 "aspect_ratio": (["all", "landscape", "portrait", "square", "1:1", "4:3", "3:4", "16:9", "9:16"], {"default": "all"}),
+                "keyword": ("STRING", {"default": ""}),
+                "sort_by": (["name", "modified", "size"], {"default": "name"}),
+                "sort_dir": (["asc", "desc"], {"default": "asc"}),
                 "selection_data": ("STRING", {"default": "[]", "multiline": False}),
             },
             "hidden": {
@@ -571,9 +855,9 @@ class UnifiedMediaBrowser:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "VIDEO")
-    RETURN_NAMES = ("images", "masks", "width", "height", "videos")
-    OUTPUT_IS_LIST = (False, False, False, False, True)
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "VIDEO", "STRING")
+    RETURN_NAMES = ("images", "masks", "width", "height", "videos", "positive_prompt")
+    OUTPUT_IS_LIST = (False, False, False, False, True, False)
     FUNCTION = "process"
     CATEGORY = "🦅 Eagle"
     OUTPUT_NODE = False
@@ -590,6 +874,9 @@ class UnifiedMediaBrowser:
         start_index = max(0, int(kwargs.get("start_index", 0)))
         random_seed = int(kwargs.get("random_seed", -1))
         aspect_ratio = str(kwargs.get("aspect_ratio", "all") or "all")
+        keyword = str(kwargs.get("keyword", "") or "").strip().lower()
+        sort_by = str(kwargs.get("sort_by", "name") or "name")
+        sort_dir = str(kwargs.get("sort_dir", "asc") or "asc")
         unique_id = kwargs.get("unique_id")
 
         logger.info(
@@ -607,7 +894,9 @@ class UnifiedMediaBrowser:
         if not selections and directory:
             files = _get_media_files(directory, media_type, recursive)
             files = [f for f in files if _matches_aspect_ratio(f["path"], aspect_ratio)]
-            files.sort(key=lambda item: os.path.relpath(item["path"], directory).replace("\\", "/").lower())
+            if keyword:
+                files = [item for item in files if keyword in item["name"].lower()]
+            _sort_media_files(files, sort_by, sort_dir)
             if files:
                 # batch_count=0 表示输出全部（按顺序模式时），便于用户把整批图像交给下游预览/处理。
                 # 为防止目录文件过多导致 OOM，按与控件上限一致的 64 封顶。
@@ -650,12 +939,15 @@ class UnifiedMediaBrowser:
 
         if not selections:
             empty_img = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-            return (empty_img, empty_img[:, :, :, 0], 64, 64, [])
+            # VIDEO 是列表输出。空列表会让 ComfyUI 的列表映射器在下游节点执行前
+            # 访问 v[-1] 并抛出 IndexError；用单个空槽表示“本批没有视频”。
+            return (empty_img, empty_img[:, :, :, 0], 64, 64, [None], "")
 
         images = []
         masks = []
         video_paths = []
         image_sources = []
+        positive_prompt = ""
 
         for item in selections:
             path = resolve_allowed_media_path(item.get("path", ""), "all", "file")
@@ -667,6 +959,8 @@ class UnifiedMediaBrowser:
                 video_paths.append(path)
             else:
                 try:
+                    if not positive_prompt:
+                        positive_prompt = _read_image_prompt_metadata(path)["positive"]
                     with Image.open(path) as source:
                         image_sources.append(source.convert("RGBA"))
                 except Exception as e:
@@ -698,13 +992,16 @@ class UnifiedMediaBrowser:
         if not images:
             empty_img = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             video_width, video_height = _get_media_dimensions(video_paths[0]) if video_paths else (64, 64)
-            return (empty_img, empty_img[:, :, :, 0], video_width or 64, video_height or 64, video_output)
+            return (
+                empty_img, empty_img[:, :, :, 0], video_width or 64, video_height or 64,
+                video_output or [None], positive_prompt,
+            )
 
         images_tensor = torch.from_numpy(np.stack(images))
         masks_tensor = torch.from_numpy(np.stack(masks))
         h, w = images[0].shape[:2]
 
-        return (images_tensor, masks_tensor, w, h, video_output)
+        return (images_tensor, masks_tensor, w, h, video_output or [None], positive_prompt)
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):

@@ -33,6 +33,29 @@ app.registerExtension({
 
         console.log("[EagleAPI] 注册节点:", nodeData.name);
 
+        if (nodeData.name === "EagleAPIImageNode") {
+            const previousConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function() {
+                const result = previousConfigure?.apply(this, arguments);
+                const mode = this.widgets?.find(widget => widget.name === "output_resize_mode");
+                // Old workflows can have the diagnostic button's null value in
+                // this newly appended slot. Do not overwrite a valid selection.
+                if (mode && !["适应留边", "裁剪填满", "拉伸", "保留API原图", "尺寸不符时报错"].includes(mode.value)) {
+                    mode.value = "适应留边";
+                }
+                return result;
+            };
+            const previousExecuted = nodeType.prototype.onExecuted;
+            nodeType.prototype.onExecuted = function(data) {
+                previousExecuted?.apply(this, arguments);
+                const text = Array.isArray(data?.text) ? data.text.join("\n") : data?.text;
+                if (text && this._eagleImageSizeStatus) {
+                    this._eagleImageSizeStatus.textContent = String(text);
+                    this.setDirtyCanvas?.(true, true);
+                }
+            };
+        }
+
         const originalNodeCreated = nodeType.prototype.onNodeCreated;
 
         nodeType.prototype.onNodeCreated = function() {
@@ -119,6 +142,13 @@ app.registerExtension({
         if (!node.widgets) {
             console.log("[EagleAPI] 节点没有 widgets");
             return;
+        }
+        if (node.comfyClass === "EagleAPIImageNode" && !node._eagleImageSizeStatus) {
+            const status = document.createElement("div");
+            status.style.cssText = "box-sizing:border-box;width:100%;min-height:72px;padding:8px;background:#171321;color:#dbd5e8;border:1px solid #564061;border-radius:6px;font:12px/1.5 sans-serif;white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere";
+            status.textContent = "尺寸诊断：等待执行。比例/分辨率仅在 size=比例预设时生效；4K 长边=3840。input_resize_mode 只控制上传参考图。";
+            node.addDOMWidget("eagle_image_size_status", "div", status, { serialize: false, hideOnZoom: false });
+            node._eagleImageSizeStatus = status;
         }
 
         // 查找 API Key widget（后端字段名为 api_config_key）

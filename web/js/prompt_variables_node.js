@@ -77,6 +77,7 @@ app.registerExtension({
 
         if ((Number(countWidget.value) || 0) < required.length) countWidget.value = required.length;
         updateVariableVisibility({ preserveSize: true });
+        node.graph?.change?.();
       };
 
       node._ppGetVariables = function() {

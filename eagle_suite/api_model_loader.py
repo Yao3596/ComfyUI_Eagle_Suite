@@ -348,8 +348,8 @@ class EagleAPIUnifiedNode(_BaseAPI):
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("输出结果", "状态信息", "对话历史", "输出图像")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("输出结果", "状态信息", "对话历史")
     FUNCTION = "process"
     CATEGORY = "🦅 Eagle/API"
     OUTPUT_NODE = True
@@ -392,7 +392,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
             if not mdl: missing.append("model")
             err = f"❌ 缺失配置: {', '.join(missing)}（请连接 API 配置加载器或填写独立字段）"
             logger.error(f"[EagleAPI] {err}")
-            return ("", err, history, None)
+            return ("", err, history)
 
         profile = _cfg.get_profile(mdl)
         model_type = _cfg.normalize_model_type(
@@ -402,7 +402,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
         if model_type == _cfg.MODEL_TYPE_IMAGE:
             err = "❌ 当前配置是生图模型，请改用“🦅 API 生图”节点"
             logger.warning(f"[EagleAPI] {err}: model={mdl}")
-            return ("", err, history, None)
+            return ("", err, history)
 
         # 保存本次实际使用的配置到统一 api_config.json
         _save_api_config(api_key=key, base_url=url, model=mdl)
@@ -429,7 +429,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
                     content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
             if not content:
-                return ("", "❌ 所有图像编码失败", history, None)
+                return ("", "❌ 所有图像编码失败", history)
 
             prompt_txt = user_prompt.strip() or ("描述这些图片" if len(content) > 1 else "描述这张图片")
             content.append({"type": "text", "text": prompt_txt + get_user_suffix(prompt_model_type)})
@@ -437,7 +437,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
         else:
             prompt_txt = user_prompt.strip()
             if not prompt_txt:
-                return ("", "❌ 请输入提示词", history, None)
+                return ("", "❌ 请输入提示词", history)
             api_messages.append({"role": "user", "content": prompt_txt + get_user_suffix(prompt_model_type)})
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -452,7 +452,7 @@ class EagleAPIUnifiedNode(_BaseAPI):
 
         ok, data, err, elapsed = self._request(f"{url}/chat/completions", headers, payload)
         if not ok:
-            return ("", f"❌ {err}", history, None)
+            return ("", f"❌ {err}", history)
 
         try:
             text = data["choices"][0]["message"]["content"].strip()
@@ -465,30 +465,11 @@ class EagleAPIUnifiedNode(_BaseAPI):
                 {"role": "assistant", "content": text}
             ])
 
-            # 尝试从响应中提取图片
-            out_images = _extract_images_from_text(text)
-            if out_images:
-                try:
-                    # 尺寸统一：以第一张图为基准，后续同尺寸则堆叠，否则只输出第一张
-                    base_w, base_h = out_images[0].size
-                    same_size = all(img.size == (base_w, base_h) for img in out_images)
-                    if same_size and len(out_images) > 1:
-                        image_tensor = torch.cat([_pil_to_tensor(img) for img in out_images], dim=0)
-                    else:
-                        image_tensor = _pil_to_tensor(out_images[0])
-                        if len(out_images) > 1:
-                            logger.info(f"[EagleAPI] 检测到 {len(out_images)} 张输出图像但尺寸不一致，仅输出第一张")
-                except Exception as e:
-                    logger.warning(f"[EagleAPI] 图像张量转换失败: {e}")
-                    image_tensor = None
-            else:
-                image_tensor = None
-
             usage = data.get("usage", {})
             status = f"✅ {usage.get('total_tokens', 0)} tokens | {elapsed:.2f}s"
-            return (text, status, new_history, image_tensor)
+            return (text, status, new_history)
         except Exception as e:
-            return ("", f"❌ 解析失败: {e}", history, None)
+            return ("", f"❌ 解析失败: {e}", history)
 
 # ── OpenAI Images API 生图/编辑节点 ────────────────────────────
 
@@ -548,6 +529,7 @@ class EagleAPIImageNode:
                     "3840x2160", "2160x3840",
                 ], {
                     "default": "auto",
+                    "tooltip": "auto 保留服务端尺寸；比例预设使用下方比例和分辨率；自定义宽高使用下方宽高。非 auto 为最终输出目标，服务端不支持时可能需要本地缩放。",
                 }),
                 "quality": (["auto", "low", "medium", "high"], {
                     "default": "auto",
@@ -564,6 +546,7 @@ class EagleAPIImageNode:
                 }),
                 "resolution": (list(cls._RESOLUTION_LONG_EDGE.keys()), {
                     "default": "1K",
+                    "tooltip": "仅 size=比例预设时生效。按长边计算：4K=3840；3:4 的 4K 目标为 2880×3840。",
                 }),
                 "custom_width": ("INT", {
                     "default": 1024, "min": 64, "max": 16384, "step": 16,
@@ -573,6 +556,11 @@ class EagleAPIImageNode:
                 }),
                 "input_resize_mode": (["不缩放", "适应留边", "裁剪填满", "拉伸"], {
                     "default": "适应留边",
+                    "tooltip": "仅控制上传的参考图和遮罩，不控制最终输出尺寸。",
+                }),
+                "output_resize_mode": (["适应留边", "裁剪填满", "拉伸", "保留API原图", "尺寸不符时报错"], {
+                    "default": "适应留边",
+                    "tooltip": "API 返回尺寸不符时的处理。默认等比适应目标画布；本地缩放不增加模型生成细节。严格模式不会自动重试付费请求。",
                 }),
             },
             "optional": {
@@ -692,7 +680,8 @@ class EagleAPIImageNode:
         return _decode_base64_image(payload)
 
     @classmethod
-    def _parse_images(cls, data: dict, timeout: int, target_size=None) -> tuple:
+    def _parse_images(cls, data: dict, timeout: int, target_size=None,
+                      resize_mode="适应留边", size_report=None) -> tuple:
         if not isinstance(data, dict):
             raise ValueError("API 返回不是 JSON 对象")
         items = data.get("data") or data.get("images") or []
@@ -706,16 +695,28 @@ class EagleAPIImageNode:
         images = []
         revised_prompts = []
         failures = []
+        if resize_mode not in {"适应留边", "裁剪填满", "拉伸", "保留API原图", "尺寸不符时报错"}:
+            raise ValueError("无法识别的输出尺寸处理方式")
         for index, item in enumerate(items):
             try:
                 image = cls._decode_response_image(item, timeout)
-                if target_size and image.size != target_size:
-                    image = image.resize(target_size, Image.LANCZOS)
-                images.append(image)
-                if isinstance(item, dict) and item.get("revised_prompt"):
-                    revised_prompts.append(str(item["revised_prompt"]))
             except Exception as exc:
                 failures.append(f"#{index + 1}: {exc}")
+                continue
+            native_size = image.size
+            if target_size and image.size != target_size:
+                if resize_mode == "尺寸不符时报错":
+                    raise ValueError(
+                        f"API 返回 {image.width}x{image.height}，目标 {target_size[0]}x{target_size[1]}；"
+                        "已按严格模式停止，没有自动重试。此次 API 请求已完成，可能已计费。"
+                    )
+                if resize_mode != "保留API原图":
+                    image = cls._resize_pil(image, target_size, resize_mode, Image.LANCZOS)
+            if size_report is not None:
+                size_report.append({"native": native_size, "output": image.size})
+            images.append(image)
+            if isinstance(item, dict) and item.get("revised_prompt"):
+                revised_prompts.append(str(item["revised_prompt"]))
         if not images:
             raise ValueError("；".join(failures) or "所有图片解析失败")
 
@@ -723,7 +724,9 @@ class EagleAPIImageNode:
         normalized = [images[0]]
         for image in images[1:]:
             if image.size != (width, height):
-                image = image.resize((width, height), Image.LANCZOS)
+                if resize_mode in {"保留API原图", "尺寸不符时报错"}:
+                    raise ValueError("API 返回的多张图片尺寸不同，无法无损组成 IMAGE 批次；请使用 batch_count=1 或选择尺寸适配模式。没有自动重试。")
+                image = cls._resize_pil(image, (width, height), resize_mode, Image.LANCZOS)
             normalized.append(image)
         tensor = torch.cat([_pil_to_tensor(image) for image in normalized], dim=0)
         return tensor, "\n".join(revised_prompts), failures
@@ -838,6 +841,7 @@ class EagleAPIImageNode:
         image_3=None,
         image_4=None,
         mask=None,
+        output_resize_mode="适应留边",
     ):
         if api_config:
             try:
@@ -866,6 +870,8 @@ class EagleAPIImageNode:
             missing.append("prompt")
         if missing:
             raise RuntimeError(f"缺失配置: {', '.join(missing)}")
+        if output_resize_mode not in {"适应留边", "裁剪填满", "拉伸", "保留API原图", "尺寸不符时报错"}:
+            raise RuntimeError("无法识别的输出尺寸处理方式；未发送 API 请求")
         if background == "transparent" and output_format == "jpeg":
             raise RuntimeError("透明背景不支持 JPEG，请选择 PNG 或 WebP")
         if "gpt-image-2" in model.lower() and background == "transparent":
@@ -969,8 +975,10 @@ class EagleAPIImageNode:
         if isinstance(data, dict) and data.get("error"):
             raise RuntimeError(f"API 返回错误: {data['error']}")
 
+        size_report = []
         image_tensor, revised_prompt, failures = self._parse_images(
-            data, int(timeout), target_size=target_size
+            data, int(timeout), target_size=target_size,
+            resize_mode=output_resize_mode, size_report=size_report,
         )
         image_count = int(image_tensor.shape[0])
         final_height = int(image_tensor.shape[1])
@@ -980,12 +988,18 @@ class EagleAPIImageNode:
         if isinstance(usage, dict) and usage.get("total_tokens") is not None:
             token_text = f" | {usage.get('total_tokens')} tokens"
         failure_text = f" | {len(failures)} 张解析失败" if failures else ""
+        native_sizes = ", ".join(f"{entry['native'][0]}x{entry['native'][1]}" for entry in size_report)
+        resized = any(entry["native"] != (final_width, final_height) for entry in size_report)
+        resize_text = f" | ⚠ 本地{output_resize_mode}，非原生生成分辨率" if resized else " | 未进行本地缩放"
+        target_text = f"{target_size[0]}x{target_size[1]}" if target_size else "auto（服务端决定）"
         status = (
             f"✅ {operation} | {image_count} 张 | {elapsed:.2f}s | {model}"
-            f" | 请求 {parameters.get('size', 'auto')} | 输出 {final_width}x{final_height}"
-            f"{token_text}{failure_text}"
+            f" | 目标 {target_text} | 请求 {parameters.get('size', 'auto')}"
+            f" | API 返回 {native_sizes} | 输出 {final_width}x{final_height}"
+            f"{resize_text}{token_text}{failure_text}"
         )
-        return (image_tensor, status, revised_prompt)
+        logger.info("[EagleAPIImage] %s", status)
+        return {"ui": {"text": [status]}, "result": (image_tensor, status, revised_prompt)}
 
 
 __all__ = ["EagleAPIUnifiedNode", "EagleAPIImageNode"]

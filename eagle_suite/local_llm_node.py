@@ -922,7 +922,13 @@ def _run_llamacpp_inference(llm, pil_images, user_text, system_text,
         start = time.time()
         resp = llm.create_chat_completion(messages=messages, **gen_kwargs)
         elapsed = time.time() - start
-        text = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+        choices = resp.get("choices") if isinstance(resp, dict) else None
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        # Some Qwen/llama.cpp chat templates expose the only generated text as
+        # reasoning_content. Prefer final content, but do not turn a valid
+        # response into a mysterious empty string when that field is absent.
+        text = message.get("content") or message.get("reasoning_content") or ""
         return text, "", elapsed
     except Exception as e:
         return "", f"❌ llama.cpp 推理失败: {e}", 0.0
@@ -990,6 +996,10 @@ class EagleLocalLLMLoader:
                 "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
                 "dtype": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
                 "thinking_budget": ("INT", {"default": 4096, "min": 0, "max": 32768, "step": 256}),
+                "validation_mode": (["仅加载", "最小推理校验"], {
+                    "default": "仅加载",
+                    "tooltip": "最小推理校验会通过与“本地大模型反推”相同的执行链生成一次短响应；视觉模型会同时发送一张合成测试图。",
+                }),
             }
         }
 
@@ -1002,7 +1012,8 @@ class EagleLocalLLMLoader:
     def load(self, model_series, model_path, mmproj_path, enable_thinking, keep_history_think,
              n_ctx, n_gpu_layers, kv_cache_type_k, kv_cache_type_v,
              moe_experts_on_cpu, first_n_layers_on_cpu, qwen38_reasoning_effort,
-             device="auto", dtype="bf16", thinking_budget=4096):
+             device="auto", dtype="bf16", thinking_budget=4096,
+             validation_mode="仅加载"):
         try:
             # UI 中文标签映射回内部英文 key
             model_series = _MODEL_SERIES_LABELS.get(model_series, model_series)
@@ -1037,6 +1048,8 @@ class EagleLocalLLMLoader:
             # 自动根据文件类型选择后端：.gguf -> llama.cpp，目录 -> transformers
             if is_gguf:
                 mmproj = _resolve_model_path_by_name(mmproj_path) if mmproj_path and mmproj_path != _MMPROJ_NONE else ""
+                if mmproj_path and mmproj_path != _MMPROJ_NONE and not mmproj:
+                    return ({}, f"❌ 已选择 mmproj，但文件不存在或不在允许的模型目录中: {mmproj_path}")
                 handle = _create_llamacpp_handle(
                     resolved, mmproj,
                     n_ctx=n_ctx, n_gpu_layers=n_gpu_layers,
@@ -1047,8 +1060,10 @@ class EagleLocalLLMLoader:
                     **common_kwargs,
                 )
                 rel = os.path.basename(handle["path"])
+                vision_status = "已绑定" if handle.get("mmproj") else "未绑定（仅文本）"
                 status = (f"✅ [llama.cpp] 已加载: {rel} | n_gpu_layers={n_gpu_layers} "
-                          f"| kv={kv_cache_type_k}/{kv_cache_type_v} | 思考={enable_thinking}")
+                          f"| kv={kv_cache_type_k}/{kv_cache_type_v} | 视觉={vision_status} "
+                          f"| 思考={enable_thinking}")
             else:
                 handle = _create_local_llm_handle(resolved, device, dtype, **common_kwargs)
                 rel = os.path.basename(handle["path"])
@@ -1057,6 +1072,19 @@ class EagleLocalLLMLoader:
 
             handle["thinking"] = enable_thinking
             handle["thinking_budget"] = thinking_budget
+            handle["validation"] = {"mode": "load_only", "passed": None}
+            if validation_mode == "最小推理校验":
+                probe = _probe_local_model_handle(handle)
+                handle["validation"] = probe
+                if not probe.get("passed"):
+                    release_local_model_handle(handle)
+                    return ({}, "❌ 模型已加载但最小推理失败: " + str(probe.get("error") or "未知错误"))
+                status += (
+                    f" | 推理校验=通过({probe.get('kind', 'text')}, "
+                    f"{float(probe.get('elapsed', 0.0)):.2f}s)"
+                )
+            else:
+                status += " | 推理校验=未执行"
             return (handle, status)
         except Exception as e:
             return ({}, f"❌ 模型加载失败: {e}")
@@ -1084,7 +1112,8 @@ class EagleLocalLLMNode:
                 "model_path": (model_names + [""], {
                     "default": default_model,
                     "multiline": False,
-                    "placeholder": "选择或输入模型路径（如 models/LLM/Qwen3-VL-4B-Instruct）"
+                    "placeholder": "选择或输入模型路径（如 models/LLM/Qwen3-VL-4B-Instruct）",
+                    "tooltip": "仅在 model / qwen_model 都未连接时使用；外部模型接入后由前端禁用。",
                 }),
                 "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
                 "dtype": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
@@ -1112,7 +1141,7 @@ class EagleLocalLLMNode:
                 "output_think": ("BOOLEAN", {"default": False, "label_on": "输出", "label_off": "过滤", "tooltip": "是否保留 Qwen3 等模型的 <think>...</think> 推理块"}),
             },
             "optional": {
-                "model": ("EAGLE_LOCAL_LLM_MODEL", {"forceInput": True}),
+                "model": ("EAGLE_LOCAL_LLM_MODEL", {"forceInput": True, "tooltip": "最高优先级。连接后 model_path/device/dtype 不再生效。"}),
                 "qwen_model": ("QWENLLAMA", {"forceInput": True, "tooltip": "可直接接入 comfyUI-llama-TE 的 Qwen llama TE 模型加载器输出"}),
                 "history": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
                 "video": ("VIDEO", {"tooltip": "视频帧序列，连接 Load Video / 加载视频 等节点输出"}),
@@ -1139,6 +1168,7 @@ class EagleLocalLLMNode:
                 image_7=None, image_8=None, image_9=None):
 
         # 1. 解析并加载模型：优先使用外部加载器传入的模型句柄（双后端）
+        source_validation = model.get("validation") if isinstance(model, dict) else None
         if isinstance(model, dict) and model.get("released"):
             try:
                 ensure_local_model_handle(model)
@@ -1149,8 +1179,31 @@ class EagleLocalLLMNode:
         thinking_budget = 4096
         processor = None
 
-        # 1.1 优先接入 comfyUI-llama-TE 的 QWENLLAMA 输出（解决“接口不通用”问题）
-        if qwen_model is not None and hasattr(qwen_model, "llm") and qwen_model.llm is not None:
+        # 1.1 模型来源优先级：Eagle model > 第三方 qwen_model > 本节点 model_path。
+        # 不对模型对象做隐式 bool 转换，避免某些容器/模型类的布尔语义导致误判。
+        if isinstance(model, dict) and model.get("backend") == "llama.cpp" and model.get("llm") is not None:
+            backend = "llama.cpp"
+            model_obj = model["llm"]
+            thinking = model.get("thinking", False)
+            thinking_budget = model.get("thinking_budget", 4096)
+            resolved = model.get("path", "")
+            loaded_by = "外部加载器(llama.cpp)"
+        elif (isinstance(model, dict) and model.get("model") is not None
+              and model.get("processor") is not None):
+            model_obj = model["model"]
+            processor = model["processor"]
+            resolved = model.get("path", "")
+            thinking = model.get("thinking", False)
+            thinking_budget = model.get("thinking_budget", 4096)
+            loaded_by = "外部加载器"
+        elif model is not None:
+            return (
+                "",
+                "❌ model 端口已接入，但外部加载器未提供有效模型句柄；"
+                "请查看加载器的状态输出。为防止误用，本节点不会静默回退到 model_path。",
+                history,
+            )
+        elif qwen_model is not None and hasattr(qwen_model, "llm") and qwen_model.llm is not None:
             backend = "llama.cpp"
             model_obj = qwen_model.llm
             settings = getattr(qwen_model, "settings", {}) or {}
@@ -1158,20 +1211,13 @@ class EagleLocalLLMNode:
             thinking_budget = int(settings.get("thinking_budget", 4096) or 4096)
             resolved = getattr(qwen_model, "path", "") or settings.get("model", "")
             loaded_by = "TE加载器(QWENLLAMA)"
-        elif model and isinstance(model, dict) and model.get("backend") == "llama.cpp" and model.get("llm") is not None:
-            backend = "llama.cpp"
-            model_obj = model["llm"]
-            thinking = model.get("thinking", False)
-            thinking_budget = model.get("thinking_budget", 4096)
-            resolved = model.get("path", "")
-            loaded_by = "外部加载器(llama.cpp)"
-        elif model and isinstance(model, dict) and model.get("model") and model.get("processor"):
-            model_obj = model["model"]
-            processor = model["processor"]
-            resolved = model.get("path", "")
-            thinking = model.get("thinking", False)
-            thinking_budget = model.get("thinking_budget", 4096)
-            loaded_by = "外部加载器"
+        elif qwen_model is not None:
+            return (
+                "",
+                "❌ qwen_model 端口已接入，但第三方加载器未提供有效 llm 对象；"
+                "为防止误用，本节点不会静默回退到 model_path。",
+                history,
+            )
         else:
             resolved = _normalize_model_path(model_path)
             if not resolved or not os.path.isdir(resolved):
@@ -1305,8 +1351,61 @@ class EagleLocalLLMNode:
         mode_icon = "🖼️" if pil_images else "📝"
         mode_text = f"{len(pil_images)}图" if pil_images else "文本"
         failed_note = f" | ⚠️ {len(failed_images)}图失败" if failed_images else ""
-        status = f"✅ {mode_icon} {mode_text} | {len(text)} 字符 | {elapsed:.2f}s | 来源:{loaded_by}{failed_note}"
+        validation_note = ""
+        if isinstance(source_validation, dict):
+            if source_validation.get("passed") is True:
+                validation_note = " | 加载器校验:通过"
+            elif source_validation.get("passed") is None:
+                validation_note = " | 加载器校验:未执行"
+        status = f"✅ {mode_icon} {mode_text} | {len(text)} 字符 | {elapsed:.2f}s | 来源:{loaded_by}{validation_note}{failed_note}"
         return (text, status, new_history)
+
+
+def _probe_local_model_handle(handle):
+    """Exercise the exact downstream inference path with a tiny text/vision request."""
+    start = time.time()
+    backend = str(handle.get("backend") or "") if isinstance(handle, dict) else ""
+    vision = bool(handle.get("mmproj")) if backend == "llama.cpp" else False
+    if backend == "transformers":
+        try:
+            config = getattr(handle.get("model"), "config", None)
+            vision = bool(
+                getattr(config, "vision_config", None)
+                or getattr(config, "visual", None)
+                or "vision" in str(getattr(config, "model_type", "")).lower()
+                or "vl" in str(getattr(config, "model_type", "")).lower()
+            )
+        except Exception:
+            vision = False
+    test_image = torch.zeros((1, 32, 32, 3), dtype=torch.float32) if vision else None
+    try:
+        text, status, _history = EagleLocalLLMNode().process(
+            model_path="", device="auto", dtype="bf16",
+            prompt_model_type="自然语言", system_template="custom",
+            system_prompt="Return a short test response.",
+            user_prompt="Reply with OK.", filter_intro=False,
+            max_new_tokens=16, temperature=0.0, top_p=1.0,
+            do_sample=False, repetition_penalty=1.0,
+            batch_mode="first", max_image_size=224, seed=0,
+            output_think=False, model=handle, image_1=test_image,
+        )
+        if not str(text or "").strip():
+            return {
+                "mode": "inference", "passed": False,
+                "kind": "vision" if vision else "text",
+                "elapsed": time.time() - start, "error": status or "模型返回空内容",
+            }
+        return {
+            "mode": "inference", "passed": True,
+            "kind": "vision" if vision else "text",
+            "elapsed": time.time() - start, "sample": str(text).strip()[:120],
+        }
+    except Exception as error:
+        return {
+            "mode": "inference", "passed": False,
+            "kind": "vision" if vision else "text",
+            "elapsed": time.time() - start, "error": str(error),
+        }
 
 
 # ═══════════════════════════════════════════════════════════════

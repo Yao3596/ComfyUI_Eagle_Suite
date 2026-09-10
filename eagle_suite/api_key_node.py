@@ -8,6 +8,8 @@ Eagle API Key & Config Loader Nodes
 只使用一个 api_config.json。
 """
 
+import asyncio
+import time
 import requests
 import ipaddress
 import socket
@@ -41,6 +43,62 @@ def _strip_path_quotes(path: str) -> str:
     while len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
         s = s[1:-1].strip()
     return s
+
+
+def _extract_remote_models(payload) -> list:
+    """Accept OpenAI-style and common compatible /models payloads."""
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("data")
+    if not isinstance(items, list):
+        items = payload.get("models")
+    if not isinstance(items, list):
+        return []
+    models = []
+    for item in items:
+        if isinstance(item, str):
+            model = item
+        elif isinstance(item, dict):
+            model = item.get("id") or item.get("name") or item.get("model")
+        else:
+            model = ""
+        model = str(model or "").strip()
+        if model and model not in models:
+            models.append(model)
+        if len(models) >= 5000:
+            break
+    return models
+
+
+def _request_remote_models(base_url, api_key, validate_target, request_get=requests.get):
+    """Probe an OpenAI-compatible model endpoint without invoking inference."""
+    validate_target(base_url)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    started = time.perf_counter()
+    response = request_get(
+        f"{base_url}/models", headers=headers, timeout=(10, 30),
+        allow_redirects=False,
+    )
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if 300 <= response.status_code < 400:
+        raise RuntimeError(f"/models 返回重定向 HTTP {response.status_code}；请检查 Base URL")
+    validate_target(str(response.url))
+    if response.status_code != 200:
+        if response.status_code in {401, 403}:
+            detail = "鉴权失败，请检查 API Key"
+        elif response.status_code == 404:
+            detail = "服务可达，但没有兼容的 /models 端点"
+        else:
+            detail = "服务返回异常状态"
+        raise RuntimeError(f"{detail}（HTTP {response.status_code}，{elapsed_ms} ms）")
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"/models 返回非 JSON 内容（{elapsed_ms} ms）") from exc
+    models = _extract_remote_models(payload)
+    if not models:
+        raise RuntimeError(f"API 连通，但 /models 未返回可识别的模型（{elapsed_ms} ms）")
+    return {"models": models, "elapsed_ms": elapsed_ms, "base_url": base_url}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -143,10 +201,6 @@ class EagleAPILoader:
         model = profile.get("model", "").strip()
         model_type = _profile_mgr.normalize_model_type(profile.get("model_type"))
 
-        if not api_key:
-            err = f"❌ Profile '{name}' 缺少 api_key"
-            logger.warning(f"[EagleAPILoader] {err}")
-            return ("", err, name, ("", err, name), model_type)
         if not base_url:
             err = f"❌ Profile '{name}' 缺少 base_url"
             logger.warning(f"[EagleAPILoader] {err}")
@@ -163,6 +217,8 @@ class EagleAPILoader:
             f"[EagleAPILoader] 加载 Profile '{name}': "
             f"base_url={base_url}, model={model}, model_type={model_type}"
         )
+        if not api_key:
+            logger.info(f"[EagleAPILoader] Profile '{name}' 未设置 API Key，将按无认证服务连接")
         return (api_key, base_url, model, (api_key, base_url, model), model_type)
 
 
@@ -220,6 +276,17 @@ def register_routes():
                 continue
             if not address.is_global:
                 raise ValueError("API 地址指向不允许的私有、链路本地或保留网络")
+
+    def _probe_models(profile_name="", base_url="", api_key=""):
+        """Read-only connectivity probe. It never calls chat/images endpoints."""
+        profile = _profile_mgr.get_profile(profile_name) if profile_name else {}
+        clean_url = _legacy_cfg.normalize_url(base_url or profile.get("base_url", ""))
+        clean_key = _legacy_cfg.decode_api_key(api_key or profile.get("api_key", ""))
+        if not clean_url:
+            raise ValueError("Base URL 不能为空")
+        if profile.get("api_key") and not api_key and not clean_key:
+            raise ValueError("已保存的 API Key 引用当前无法读取，请在编辑弹窗重新输入后再检测")
+        return _request_remote_models(clean_url, clean_key, _validate_api_target)
 
     @routes.post("/api_loader/models")
     async def get_models_route(request):
@@ -384,7 +451,7 @@ def register_routes():
 
     @routes.post("/api_loader/fetch_models")
     async def fetch_models_route(request):
-        """从当前选中的 Profile 的 API 服务商 /v1/models 拉取模型列表。"""
+        """检查 /models 连通性并读取模型；支持弹窗内尚未保存的配置。"""
         try:
             if not _same_origin(request):
                 return web.json_response({"success": False, "error": "cross-origin request rejected"}, status=403)
@@ -392,61 +459,38 @@ def register_routes():
             profile_name = (body.get("profile_name") or "").strip()
             if not profile_name:
                 profile_name = _profile_mgr.load_profiles().get("active_profile", "")
-
-            profile = _profile_mgr.get_profile(profile_name)
-            if not profile:
+            profile = _profile_mgr.get_profile(profile_name) if profile_name else {}
+            base_url = (body.get("base_url") or "").strip()
+            api_key = body.get("api_key") or ""
+            if not profile and not base_url:
                 return web.json_response({
                     "success": False,
                     "error": f"未找到 Profile: {profile_name}"
                 }, status=400)
-
-            api_key = _legacy_cfg.decode_api_key(profile.get("api_key", ""))
-            base_url = _legacy_cfg.normalize_url(profile.get("base_url", ""))
-
-            if not api_key or not base_url:
-                return web.json_response({
-                    "success": False,
-                    "error": "该 Profile 缺少 api_key 或 base_url，无法从 API 拉取模型列表"
-                }, status=400)
-
             try:
-                _validate_api_target(base_url)
-                resp = requests.get(
-                    f"{base_url}/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=30
+                result = await asyncio.to_thread(
+                    _probe_models, profile_name, base_url, api_key
                 )
-                _validate_api_target(str(resp.url))
-                if resp.status_code != 200:
-                    return web.json_response({
-                        "success": False,
-                        "error": f"API 返回 HTTP {resp.status_code}: {resp.text[:200]}"
-                    }, status=502)
-
-                data = resp.json()
-                remote_models = []
-                for item in data.get("data", []):
-                    mdl = item.get("id") or item.get("name") or item.get("model")
-                    if mdl and mdl not in remote_models:
-                        remote_models.append(mdl)
-
-                if not remote_models:
-                    return web.json_response({
-                        "success": False,
-                        "error": "API 未返回任何模型"
-                    }, status=502)
-
                 return web.json_response({
                     "success": True,
-                    "models": remote_models,
+                    **result,
                     "profile": profile_name,
-                    "model_type": _profile_mgr.normalize_model_type(profile.get("model_type")),
+                    "model_type": _profile_mgr.normalize_model_type(
+                        body.get("model_type") or profile.get("model_type")
+                    ),
                 })
             except requests.exceptions.ConnectionError:
                 return web.json_response({
                     "success": False,
-                    "error": f"无法连接到 {base_url}"
+                    "error": "无法连接 API：请检查 Base URL、网络或代理"
                 }, status=502)
+            except requests.exceptions.Timeout:
+                return web.json_response({
+                    "success": False,
+                    "error": "API 连接超时（最长 30 秒）"
+                }, status=504)
+            except (ValueError, RuntimeError) as e:
+                return web.json_response({"success": False, "error": str(e)}, status=502)
             except Exception as e:
                 logger.error(f"[api_loader/fetch_models] 请求异常: {e}")
                 return web.json_response({
@@ -461,4 +505,4 @@ def register_routes():
     logger.info("[APILoader] API Loader 路由已注册")
 
 
-__all__ = ["EagleAPIKeyNode", "EagleAPILoader"]
+__all__ = ["EagleAPIKeyNode", "EagleAPILoader", "_extract_remote_models", "_request_remote_models"]

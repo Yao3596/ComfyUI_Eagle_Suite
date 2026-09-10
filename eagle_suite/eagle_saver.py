@@ -10,6 +10,7 @@ import time
 import numpy as np
 import torch
 from PIL import Image
+import folder_paths
 
 from .eagle_client import eagle_client
 from .utils import generate_unique_filename, parse_tags
@@ -39,7 +40,7 @@ class EagleSaver:
                 "local_save_path": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "留空则不保存到本地"
+                    "placeholder": "两处路径都留空时保存到 ComfyUI/output"
                 }),
                 "filename_prefix": ("STRING", {
                     "default": "ComfyUI",
@@ -114,11 +115,16 @@ class EagleSaver:
         filename_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_prefix or "ComfyUI")).strip(" .") or "ComfyUI"
         filename_separator = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_separator or "_"))
 
-        save_to_eagle = bool(eagle_folder.strip())
-        save_to_local = bool(local_save_path.strip())
+        eagle_folder = str(eagle_folder or "").strip()
+        local_save_path = str(local_save_path or "").strip()
+        save_to_eagle = bool(eagle_folder)
+        save_to_local = bool(local_save_path)
+        used_default_output = False
 
         if not save_to_eagle and not save_to_local:
-            return ("❌ 请至少指定 Eagle 文件夹或本地保存路径",)
+            local_save_path = folder_paths.get_output_directory()
+            save_to_local = True
+            used_default_output = True
 
         # 1. 解析 Eagle 文件夹 ID
         folder_id = None
@@ -138,8 +144,11 @@ class EagleSaver:
                 if not folder_id:
                     return (f"❌ 找不到 Eagle 文件夹: {value}",)
             elif itype == "local_path":
-                logger.warning("检测到 Eagle 文件夹处填写了本地路径，已忽略 Eagle 保存")
+                logger.warning("检测到 Eagle 文件夹处填写了本地路径，改为本地保存")
                 save_to_eagle = False
+                if not save_to_local:
+                    local_save_path = str(value)
+                    save_to_local = True
 
         tags_list = parse_tags(tags)
         success_count = 0
@@ -299,6 +308,9 @@ class EagleSaver:
 
         # 7. 汇总
         summary = f"保存完成 - Eagle: {success_count}/{len(images)}, 本地: {local_count}/{len(images)}{folder_correction}"
+        if save_to_local:
+            label = "ComfyUI 默认 output" if used_default_output else "本地路径"
+            summary += f"\n📁 {label}: {local_save_path}"
         if eagle_errors:
             summary += "\n" + "\n".join(eagle_errors[:8])
 

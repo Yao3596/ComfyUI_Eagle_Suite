@@ -44,6 +44,7 @@ from .constants import (
     H3_MANIFEST,
     H3_RUN_STATE,
     H3_SEGMENT,
+    MANIFEST_VERSION,
 )
 from .media_utils import (
     _resolve_video_path,
@@ -78,6 +79,28 @@ def _clone_state(state):
     if state is None:
         return None
     return json.loads(json.dumps(state, ensure_ascii=False))
+
+
+def _json_snapshot(value):
+    """稳定、可读的 JSON 边界格式，供通用文本/存储节点交换。"""
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _coerce_json_object(source, label):
+    """接受已解码 dict 或 STRING JSON，并给出明确的结构错误。"""
+    if isinstance(source, dict):
+        # 先浅拷贝以便识别第三方 state 中的张量；直接 JSON 深拷贝会在给出
+        # 有意义的契约错误之前因 tensor 不可序列化而失败。
+        return dict(source)
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError(f"{label} 必须是对象或非空 JSON 字符串")
+    try:
+        value = json.loads(source)
+    except Exception as error:
+        raise ValueError(f"{label} 不是有效 JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} JSON 顶层必须是对象")
+    return value
 
 
 # 上下文抽帧缓存：同一 (prev_clip + 帧数) 不再重复抽帧，对应 AIMixer 的 .pre 指纹思路。
@@ -261,6 +284,55 @@ class EagleH3PreflightNode:
         return (plan, ok, json.dumps(report, ensure_ascii=False, indent=2), summary)
 
 
+class EagleH3PlanInteropNode:
+    """H3_CHAIN_PLAN 与通用 STRING JSON 的双向边界。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source": (f"{H3_PLAN_TYPE},STRING", {
+                    "forceInput": True,
+                    "tooltip": "可连接 H3_CHAIN_PLAN，或任意节点提供的计划 JSON 字符串。",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (H3_PLAN_TYPE, "STRING", "STRING", "INT", "INT", "INT")
+    RETURN_NAMES = ("plan", "plan_json", "summary", "clip_count", "width", "height")
+    OUTPUT_TOOLTIPS = (
+        "校验后的公共 H3_CHAIN_PLAN。",
+        "完整计划快照 JSON；可接任意 STRING 预览、保存、网络或数据库节点。",
+        "计划摘要。",
+        "镜头数量。",
+        "生成宽度。",
+        "生成高度。",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台/互操作"
+    DESCRIPTION = (
+        "不依赖来源节点身份，只按 H3_CHAIN_PLAN 的实际字段校验。"
+        "用于第三方计划节点、文本节点和外部存储之间的安全转换。"
+    )
+
+    def execute(self, source):
+        plan = _coerce_json_object(source, "plan")
+        if "shots" not in plan and isinstance(plan.get("plan"), dict):
+            plan = plan["plan"]
+        plan = _validate_plan(plan)
+        compatibility = plan.get("compatibility") or {}
+        shots = plan.get("shots") or []
+        summary = str(plan.get("summary") or f"{len(shots)} clips")
+        return (
+            plan,
+            _json_snapshot(plan),
+            summary,
+            len(shots),
+            int(compatibility.get("width", 0) or 0),
+            int(compatibility.get("height", 0) or 0),
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. Load Manifest 节点
 # ══════════════════════════════════════════════════════════════════════════════
@@ -289,6 +361,99 @@ class EagleH3LoadManifestNode:
             base = Path(folder_paths.get_output_directory()) / "h3_eagle_chains" / run_name.strip()
         state = load_state(str(base))
         return (state, build_summary(state))
+
+
+class EagleH3StateInteropNode:
+    """Eagle 运行状态与标准 JSON/VIDEO/数值端口之间的安全边界。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source": (f"{H3_RUN_STATE},STRING", {
+                    "forceInput": True,
+                    "tooltip": (
+                        "接受 Eagle H3 state，或先前导出的 state_json。"
+                        "第三方 H3_CHAIN_STATE 含张量且契约不同，不能伪装直连。"
+                    ),
+                }),
+            },
+        }
+
+    RETURN_TYPES = (
+        H3_RUN_STATE, "STRING", H3_PLAN_TYPE, "VIDEO", "STRING",
+        "INT", "INT", "BOOL", "STRING",
+    )
+    RETURN_NAMES = (
+        "state", "state_json", "plan", "prev_clip", "manifest_path",
+        "clip_index", "clip_count", "done", "summary",
+    )
+    OUTPUT_TOOLTIPS = (
+        "校验后的 Eagle 强类型状态，供原生循环内部使用。",
+        "不含媒体张量的状态 JSON，可接通用 STRING 节点。",
+        "状态中携带的公共 H3_CHAIN_PLAN。",
+        "上一段已保存视频，使用 ComfyUI 标准 VIDEO 类型。",
+        "当前运行清单 manifest.json 路径。",
+        "当前一基镜头序号。",
+        "总镜头数。",
+        "是否已完成或停止。",
+        "人类可读状态摘要。",
+    )
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台/互操作"
+    DESCRIPTION = (
+        "开放 Eagle 状态中的可移植部分，同时保留内部 EAGLE_H3_STATE 强类型。"
+        "这样普通 JSON/VIDEO 节点可以参与流程，而不会破坏递归状态契约。"
+    )
+
+    @staticmethod
+    def _validated_state(source):
+        state = _coerce_json_object(source, "state")
+        if "version" not in state and isinstance(state.get("state"), dict):
+            state = state["state"]
+        if state.get("version") != MANIFEST_VERSION:
+            if "index" in state and "previous_frames" in state:
+                raise ValueError(
+                    "收到的是第三方 H3_CHAIN_STATE；它包含张量/潜空间状态，"
+                    "不能无损转换为 EAGLE_H3_STATE。请在各自循环边界使用标准媒体端口交换。"
+                )
+            raise ValueError(f"不支持的 Eagle state 版本: {state.get('version')}")
+        _validate_plan(state.get("plan"))
+        if not isinstance(state.get("shots", []), list):
+            raise ValueError("state.shots 必须是数组")
+        total = int(state.get("total_shots", len(state["plan"]["shots"])) or 0)
+        index = int(state.get("current_index", 0) or 0)
+        if total < 0 or index < 0:
+            raise ValueError("state 的镜头索引不能为负数")
+        state["total_shots"] = total
+        state["current_index"] = index
+        return _clone_state(state)
+
+    def execute(self, source):
+        state = self._validated_state(source)
+        plan = state["plan"]
+        index = int(state.get("current_index", 0) or 0)
+        total = int(state.get("total_shots", len(plan.get("shots") or [])) or 0)
+        previous_path = _prev_clip_from_state(state, index)
+        previous_video = (
+            native_video(previous_path)
+            if previous_path and os.path.isfile(previous_path)
+            else None
+        )
+        base_dir = str(state.get("base_dir") or "")
+        manifest_path = str(Path(base_dir) / "manifest.json") if base_dir else ""
+        done = bool(state.get("stop") or index >= total)
+        return (
+            state,
+            _json_snapshot(state),
+            plan,
+            previous_video,
+            manifest_path,
+            min(index + 1, total) if total else 0,
+            total,
+            done,
+            build_summary(state),
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -353,20 +518,25 @@ class EagleH3StartNode:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class EagleH3NativeLoopStartNode:
-    """原生动态图循环起点；flow 必须直连 Native Loop End。"""
+    """初始化/恢复计划并进入原生动态图循环；flow 必须直连 End。"""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "run_state": (H3_RUN_STATE,),
+                "plan": (H3_PLAN_TYPE,),
                 "start_index": ("INT", {"default": 1, "min": 1, "max": 1000, "step": 1}),
+                "run_name_override": ("STRING", {"default": ""}),
+                "output_dir": ("STRING", {"default": "", "placeholder": "留空使用 ComfyUI output 目录"}),
+                "resume_policy": (["fail", "overwrite", "resume"], {"default": "resume"}),
+                "mode": (["auto", "interactive"], {"default": "auto"}),
+                "max_shots": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1}),
             },
             "hidden": {"initial_state": (H3_RUN_STATE,)},
         }
 
     RETURN_TYPES = (H3_LOOP_FLOW, H3_RUN_STATE, "INT", "INT", "INT", "STRING")
-    RETURN_NAMES = ("flow", "run_state", "width", "height", "fps", "status")
+    RETURN_NAMES = ("flow", "state", "width", "height", "fps", "status")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 核心"
 
@@ -374,21 +544,32 @@ class EagleH3NativeLoopStartNode:
     def IS_CHANGED(cls, *args, **kwargs):
         return float("NaN")
 
-    def execute(self, run_state, start_index=1, initial_state=None):
+    def execute(self, plan, start_index=1, run_name_override="", output_dir="",
+                resume_policy="resume", mode="auto", max_shots=0,
+                initial_state=None):
         if initial_state is None:
-            started = EagleH3StartNode().execute(run_state, start_index=start_index)
+            initialized = EagleH3PlanNode().execute(
+                plan,
+                run_name_override=run_name_override,
+                output_dir=output_dir,
+                resume_policy=resume_policy,
+                mode=mode,
+                max_shots=max_shots,
+            )
+            initialized_state = (
+                initialized["result"][0] if isinstance(initialized, dict) else initialized[0]
+            )
+            started = EagleH3StartNode().execute(initialized_state, start_index=start_index)
             if isinstance(started, dict):
                 state, width, height, fps = started["result"]
             else:
                 state, width, height, fps = started
         else:
             state = _clone_state(initial_state)
-            original_plan = (run_state or {}).get("plan") or {}
+            original_plan = _validate_plan(plan)
             recursive_plan = state.get("plan") or {}
             if original_plan.get("plan_hash") != recursive_plan.get("plan_hash"):
                 raise ValueError("[H3NativeLoop] 递归执行期间导演台计划已变更")
-            if run_state.get("run_name") != state.get("run_name"):
-                raise ValueError("[H3NativeLoop] 递归状态与当前运行名不一致")
             compat = recursive_plan.get("compatibility") or {}
             width = int(compat.get("width", 1080) or 1080)
             height = int(compat.get("height", 1920) or 1920)
@@ -509,9 +690,8 @@ class EagleH3ShotContextNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {"run_state": (H3_RUN_STATE,)},
+            "required": {"state": (H3_RUN_STATE,)},
             "optional": {
-                "prev_clip": ("VIDEO",),
                 "context_frames_override": (
                     "INT", {"default": 0, "min": 0, "max": 500, "step": 1}
                 ),
@@ -524,19 +704,19 @@ class EagleH3ShotContextNode:
         "STRING", "BOOL", "IMAGE", "INT", "BOOL", "STRING",
     )
     RETURN_NAMES = (
-        "run_state", "prompt", "seed", "steps", "raw_frames", "delivered_frames",
+        "state", "prompt", "seed", "steps", "raw_frames", "delivered_frames",
         "blend_frames", "continuation_mode", "shot_id", "is_first", "context_image",
         "context_frames", "has_context", "summary",
     )
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 核心"
 
-    def execute(self, run_state, prev_clip=None, context_frames_override=0, seed_image=None):
-        state = _clone_state(run_state)
+    def execute(self, state, context_frames_override=0, seed_image=None):
+        state = _clone_state(state)
         shot_values = EagleH3CurrentShotNode().execute(state)
         context_image, context_frames, has_context, context_note = EagleH3ContextNode().execute(
             state,
-            prev_clip=prev_clip,
+            prev_clip=None,
             context_frames_override=context_frames_override,
             seed_image=seed_image,
         )
@@ -637,6 +817,38 @@ def _limit_reference_short_edge(image, target_short_edge):
         nchw, size=(out_height, out_width), mode="bilinear", align_corners=False
     )
     return resized.movedim(1, -1)
+
+
+# MiniMax H3 参考图尺寸档位。界面倍率值以 640px 为基准：
+# 1.2 -> 768、1.3 -> 832，依次递增到 3.1 -> 1984。
+REF_IMAGE_SIZE_CHOICES = (
+    "match",
+    *(
+        f"{value / 10:.1f} · {value * 64}px"
+        for value in range(12, 32)
+    ),
+    "max",
+)
+REF_IMAGE_SIZE_SHORT_EDGES = {
+    f"{value / 10:.1f}": value * 64
+    for value in range(12, 32)
+}
+
+
+def _reference_short_edge(size_mode):
+    """Resolve a UI size preset to its short-edge ceiling."""
+    mode = str(size_mode or "match").strip().lower()
+    if mode == "match":
+        return None
+    if mode == "max":
+        return 2048
+    # Safe fallback for workflows saved before the list replaced "custom".
+    if mode == "custom":
+        return 768
+    # New choices expose the real short-edge limit (for example
+    # ``1.2 · 768px``), while old workflows still carry the bare ``1.2``.
+    numeric_mode = mode.split("·", 1)[0].strip()
+    return REF_IMAGE_SIZE_SHORT_EDGES.get(numeric_mode)
 
 
 def _compact_reference_prompt(prompt, active_tag_map, all_source_tags):
@@ -756,6 +968,9 @@ def _prepare_reference_condition(run_state, media_bundle, prompt, reference_scop
             "source": entry["source_tag"],
             "native": active_tag_map.get(entry["source_tag"], entry["source_tag"]),
             "name": entry.get("name") or entry.get("filename") or "",
+            "role": entry.get("role") or "",
+            "purpose": entry.get("purpose") or "",
+            "retention": entry.get("retention") or "",
             "paired_audio": bool(
                 entry["kind"] == "video"
                 and _is_usable_reference("audio", entry.get("paired_audio"))
@@ -784,52 +999,56 @@ class EagleH3ReferenceConditionNode:
                 "vae": ("VAE",),
                 "audio_vae": ("VAE",),
                 "media_bundle": (H3_MEDIA_BUNDLE_TYPE,),
-                "run_state": (H3_RUN_STATE,),
+                "state": (H3_RUN_STATE,),
                 "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
                 "width": ("INT", {"default": 960, "min": 32, "max": 4096, "step": 32}),
                 "height": ("INT", {"default": 544, "min": 32, "max": 4096, "step": 32}),
                 "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17}),
                 "reference_scope": (["scene_tags", "all"], {"default": "scene_tags"}),
-                "ref_image_size": (["match", "custom", "max"], {"default": "match"}),
+                "ref_image_size": (list(REF_IMAGE_SIZE_CHOICES), {
+                    "default": "match",
+                    "tooltip": "match 跟随生成画布；倍率后直接显示对应短边像素；max 对应 2048px。只缩小，不放大。",
+                }),
                 "use_context_guide": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "context_image": ("IMAGE",),
                 "has_context": ("BOOLEAN", {"default": False}),
-                "ref_short_edge": ("INT", {
-                    "default": 768, "min": 640, "max": 2048, "step": 64,
-                    "tooltip": "ref_image_size=custom 时的参考图短边上限；只缩小，不放大。",
-                }),
             },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "LATENT", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("positive", "latent", "compiled_prompt", "active_references", "summary")
+    RETURN_TYPES = ("CONDITIONING", "LATENT", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = (
+        "positive", "latent", "compiled_prompt", "active_references", "summary",
+        "trim_frames",
+    )
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台/参考条件"
 
-    def execute(self, clip, vae, audio_vae, media_bundle, run_state, prompt,
+    def execute(self, clip, vae, audio_vae, media_bundle, state, prompt,
                 width, height, length, reference_scope="scene_tags",
                 ref_image_size="match", use_context_guide=True,
-                context_image=None, has_context=False, ref_short_edge=768):
+                context_image=None, has_context=False):
         if GraphBuilder is None:
             raise RuntimeError("H3 参考条件路由需要 ComfyUI GraphBuilder")
         compiled, grouped, report = _prepare_reference_condition(
-            run_state, media_bundle, prompt, reference_scope=reference_scope
+            state, media_bundle, prompt, reference_scope=reference_scope
         )
         graph = GraphBuilder()
         ref2va = graph.node("MiniMaxH3ReferenceToVideo", "EagleH3Ref2VA")
+        target_short_edge = _reference_short_edge(ref_image_size)
+        stock_size_mode = "match" if target_short_edge is None else "max"
         for key, value in (
             ("clip", clip), ("vae", vae), ("audio_vae", audio_vae),
             ("prompt", compiled), ("width", int(width)),
             ("height", int(height)), ("length", int(length)),
-            ("ref_image_size", "max" if ref_image_size == "custom" else ref_image_size),
+            ("ref_image_size", stock_size_mode),
         ):
             ref2va.set_input(key, value)
         for offset, entry in enumerate(grouped["image"]):
             image = entry["value"]
-            if ref_image_size == "custom":
-                image = _limit_reference_short_edge(image, ref_short_edge)
+            if target_short_edge is not None:
+                image = _limit_reference_short_edge(image, target_short_edge)
             ref2va.set_input(f"ref_images.ref_image_{offset}", image)
         for offset, entry in enumerate(grouped["video"]):
             ref2va.set_input(f"ref_videos.ref_video_{offset}", entry["value"])
@@ -846,17 +1065,65 @@ class EagleH3ReferenceConditionNode:
             use_context_guide and has_context
             and _is_usable_reference("image", context_image)
         )
+        trim_frames = 0
         if context_used:
-            guide = graph.node("MiniMaxH3AddGuide", "EagleH3ContextGuide")
-            guide.set_input("positive", positive)
-            guide.set_input("latent", latent)
-            guide.set_input("vae", vae)
-            guide.set_input("image", context_image)
-            guide.set_input("frame_idx", 0)
-            positive = guide.out(0)
+            compatibility = (state.get("plan") or {}).get("compatibility") or {}
+            try:
+                import nodes as comfy_nodes
+                motion_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3MotionContext")
+                motion_schema = motion_class.INPUT_TYPES() if motion_class else {}
+            except Exception:
+                motion_class = None
+                motion_schema = {}
+            if motion_class is None:
+                raise RuntimeError(
+                    "H3 续镜需要 MiniMaxH3MotionContext；请启用 ComfyUI-H3-Motion-Context"
+                )
+            declared = {
+                **(motion_schema.get("required") or {}),
+                **(motion_schema.get("optional") or {}),
+            }
+            motion = graph.node("MiniMaxH3MotionContext", "EagleH3MotionContext")
+            motion.set_input("conditioning", positive)
+            motion.set_input("vae", vae)
+            motion.set_input("latent", latent)
+            motion.set_input("context_frames", context_image)
+            requested_context = int(context_image.shape[0])
+            context_spec = declared.get("context_length", ())
+            context_choices = context_spec[0] if context_spec else None
+            if isinstance(context_choices, (list, tuple)):
+                numeric_choices = []
+                for choice in context_choices:
+                    try:
+                        numeric_choices.append((int(choice), choice))
+                    except (TypeError, ValueError):
+                        pass
+                if numeric_choices:
+                    context_value = min(
+                        numeric_choices, key=lambda pair: abs(pair[0] - requested_context)
+                    )[1]
+                else:
+                    context_value = context_choices[0]
+            else:
+                context_value = requested_context
+            motion.set_input("context_length", context_value)
+            for name, value in (
+                ("encode_mode", str(compatibility.get("encode_mode", "video"))),
+                ("anchor_mode", str(compatibility.get("anchor_mode", "head"))),
+                ("crop", str(compatibility.get("crop", "disabled"))),
+            ):
+                if name in declared:
+                    motion.set_input(name, value)
+            # Eagle 的磁盘状态只承接视觉上下文；同步音频在帧裁剪节点处理。
+            if "audio_context_length" in declared:
+                motion.set_input("audio_context_length", 0)
+            if "audio_mode" in declared:
+                motion.set_input("audio_mode", "timeline")
+            positive = motion.out(0)
+            trim_frames = motion.out(1)
         report["context_guide"] = context_used
         report["ref_image_size"] = ref_image_size
-        report["ref_short_edge"] = int(ref_short_edge) if ref_image_size == "custom" else None
+        report["ref_short_edge"] = target_short_edge
         active_json = json.dumps(report, ensure_ascii=False, indent=2)
         summary = (
             f"场景 {report['scene_index']} · 参考 "
@@ -865,7 +1132,7 @@ class EagleH3ReferenceConditionNode:
             f"上下文 Guide={'开' if context_used else '关'}"
         )
         return {
-            "result": (positive, latent, compiled, active_json, summary),
+            "result": (positive, latent, compiled, active_json, summary, trim_frames),
             "expand": graph.finalize(),
         }
 
@@ -873,6 +1140,80 @@ class EagleH3ReferenceConditionNode:
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. Trim 节点
 # ══════════════════════════════════════════════════════════════════════════════
+
+class EagleH3FrameTrimNode:
+    """移除续镜重复首帧，并让解码音频与交付帧严格等长。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "trim_frames": (
+                    "INT", {"default": 0, "min": 0, "max": 4096, "step": 1}
+                ),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 240, "step": 1}),
+                "match_tail": ("BOOLEAN", {"default": True}),
+                "retain_overlap_frames": (
+                    "INT", {"default": 0, "min": 0, "max": 4096, "step": 1}
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "IMAGE", "INT")
+    RETURN_NAMES = ("images", "audio", "images_with_overlap", "overlap_frames")
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 核心"
+    DESCRIPTION = (
+        "连接“镜头与上下文.context_frames”到 trim_frames；连接当前 VAE 解码帧和音频。"
+        "输出交付帧、同步音频及可选的重叠拼接帧。"
+    )
+
+    def execute(self, images, trim_frames=0, audio=None, fps=24.0,
+                match_tail=True, retain_overlap_frames=0):
+        if not torch.is_tensor(images) or images.ndim != 4:
+            raise ValueError("[H3FrameTrim] images 必须是 NHWC IMAGE 批次")
+        total = int(images.shape[0])
+        trim = max(0, int(trim_frames or 0))
+        if trim >= total:
+            raise ValueError(
+                f"[H3FrameTrim] 不能从 {total} 帧中裁掉 {trim} 帧；请检查上下文长度"
+            )
+
+        delivered = images[trim:] if trim else images
+        retained = min(trim, max(0, int(retain_overlap_frames or 0)))
+        overlap = images[trim - retained:] if retained else delivered
+        synced_audio = self._trim_audio(
+            audio, trim, int(delivered.shape[0]), float(fps or 24.0), bool(match_tail)
+        )
+        return (delivered, synced_audio, overlap, retained)
+
+    @staticmethod
+    def _trim_audio(audio, trim_frames, delivered_frames, fps, match_tail):
+        if not isinstance(audio, dict) or audio.get("waveform") is None:
+            return audio
+        waveform = audio["waveform"]
+        if not torch.is_tensor(waveform):
+            waveform = torch.as_tensor(waveform)
+        sample_rate = int(audio.get("sample_rate", 44100) or 44100)
+        cut = max(0, int(round(trim_frames / fps * sample_rate)))
+        if cut >= int(waveform.shape[-1]):
+            raise ValueError("[H3FrameTrim] 音频短于需要裁掉的重复首帧时长")
+        result = waveform[..., cut:] if cut else waveform
+        if match_tail:
+            target = max(1, int(round(delivered_frames / fps * sample_rate)))
+            current = int(result.shape[-1])
+            if current > target:
+                result = result[..., :target]
+            elif current < target:
+                result = torch.nn.functional.pad(result, (0, target - current))
+        output = dict(audio)
+        output["waveform"] = result
+        output["sample_rate"] = sample_rate
+        return output
 
 class EagleH3TrimNode:
     """🦅 H3 链 · 裁剪：裁剪视频。"""
@@ -924,9 +1265,11 @@ class EagleH3SegmentCheckpointNode:
         return {
             "required": {
                 "run_state": (H3_RUN_STATE,),
-                "video": ("VIDEO",),
             },
             "optional": {
+                "video": ("VIDEO",),
+                "images": ("IMAGE",),
+                "images_with_overlap": ("IMAGE",),
                 "trim_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "trim_end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "audio": ("AUDIO",),
@@ -943,15 +1286,18 @@ class EagleH3SegmentCheckpointNode:
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
     DEPRECATED = True
 
-    def execute(self, run_state, video, trim_start=0.0, trim_end=0.0, audio=None, prompt=None, extra_pnginfo=None):
+    def execute(self, run_state, video=None, trim_start=0.0, trim_end=0.0,
+                audio=None, images=None, images_with_overlap=None,
+                prompt=None, extra_pnginfo=None):
         state = _clone_state(run_state)
         params = shot_params(state)
         if params is None:
             return ("", state, "❌ 无当前镜头")
 
         in_path = _resolve_video_path(video)
-        if not in_path:
-            return ("", state, "❌ 无法解析输入视频")
+        has_images = torch.is_tensor(images) and images.ndim == 4 and int(images.shape[0]) > 0
+        if not in_path and not has_images:
+            return ("", state, "❌ 需要连接 video 或裁剪后的 images")
 
         idx = params["index"]
         shot_dir = _shot_dir(state["base_dir"], idx)
@@ -960,10 +1306,27 @@ class EagleH3SegmentCheckpointNode:
 
         fps = params["fps"]
         delivered = params["shot"].get("delivered_frames", 0)
+        overlap_path = ""
 
         try:
+            if has_images:
+                frame_array = _tensor_to_np(images)
+                if delivered and int(frame_array.shape[0]) != int(delivered):
+                    raise ValueError(
+                        f"交付帧数不匹配：计划 {delivered}，实际 {frame_array.shape[0]}；"
+                        "请先连接 H3 重叠帧裁剪节点"
+                    )
+                crf = int((state.get("plan", {}).get("compatibility", {}) or {}).get("segment_crf", 18) or 18)
+                frames_to_video(frame_array, clip_path, fps=fps, crf=crf)
+                if (
+                    torch.is_tensor(images_with_overlap)
+                    and images_with_overlap.ndim == 4
+                    and int(images_with_overlap.shape[0]) > int(images.shape[0])
+                ):
+                    overlap_path = str(shot_dir / "clip_with_overlap.mp4")
+                    frames_to_video(_tensor_to_np(images_with_overlap), overlap_path, fps=fps, crf=crf)
             # 显式首尾裁剪优先；否则按计划 delivered_frames 限长。
-            if trim_end and trim_end > trim_start:
+            elif trim_end and trim_end > trim_start:
                 trim_video(in_path, clip_path, trim_start, trim_end, unit="sec", fps=fps)
             elif trim_start > 0:
                 src_duration = _probe_duration(in_path)
@@ -997,7 +1360,11 @@ class EagleH3SegmentCheckpointNode:
                 clip_path=clip_path,
                 delivered_frames=delivered,
                 decision="pending",
-                meta={"fps": fps, "audio": audio is not None},
+                meta={
+                    "fps": fps,
+                    "audio": audio is not None,
+                    "overlap_clip": overlap_path,
+                },
             )
             save_state(state)
             return (native_video(clip_path), state, f"✅ 已保存 clip_{idx + 1:02d}: {clip_path}")
@@ -1198,7 +1565,7 @@ class EagleH3NativeLoopEndNode:
         return {
             "required": {
                 "flow": (H3_LOOP_FLOW, {"rawLink": True}),
-                "run_state": (H3_RUN_STATE,),
+                "state": (H3_RUN_STATE,),
             },
             "optional": {
                 "decision": ("STRING", {"default": ""}),
@@ -1221,7 +1588,7 @@ class EagleH3NativeLoopEndNode:
         }
 
     RETURN_TYPES = (H3_RUN_STATE, "VIDEO", "BOOL", "INT", "STRING")
-    RETURN_NAMES = ("run_state", "video", "done", "next_index", "summary")
+    RETURN_NAMES = ("state", "video", "done", "next_index", "summary")
     FUNCTION = "execute"
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle Suite/H3 核心"
@@ -1380,10 +1747,10 @@ class EagleH3NativeLoopEndNode:
             return f"✅ 已导入 Eagle: {value}"
         return "⚠️ Eagle 导入失败: " + str(response.get("message") or response)
 
-    def execute(self, flow, run_state, decision="", filename="", format="mp4",
+    def execute(self, flow, state, decision="", filename="", format="mp4",
                 fps_override=0, local_save_path="", eagle_folder="",
                 dynprompt=None, unique_id=None):
-        advanced = EagleH3EndNode().execute(run_state, decision=decision)
+        advanced = EagleH3EndNode().execute(state, decision=decision)
         if isinstance(advanced, dict):
             state, done, next_index, loop_again, summary = advanced["result"]
         else:
@@ -1498,11 +1865,13 @@ class EagleH3CheckpointReviewNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "run_state": (H3_RUN_STATE,),
-                "video": ("VIDEO",),
+                "state": (H3_RUN_STATE,),
             },
             "optional": {
+                "video": ("VIDEO",),
+                "images": ("IMAGE",),
                 "audio": ("AUDIO",),
+                "images_with_overlap": ("IMAGE",),
                 "trim_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "trim_end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "review_decision": ("STRING", {"default": "", "multiline": False}),
@@ -1516,17 +1885,26 @@ class EagleH3CheckpointReviewNode:
 
     RETURN_TYPES = ("VIDEO", H3_RUN_STATE, "STRING", "BOOL", "BOOL", "STRING", "STRING")
     RETURN_NAMES = (
-        "clip", "run_state", "decision", "awaiting_review", "approved",
+        "clip", "state", "decision", "awaiting_review", "approved",
         "clip_path", "summary",
     )
     FUNCTION = "execute"
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle Suite/H3 核心"
 
-    def execute(self, run_state, video, audio=None, trim_start=0.0, trim_end=0.0,
+    def execute(self, state, video=None, images=None, audio=None,
+                images_with_overlap=None, trim_start=0.0, trim_end=0.0,
                 review_decision="", unique_id=None, prompt=None, extra_pnginfo=None):
         clip, checkpoint_state, checkpoint_status = EagleH3SegmentCheckpointNode().execute(
-            run_state, video, trim_start, trim_end, audio, prompt, extra_pnginfo
+            state,
+            video=video,
+            images=images,
+            images_with_overlap=images_with_overlap,
+            trim_start=trim_start,
+            trim_end=trim_end,
+            audio=audio,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
         )
         clip_path = _resolve_video_path(clip) or ""
         if not clip_path:
@@ -1597,7 +1975,7 @@ class EagleH3ExportPNGSequenceNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "run_state": (H3_RUN_STATE,),
+                "state": (H3_RUN_STATE,),
                 "frames": ("IMAGE",),
             },
             "optional": {
@@ -1612,8 +1990,8 @@ class EagleH3ExportPNGSequenceNode:
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 工具"
 
-    def execute(self, run_state, frames, export_name="frames", first_frame_number=1, png_compression=3):
-        state = _clone_state(run_state)
+    def execute(self, state, frames, export_name="frames", first_frame_number=1, png_compression=3):
+        state = _clone_state(state)
         params = shot_params(state)
         idx = params["index"] if params else 0
         out_dir = Path(state["base_dir"]) / "frames" / export_name
@@ -1650,7 +2028,7 @@ class EagleH3SeamProbeNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "run_state": (H3_RUN_STATE,),
+                "state": (H3_RUN_STATE,),
                 "prev_clip": ("VIDEO",),
                 "cur_clip": ("VIDEO",),
                 "blend_frames": ("INT", {"default": 5, "min": 1, "max": 100, "step": 1}),
@@ -1662,7 +2040,7 @@ class EagleH3SeamProbeNode:
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 工具"
 
-    def execute(self, run_state, prev_clip, cur_clip, blend_frames=5):
+    def execute(self, state, prev_clip, cur_clip, blend_frames=5):
         prev_path = _resolve_video_path(prev_clip)
         cur_path = _resolve_video_path(cur_clip)
         if not prev_path or not cur_path:
@@ -1844,10 +2222,12 @@ class EagleH3SmartSplitNode:
 # ══════════════════════════════════════════════════════════════════════════════
 
 NODE_CLASS_MAPPINGS_H3PIPELINE = {
-    "EagleH3PlanNode": EagleH3PlanNode,
+    "EagleH3PlanInteropNode": EagleH3PlanInteropNode,
+    "EagleH3StateInteropNode": EagleH3StateInteropNode,
     "EagleH3NativeLoopStartNode": EagleH3NativeLoopStartNode,
     "EagleH3ShotContextNode": EagleH3ShotContextNode,
     "EagleH3ReferenceConditionNode": EagleH3ReferenceConditionNode,
+    "EagleH3FrameTrimNode": EagleH3FrameTrimNode,
     "EagleH3CheckpointReviewNode": EagleH3CheckpointReviewNode,
     "EagleH3NativeLoopEndNode": EagleH3NativeLoopEndNode,
     "EagleH3ExportPNGSequenceNode": EagleH3ExportPNGSequenceNode,
@@ -1856,10 +2236,12 @@ NODE_CLASS_MAPPINGS_H3PIPELINE = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE = {
-    "EagleH3PlanNode": "🦅 H3 · 计划",
+    "EagleH3PlanInteropNode": "🦅 H3 互操作 · 计划 JSON 桥",
+    "EagleH3StateInteropNode": "🦅 H3 互操作 · 状态与上一片段",
     "EagleH3NativeLoopStartNode": "🦅 H3 · 循环开始",
     "EagleH3ShotContextNode": "🦅 H3 · 镜头与上下文",
     "EagleH3ReferenceConditionNode": "🦅 H3 · 参考条件路由",
+    "EagleH3FrameTrimNode": "🦅 H3 · 重叠帧与音频裁剪",
     "EagleH3CheckpointReviewNode": "🦅 H3 · 分段保存与审片",
     "EagleH3NativeLoopEndNode": "🦅 H3 · 循环结束与合成",
     "EagleH3ExportPNGSequenceNode": "🦅 H3 工具 · 导出 PNG 序列",
@@ -1869,14 +2251,17 @@ NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE = {
 
 __all__ = [
     "EagleH3PlanNode",
+    "EagleH3PlanInteropNode",
     "EagleH3PreflightNode",
     "EagleH3LoadManifestNode",
+    "EagleH3StateInteropNode",
     "EagleH3StartNode",
     "EagleH3NativeLoopStartNode",
     "EagleH3CurrentShotNode",
     "EagleH3ContextNode",
     "EagleH3ShotContextNode",
     "EagleH3ReferenceConditionNode",
+    "EagleH3FrameTrimNode",
     "EagleH3TrimNode",
     "EagleH3SegmentCheckpointNode",
     "EagleH3ReviewGateNode",

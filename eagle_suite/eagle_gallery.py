@@ -26,6 +26,7 @@ from aiohttp import web
 from .route_registry import route
 from .logger import logger
 from . import api_config_manager as _cfg
+from .danbooru_library import FACETS, Library
 
 
 def _load_config() -> dict:
@@ -55,6 +56,66 @@ EAGLE_API_V1 = f"{DEFAULT_EAGLE_URL}/api"
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "..", "eagle_gallery_settings.json")
 PAGE_SIZE = 100  # 每页加载数量
+DANBOORU_LIBRARY_PATH = os.path.join(
+    os.path.dirname(__file__), "danbooru_engine", "library", "tags.sqlite3"
+)
+
+_OFFICIAL_TAG_GROUPS = {
+    "general": "通用 / 未细分",
+    "character": "人物 / 角色",
+    "copyright": "作品 / 版权",
+    "artist": "艺术家",
+    "meta": "元数据",
+}
+
+
+def _danbooru_tag_key(value: str) -> str:
+    """Map an Eagle label to the canonical spelling used by Danbooru."""
+    return "_".join(str(value or "").strip().lower().split())
+
+
+def _enrich_eagle_tags(rows, library_path=None):
+    """Add reviewed bilingual taxonomy without changing Eagle's source tags."""
+    source = [dict(row) for row in (rows or [])]
+    path = str(library_path or DANBOORU_LIBRARY_PATH)
+    if not os.path.isfile(path):
+        for item in source:
+            item.update(cn_name="", facets=[], facet_labels=[], group="Eagle / 未归类", taxonomy_status="unmatched")
+        return source
+
+    keys = []
+    for item in source:
+        name = str(item.get("name") or "")
+        keys.extend([name, _danbooru_tag_key(name)])
+    try:
+        matches = Library(path).lookup(list(dict.fromkeys(filter(None, keys))))
+    except Exception as error:
+        logger.warning(f"[EagleGallery] Danbooru 词库标签补全失败: {error}")
+        matches = {}
+
+    enriched = []
+    for item in source:
+        name = str(item.get("name") or "")
+        match = matches.get(name) or matches.get(_danbooru_tag_key(name)) or {}
+        facets = [facet for facet in (match.get("facets") or []) if facet in FACETS]
+        facet_labels = [FACETS[facet][0] for facet in facets]
+        category = str(match.get("category") or "")
+        group = (
+            facet_labels[0].split("/", 1)[0]
+            if facet_labels
+            else _OFFICIAL_TAG_GROUPS.get(category, "Eagle / 未归类")
+        )
+        cn_name = str(match.get("cn_name") or "").strip()
+        item.update(
+            cn_name=cn_name,
+            category=category,
+            facets=facets,
+            facet_labels=facet_labels,
+            group=group,
+            taxonomy_status="reviewed" if facets else ("translated" if cn_name else "unmatched"),
+        )
+        enriched.append(item)
+    return enriched
 
 # ── 选中数据缓存（内存级，按节点 ID）──────────────────────────────────────────
 _selection_cache: dict = {}
@@ -538,8 +599,10 @@ async def tags_route(request):
                 name = str(tag)
                 counter[name] = counter.get(name, 0) + 1
 
-        tags = [{"name": name, "count": count} for name, count in counter.items()]
-        tags.sort(key=lambda x: x["name"].lower())
+        tags = _enrich_eagle_tags(
+            [{"name": name, "count": count} for name, count in counter.items()]
+        )
+        tags.sort(key=lambda x: (x.get("group", ""), x["name"].lower()))
         return web.json_response({"success": True, "tags": tags, "total": len(tags)})
 
     except Exception as e:

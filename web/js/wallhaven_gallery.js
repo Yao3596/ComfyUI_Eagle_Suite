@@ -237,6 +237,26 @@ const WallhavenGalleryApp = {
             confirmSelection();
         }
 
+        function restoreSelection() {
+            try {
+                const widget = node.widgets ? node.widgets.find(w => w.name === "selection_data") : null;
+                const raw = widget?.value || "{}";
+                const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+                const selections = Array.isArray(payload) ? payload : (payload?.selections || []);
+                selected.clear();
+                selectedItems.value = [];
+                selections.forEach(item => {
+                    if (!item || item.id == null) return;
+                    selected.add(item.id);
+                    selectedItems.value.push(item);
+                });
+            } catch (error) {
+                console.warn("[Eagle Suite] Wallhaven selection restore failed:", error);
+            }
+        }
+
+        node._eagleRestoreUiState = restoreSelection;
+
         function confirmSelection() {
             const selectionJson = JSON.stringify({ selections: selectedItems.value.slice() });
             const widget = node.widgets ? node.widgets.find(w => w.name === "selection_data") : null;
@@ -277,7 +297,10 @@ const WallhavenGalleryApp = {
 
         const totalPages = () => Math.ceil(total.value / PAGE_SIZE) || 1;
 
-        onMounted(() => { search(); });
+        onMounted(() => {
+            restoreSelection();
+            search();
+        });
 
         return {
             query, categories, purities, sorting, order, page, total, results, loading, errorMsg,
@@ -447,8 +470,30 @@ app.registerExtension({
             }
 
             const container = document.createElement("div");
-            container.style.cssText = "width:100%;height:100%;overflow:hidden;";
-            const widget = this.addDOMWidget("wallhaven_gallery", "div", container, { serialize: false });
+            container.style.cssText = "width:880px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;";
+            const widget = this.addDOMWidget("wallhaven_gallery", "div", container, { serialize: false, canvasOnly: true });
+            widget.width = undefined;
+            this._whgContainer = container;
+
+            const applyFrame = (size) => {
+                const nodeWidth = Number(size?.[0]) || 900;
+                const nodeHeight = Number(size?.[1]) || 760;
+                const width = Math.max(320, nodeWidth - 20);
+                const height = Math.max(400, nodeHeight - 100);
+                container.style.width = width + "px";
+                container.style.height = height + "px";
+                const host = container.parentElement;
+                if (host) {
+                    host.style.width = width + "px";
+                    host.style.maxWidth = "none";
+                    host.style.minWidth = "0";
+                    host.style.boxSizing = "border-box";
+                    host.style.overflow = "hidden";
+                }
+                return [width, height];
+            };
+            this._whgApplyFrame = applyFrame;
+            applyFrame(this.size);
 
             const vueApp = createApp(WallhavenGalleryApp, { node: this });
             vueApp.mount(container);
@@ -457,14 +502,35 @@ app.registerExtension({
             const onResize = this.onResize;
             this.onResize = function (size) {
                 onResize?.apply(this, arguments);
-                const h = Math.max(400, size[1] - 100);
-                container.style.height = h + "px";
+                applyFrame(size);
+                this.setDirtyCanvas?.(true, true);
             };
+            setTimeout(() => applyFrame(this.size), 0);
+            setTimeout(() => applyFrame(this.size), 250);
+        };
+
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            const result = onConfigure?.apply(this, arguments);
+            // ComfyUI 1.49 can drop this input from positional widgets_values
+            // when the DOM widget is present.  The named map remains stable.
+            if (info?.widgets_values_named && Object.prototype.hasOwnProperty.call(info.widgets_values_named, "selection_data")) {
+                const selectionWidget = this.widgets?.find(widget => widget.name === "selection_data");
+                if (selectionWidget) selectionWidget.value = info.widgets_values_named.selection_data;
+            }
+            requestAnimationFrame(() => {
+                this._whgApplyFrame?.(this.size);
+                this._eagleRestoreUiState?.();
+            });
+            return result;
         };
 
         const onRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
             if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
+            this._whgApplyFrame = null;
+            this._whgContainer = null;
+            this._eagleRestoreUiState = null;
             onRemoved?.apply(this, arguments);
         };
     },

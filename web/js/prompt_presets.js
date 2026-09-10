@@ -234,6 +234,11 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-cover-editor { display:flex; align-items:center; gap:8px; min-height:0; padding:7px; border:1px dashed var(--ppui-border); border-radius:8px; background:var(--ppui-panel); }
     .eagle-prompt-presets-root .pp-cover-fallback { width:44px; height:44px; flex:0 0 44px; display:grid; place-items:center; border-radius:6px; background:var(--ppui-surface-alt); color:var(--ppui-text); font-size:18px; font-weight:700; }
     .eagle-prompt-presets-root .pp-cover-editor .ppui-search { flex:0 0 auto; width:100%; height:32px; min-height:32px; }
+    .eagle-prompt-presets-root .pp-category-row {
+      display:grid; grid-template-columns:minmax(0, 1fr); gap:8px; align-items:center;
+    }
+    .eagle-prompt-presets-root .pp-category-row.custom { grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); }
+    .eagle-prompt-presets-root .pp-category-row .ppui-search { width:100%; min-width:0; }
     .eagle-prompt-presets-root .pp-master-item { position:relative; padding-right:32px; }
     .eagle-prompt-presets-root .pp-template-delete {
       position:absolute; top:6px; right:6px; width:20px; height:20px; padding:0; min-height:20px;
@@ -343,13 +348,18 @@ var TemplateEditor = {
   props: {
     visible: Boolean,
     template: Object,
+    categories: Array,
     onClose: Function,
     onSave: Function
   },
   setup: function(props) {
+    var DEFAULT_CATEGORY = '图片编辑 (kontext)';
+    var CUSTOM_CATEGORY = '__eagle_custom_category__';
     var coverInput = ref(null);
     var coverUploading = ref(false);
     var formError = ref("");
+    var categorySelection = ref(DEFAULT_CATEGORY);
+    var customCategory = ref("");
     var form = reactive({
       id: '',
       Label: '',
@@ -359,6 +369,32 @@ var TemplateEditor = {
       tags: [],
       cover: ''
     });
+
+    var categoryOptions = computed(function() {
+      var seen = {};
+      var result = [];
+      (props.categories || []).forEach(function(category) {
+        var value = String(category || "").trim();
+        if (!value || value === "全部" || value === CUSTOM_CATEGORY || seen[value]) return;
+        seen[value] = true;
+        result.push(value);
+      });
+      if (!result.length) result.push(DEFAULT_CATEGORY);
+      return result;
+    });
+
+    function syncCategoryEditor(value) {
+      var category = String(value || "").trim();
+      if (category && categoryOptions.value.indexOf(category) >= 0) {
+        categorySelection.value = category;
+        form.category = category;
+        customCategory.value = "";
+      } else {
+        categorySelection.value = CUSTOM_CATEGORY;
+        customCategory.value = category;
+        form.category = category;
+      }
+    }
 
     var variables = computed(function() {
       return extractVariables(form.Instruction);
@@ -376,11 +412,23 @@ var TemplateEditor = {
           category: '图片编辑 (kontext)', tags: [], cover: ''
         });
       }
+      syncCategoryEditor(form.category);
     }, { immediate: true });
+
+    watch(() => props.visible, function(visible) {
+      if (visible) syncCategoryEditor(form.category);
+    });
 
     function handleSave() {
       if (!form.Label || !form.Instruction) {
         formError.value = "请填写标签名称和指令模板";
+        return;
+      }
+      form.category = String(form.category || "").trim();
+      if (!form.category) {
+        formError.value = categorySelection.value === CUSTOM_CATEGORY
+          ? "请输入自定义分类"
+          : "请选择分类";
         return;
       }
       formError.value = "";
@@ -446,13 +494,38 @@ var TemplateEditor = {
             // 分类
             h("div", {}, [
               h("label", { style: { display: "block", marginBottom: "4px", color: "#aaa", fontSize: "12px" } }, "分类"),
-              h("input", {
-                class: "ppui-search",
-                type: "text",
-                value: form.category,
-                placeholder: "例：图片编辑",
-                onInput: function(e) { form.category = e.target.value; }
-              })
+              h("div", { class: ["pp-category-row", categorySelection.value === CUSTOM_CATEGORY ? "custom" : ""] }, [
+                h("select", {
+                  class: "ppui-search",
+                  value: categorySelection.value,
+                  title: "选择已有分类，或选择自定义分类",
+                  onChange: function(e) {
+                    categorySelection.value = e.target.value;
+                    form.category = categorySelection.value === CUSTOM_CATEGORY
+                      ? customCategory.value
+                      : categorySelection.value;
+                  }
+                }, [
+                  ...categoryOptions.value.map(function(category) {
+                    return h("option", { value: category }, category);
+                  }),
+                  h("option", { value: CUSTOM_CATEGORY }, "＋ 自定义分类…")
+                ]),
+                categorySelection.value === CUSTOM_CATEGORY ? h("input", {
+                  class: "ppui-search",
+                  type: "text",
+                  value: customCategory.value,
+                  placeholder: "输入新分类名称",
+                  autofocus: true,
+                  onInput: function(e) {
+                    customCategory.value = e.target.value;
+                    form.category = e.target.value;
+                  }
+                }) : null
+              ]),
+              h("span", { class: "ppui-settings-hint" }, categorySelection.value === CUSTOM_CATEGORY
+                ? "自定义名称将作为模板分类保存"
+                : "从已有分类中选择；需要新分类时选择“自定义分类”")
             ]),
 
             // 封面上传
@@ -957,13 +1030,44 @@ var PromptPresetsApp = {
       if (notice.text) setTimeout(function() { notice.text = ""; }, 3200);
     }
 
-    if (typeof restoredState.selectedCategory === "string") selectedCategory.value = restoredState.selectedCategory;
-    if (typeof restoredState.selectedId === "string") selectedId.value = restoredState.selectedId;
-    if (typeof restoredState.activeVariable === "string") activeVariable.value = restoredState.activeVariable;
-    if (restoredState.previewMode === "source" || restoredState.previewMode === "markdown") previewMode.value = restoredState.previewMode;
-    if (restoredState.activeTab === "presets") activeTab.value = restoredState.activeTab;
-    if (restoredState.variableValues && typeof restoredState.variableValues === "object") Object.assign(variableValues, restoredState.variableValues);
-    Object.assign(variableValues, restoredVariables);
+    function applyWidgetState(nextState, nextVariables) {
+      nextState = nextState && typeof nextState === "object" ? nextState : {};
+      nextVariables = nextVariables && typeof nextVariables === "object" ? nextVariables : {};
+      if (typeof nextState.selectedCategory === "string") selectedCategory.value = nextState.selectedCategory;
+      if (typeof nextState.selectedId === "string") selectedId.value = nextState.selectedId;
+      if (typeof nextState.activeVariable === "string") activeVariable.value = nextState.activeVariable;
+      if (nextState.previewMode === "source" || nextState.previewMode === "markdown") previewMode.value = nextState.previewMode;
+      if (nextState.activeTab === "presets") activeTab.value = nextState.activeTab;
+
+      Object.keys(variableValues).forEach(function(name) { delete variableValues[name]; });
+      if (nextState.variableValues && typeof nextState.variableValues === "object") {
+        Object.assign(variableValues, nextState.variableValues);
+      }
+      Object.assign(variableValues, nextVariables);
+    }
+
+    applyWidgetState(restoredState, restoredVariables);
+
+    // Vue mounts during node construction, before some ComfyUI versions have
+    // restored widgets_values.  onConfigure calls this hook once the workflow
+    // values are available so the component does not persist its defaults over
+    // the saved category/template/variable values.
+    props.node._eagleRestoreUiState = function() {
+      var wasReady = stateReady;
+      stateReady = false;
+      var currentState = parseObject(nodeWidget("ui_state")?.value, {});
+      var currentVariables = parseObject(nodeWidget("local_variables")?.value, {});
+      applyWidgetState(currentState, currentVariables);
+      if (templates.value.length) {
+        var current = templates.value.find(function(template) { return templateKey(template) === selectedId.value; });
+        if (current) {
+          ensureVariables(current);
+          syncLinkedPromptVariableNames(props.node, selectedVariables.value);
+          applySelected();
+        }
+      }
+      stateReady = wasReady;
+    };
 
     function persistUiState() {
       if (!stateReady) return;
@@ -980,6 +1084,7 @@ var PromptPresetsApp = {
       var currentVariablesWidget = nodeWidget("local_variables");
       if (currentStateWidget) currentStateWidget.value = JSON.stringify(nextState);
       if (currentVariablesWidget) currentVariablesWidget.value = JSON.stringify(variableValues);
+      props.node.graph?.change?.();
       props.node.setDirtyCanvas(true, true);
     }
 
@@ -1144,6 +1249,7 @@ var PromptPresetsApp = {
 
     onUnmounted(function() {
       if (props.node._ppSyncExternalVariables) delete props.node._ppSyncExternalVariables;
+      if (props.node._eagleRestoreUiState) delete props.node._eagleRestoreUiState;
     });
 
     watch([selectedCategory, keyword], function() {
@@ -1512,6 +1618,7 @@ var PromptPresetsApp = {
         h(TemplateEditor, {
           visible: showEditor.value,
           template: editingTemplate.value,
+          categories: categories.value,
           onClose: function() { showEditor.value = false; },
           onSave: handleSave
         }),
@@ -1598,12 +1705,16 @@ app.registerExtension({
 
           container = document.createElement("div");
           container.className = "eagle-prompt-presets-root";
-          container.style.cssText = "width:100%;max-width:100%;min-width:0;overflow:hidden;";
+          // ComfyUI may cache a DOM widget host's creation-time percentage width.
+          // Start with the node's real pixel width and keep it synchronized below.
+          container.style.cssText = "width:880px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
 
           var domWidget = this.addDOMWidget("preview", "div", container, {
             serialize: false,
-            hideOnZoom: false
+            hideOnZoom: false,
+            canvasOnly: true
           });
+          domWidget.width = undefined;
           this._ppWidget = domWidget;
 
       var vueApp = createApp({
@@ -1617,9 +1728,10 @@ app.registerExtension({
 
               if (promptWidget) promptWidget.value = prompt;
               if (templateWidget) templateWidget.value = template;
-              if (variablesWidget) variablesWidget.value = localVariables;
+               if (variablesWidget) variablesWidget.value = localVariables;
 
-              node.setDirtyCanvas(true, true);
+               node.graph?.change?.();
+               node.setDirtyCanvas(true, true);
             }
           });
         }
@@ -1637,20 +1749,23 @@ app.registerExtension({
           var syncLayout = function(target, size) {
             if (!target || !target._ppContainer) return;
             var currentSize = size || target.size || [900, 700];
+            var nodeWidth = Math.max(440, Number(currentSize[0]) || 900);
             var nodeHeight = Math.max(500, Number(currentSize[1]) || 700);
+            var width = Math.max(420, nodeWidth - 20);
             var height = Math.max(410, nodeHeight - 104);
             var root = target._ppContainer;
 
-            root.style.width = "100%";
-            root.style.maxWidth = "100%";
+            root.style.width = width + "px";
+            root.style.maxWidth = "none";
             root.style.minWidth = "0";
+            root.style.boxSizing = "border-box";
             root.style.height = height + "px";
             root.style.overflow = "hidden";
 
             var host = root.parentElement;
             if (host) {
-              host.style.width = "100%";
-              host.style.maxWidth = "100%";
+              host.style.width = width + "px";
+              host.style.maxWidth = "none";
               host.style.minWidth = "0";
               host.style.boxSizing = "border-box";
               host.style.overflow = "hidden";
@@ -1668,11 +1783,13 @@ app.registerExtension({
           };
           this.onResize(this.size);
           requestAnimationFrame(() => this._ppSyncLayout?.(this.size));
+          setTimeout(() => this._ppSyncLayout?.(this.size), 250);
 
           var previousOnConfigure = this.onConfigure;
           this.onConfigure = function() {
             if (previousOnConfigure) previousOnConfigure.apply(this, arguments);
             hideWidgets(this);
+            setTimeout(() => this._eagleRestoreUiState?.(), 0);
             requestAnimationFrame(() => {
               hideWidgets(this);
               this._ppSyncLayout?.(this.size);
@@ -1789,8 +1906,9 @@ function templateCoverUrl(cover) {
   if (!cover) return "";
   if (String(cover).startsWith("http://") || String(cover).startsWith("https://")) return cover;
   if (String(cover).startsWith("data:")) return cover;
-  if (String(cover).startsWith("/")) return cover;
-  return "/eaglePromptPresets/cover/" + encodeURIComponent(cover);
+  if (String(cover).startsWith("blob:")) return cover;
+  if (/^\/(?:eaglePromptPresets\/cover(?:\?|$)|view\?|api\/)/.test(String(cover))) return cover;
+  return "/eaglePromptPresets/cover?path=" + encodeURIComponent(cover);
 }
 
 function renderMarkdownLegacy(text) {

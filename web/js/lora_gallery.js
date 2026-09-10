@@ -373,6 +373,7 @@ var LoraGallery = {
           if (typeof widget.callback === "function") {
             widget.callback(payloadStr, widget);
           }
+          props.node.graph?.change?.();
           props.node.setDirtyCanvas(true, true);
         }
       } catch (e) {}
@@ -381,49 +382,58 @@ var LoraGallery = {
     function restoreSelection() {
       var nodeId = String(props.node.id);
 
-      // 兜底：直接读 selection_data widget 自身的值——工作流保存/恢复时这个
-      // 原生 widget 会跟着正常序列化，不依赖服务端内存缓存，刷新浏览器后
-      // 理论上应该还在。服务端缓存 GET 拿不到数据时（node_id 没对上、请求
-      // 失败、服务端还没这条记录）就用这个兜底，双保险。
+      function applySelectionData(data) {
+        var sels = data && (data.selections || data);
+        if (!Array.isArray(sels)) return false;
+        var ids = [];
+        weights.value = {};
+        enabledMap.value = {};
+        selectedItems.value = {};
+        sels.forEach(function(s) {
+          if (!s || s.id == null) return;
+          ids.push(s.id);
+          if (s.weight !== undefined) weights.value[s.id] = s.weight;
+          enabledMap.value[s.id] = s.enabled !== false && (!data.enabled || data.enabled[s.id] !== false);
+          if (s.name) selectedItems.value[s.id] = s;
+        });
+        selectedIds.value = ids;
+        return true;
+      }
+
       function restoreFromWidget() {
         try {
           var widget = (props.node.widgets || []).find(function(w) { return w.name === "selection_data"; });
-          if (!widget || !widget.value || widget.value === "[]") return false;
+          if (!widget || !widget.value) return false;
           var data = JSON.parse(widget.value);
+          if (!applySelectionData(data)) return false;
           var sels = data.selections || data;
-          if (!Array.isArray(sels) || sels.length === 0) return false;
-          var ids = [];
-          sels.forEach(function(s) {
-            ids.push(s.id);
-            if (s.weight !== undefined) weights.value[s.id] = s.weight;
-            enabledMap.value[s.id] = s.enabled !== false && (!data.enabled || data.enabled[s.id] !== false);
-            if (s.name) selectedItems.value[s.id] = s;
-          });
-          selectedIds.value = ids;
+          fetch("/lora_gallery/cache_selection", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              node_id: nodeId,
+              selections: sels,
+              weights: data.weights || weights.value,
+              enabled: data.enabled || enabledMap.value,
+            }),
+          }).catch(function() {});
           return true;
         } catch (e) { return false; }
       }
 
+      // Embedded workflow state wins even when the user intentionally saved an
+      // empty selection.  node_id caches are only a legacy fallback and can
+      // otherwise leak state between workflows that reuse the same node id.
+      if (restoreFromWidget()) return;
+
       fetch("/lora_gallery/cache_selection?node_id=" + encodeURIComponent(nodeId))
         .then(function(r) { return r.json(); })
         .then(function(d) {
-          if (d.success && d.selections && d.selections.length > 0) {
-            var ids = [];
-            d.selections.forEach(function(s) {
-              ids.push(s.id);
-              if (s.weight !== undefined) weights.value[s.id] = s.weight;
-              enabledMap.value[s.id] = s.enabled !== false && (!d.enabled || d.enabled[s.id] !== false);
-              // 恢复时尽量保留 name，若后端未返回则从当前 items 查找
-              if (s.name) {
-                selectedItems.value[s.id] = s;
-              }
-            });
-            selectedIds.value = ids;
-          } else {
-            restoreFromWidget();
-          }
-        }).catch(function() { restoreFromWidget(); });
+          if (d.success && Array.isArray(d.selections)) applySelectionData(d);
+        }).catch(function() {});
     }
+
+    props.node._eagleRestoreUiState = restoreSelection;
 
     function openCivitai(url) {
       if (url) window.open(url, "_blank", "noopener,noreferrer");
@@ -720,6 +730,7 @@ var LoraGallery = {
       destroyed = true;
       autoPreviewQueue = [];
       if (documentClickHandler) document.removeEventListener("click", documentClickHandler);
+      if (props.node._eagleRestoreUiState === restoreSelection) delete props.node._eagleRestoreUiState;
     });
 
     return function() {
@@ -744,8 +755,10 @@ var LoraGallery = {
           ]),
           h("div", { class: "lg-card-info" }, [
             h("div", { class: "lg-name", title: item.name }, item.name),
-            h("div", { class: "lg-card-trigger", title: cardWords.join(", ") }, cardWords.length ? cardWords.join(", ") : "未设置触发词"),
-            h("button", { class: "lg-civ-btn", title: "读取 civitai.red 模型信息", onClick: function(e) { e.stopPropagation(); openDetails(item); } }, "Civitai")
+            h("div", { class: "lg-card-meta" }, [
+              h("div", { class: "lg-card-trigger", title: cardWords.join(", ") }, cardWords.length ? cardWords.join(", ") : "未设置触发词"),
+              h("button", { class: "lg-civ-btn", title: "读取 civitai.red 模型信息", onClick: function(e) { e.stopPropagation(); openDetails(item); } }, "Civitai")
+            ])
           ]),
           sel ? h("div", { class: "lg-check" }) : null
         ]);
@@ -1239,17 +1252,18 @@ var CSS = [
   ".lg-card{position:relative;width:100%;min-width:0;height:224px;box-sizing:border-box;border-radius:8px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#1a1a24;transition:border-color .16s,box-shadow .16s;display:flex;flex-direction:column;box-shadow:0 3px 10px rgba(0,0,0,0.28)}",
   ".lg-card:hover{border-color:#4a7de0;box-shadow:0 5px 14px rgba(0,0,0,0.42);z-index:10}",
   ".lg-card.sel{border-color:#4a7de0;background:#1e2a40;box-shadow:inset 0 0 0 2px #4a7de0}",
-  ".lg-img-box{position:relative;width:100%;height:140px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;flex-shrink:0}",
+  ".lg-img-box{position:relative;width:100%;height:164px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#000;flex-shrink:0}",
   ".lg-img{width:100%;height:100%;object-fit:cover;display:block;background:#111}",
-  ".lg-card-info{position:relative;min-width:0;flex:1;background:#16161e;padding-bottom:24px}",
-  ".lg-civ-btn{position:absolute;right:5px;bottom:4px;height:18px;padding:0 6px;border-radius:4px;border:1px solid rgba(90,145,255,.5);background:rgba(38,76,145,.82);color:#dce8ff;font-size:9px;font-weight:600;cursor:pointer;z-index:7;opacity:.86;transition:opacity .15s,background .15s}",
+  ".lg-card-info{position:relative;min-width:0;flex:1;background:#16161e;overflow:hidden}",
+  ".lg-card-meta{display:flex;align-items:center;gap:5px;min-width:0;padding:0 5px 5px}",
+  ".lg-civ-btn{position:static;flex:0 0 auto;height:18px;padding:0 6px;border-radius:4px;border:1px solid rgba(90,145,255,.5);background:rgba(38,76,145,.82);color:#dce8ff;font-size:9px;font-weight:600;cursor:pointer;z-index:7;opacity:.86;transition:opacity .15s,background .15s}",
   ".lg-civ-btn:hover{opacity:1;background:#315ca5}",
   ".lg-dl-btn{position:absolute;top:6px;right:30px;width:22px;height:22px;border-radius:4px;border:none;background:rgba(60,180,100,0.9);color:#fff;font-size:10px;font-weight:bold;cursor:pointer;z-index:5;opacity:0;transition:opacity .2s}",
   ".lg-card:hover .lg-dl-btn{opacity:1}",
   ".lg-edit-btn{position:absolute;top:6px;left:6px;width:22px;height:22px;border-radius:4px;border:none;background:rgba(120,80,200,0.9);color:#fff;font-size:10px;font-weight:bold;cursor:pointer;z-index:5;opacity:0;transition:opacity .2s}",
   ".lg-card:hover .lg-edit-btn{opacity:1}",
   ".lg-name{padding:5px 6px 1px;font-size:11px;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-  ".lg-card-trigger{padding:0 6px;color:#7f8796;font-size:9px;line-height:14px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;word-break:break-all}",
+  ".lg-card-trigger{flex:1 1 auto;min-width:0;color:#7f8796;font-size:9px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;word-break:normal}",
   ".lg-size-badge{position:absolute;top:6px;right:6px;z-index:4;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,0.65);color:#ddd;font-size:9px;font-weight:600;pointer-events:none}",
   ".lg-check{position:absolute;inset:0;background:rgba(74,125,224,0.25);display:flex;align-items:center;justify-content:center;z-index:6;pointer-events:none;animation:checkPop .2s cubic-bezier(0.175, 0.885, 0.32, 1.275)}",
   ".lg-check::after{content:'\u2714';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}",
@@ -1373,7 +1387,8 @@ app.registerExtension({
       // 避免 Vue 画廊仍停留在旧宽度并被挤在节点左侧。
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
 
-      this.addDOMWidget("lora_gallery", "div", el, { serialize: false });
+      var widget = this.addDOMWidget("lora_gallery", "div", el, { serialize: false, canvasOnly: true });
+      widget.width = undefined;
 
       var applyFrame = function(size) {
         var nodeWidth = Number(size && size[0]) || 960;
@@ -1426,6 +1441,7 @@ app.registerExtension({
       var nodeRef = this;
       setTimeout(function() {
         if (nodeRef._lgApplyFrame) nodeRef._lgApplyFrame(nodeRef.size);
+        nodeRef._eagleRestoreUiState?.();
       }, 0);
       return result;
     };
@@ -1434,6 +1450,7 @@ app.registerExtension({
     nodeType.prototype.onRemoved = function() {
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
       this._lgApplyFrame = null;
+      this._eagleRestoreUiState = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

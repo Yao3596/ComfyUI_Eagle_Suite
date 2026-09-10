@@ -156,13 +156,16 @@ class UnifiedMediaBrowser {
     }
 
     const directory = String(this.getWidget("directory")?.value || "").trim();
+    const activeDirectory = String(this.getWidget("active_directory")?.value || "").trim();
     const mediaType = String(this.getWidget("media_type")?.value || "all");
     const recursiveValue = this.getWidget("recursive")?.value;
     const viewMode = String(this.getWidget("view_mode")?.value || "grid");
     const fallbackMode = String(this.getWidget("fallback_mode")?.value || "sequential");
+    const sortBy = String(this.getWidget("sort_by")?.value || "name");
+    const sortDir = String(this.getWidget("sort_dir")?.value || "asc");
     
     this.state.directory = directory;
-    this.state.currentDirectory = directory;
+    this.state.currentDirectory = activeDirectory || directory;
     this.state.mediaType = ["all", "image", "video"].includes(mediaType) ? mediaType : "all";
     this.state.recursive = recursiveValue === undefined ? true : Boolean(recursiveValue);
     this.state.viewMode = viewMode === "list" ? "list" : "grid";
@@ -171,6 +174,10 @@ class UnifiedMediaBrowser {
     this.state.startIndex = Math.max(0, Number(this.getWidget("start_index")?.value || 0));
     this.state.randomSeed = Number(this.getWidget("random_seed")?.value ?? -1);
     this.state.aspectRatio = String(this.getWidget("aspect_ratio")?.value || "all");
+    this.state.keyword = String(this.getWidget("keyword")?.value || "");
+    this.state.sortBy = ["name", "modified", "size"].includes(sortBy) ? sortBy : "name";
+    this.state.sortDir = sortDir === "desc" ? "desc" : "asc";
+    this.state.selectedItems.clear();
 
     try {
       const saved = JSON.parse(this.getWidget("selection_data")?.value || "[]");
@@ -201,11 +208,26 @@ class UnifiedMediaBrowser {
       start_index: this.state.startIndex,
       random_seed: this.state.randomSeed,
       aspect_ratio: this.state.aspectRatio,
+      keyword: this.state.keyword,
+      sort_by: this.state.sortBy,
+      sort_dir: this.state.sortDir,
     };
     Object.entries(values).forEach(([name, value]) => {
       const widget = this.getWidget(name);
       if (widget) widget.value = value;
     });
+    this.node.graph?.change?.();
+  }
+
+  reloadStateFromNode() {
+    clearTimeout(this._stateReloadTimer);
+    this._stateReloadTimer = setTimeout(() => {
+      this.restoreStateFromNode();
+      this.render();
+      this.renderSelected();
+      this.updateCounts();
+      this.attachEvents();
+    }, 0);
   }
 
   init() {
@@ -241,14 +263,14 @@ class UnifiedMediaBrowser {
             <span data-mode="image" class="${this.state.mediaType === 'image' ? 'active' : ''}">图片</span>
             <span data-mode="video" class="${this.state.mediaType === 'video' ? 'active' : ''}">视频</span>
           </div>
-          <input type="text" class="umb-search" placeholder="搜索文件名..." data-input="search">
+          <input type="text" class="umb-search" placeholder="搜索文件名..." data-input="search" value="${escapeHtml(this.state.keyword)}">
           <select class="umb-sel" data-input="sort">
-            <option value="name:asc">名称 ↑</option>
-            <option value="name:desc">名称 ↓</option>
-            <option value="modified:desc">最新</option>
-            <option value="modified:asc">最旧</option>
-            <option value="size:desc">最大</option>
-            <option value="size:asc">最小</option>
+            <option value="name:asc" ${this.state.sortBy === 'name' && this.state.sortDir === 'asc' ? 'selected' : ''}>名称 ↑</option>
+            <option value="name:desc" ${this.state.sortBy === 'name' && this.state.sortDir === 'desc' ? 'selected' : ''}>名称 ↓</option>
+            <option value="modified:desc" ${this.state.sortBy === 'modified' && this.state.sortDir === 'desc' ? 'selected' : ''}>最新</option>
+            <option value="modified:asc" ${this.state.sortBy === 'modified' && this.state.sortDir === 'asc' ? 'selected' : ''}>最旧</option>
+            <option value="size:desc" ${this.state.sortBy === 'size' && this.state.sortDir === 'desc' ? 'selected' : ''}>最大</option>
+            <option value="size:asc" ${this.state.sortBy === 'size' && this.state.sortDir === 'asc' ? 'selected' : ''}>最小</option>
           </select>
           <select class="umb-sel" data-input="fallback" title="未手动选择文件时的输出方式">
             <option value="sequential" ${this.state.fallbackMode === 'sequential' ? 'selected' : ''}>未选：顺序批次</option>
@@ -359,6 +381,7 @@ class UnifiedMediaBrowser {
         this.state.keyword = e.target.value.trim();
         this.state.offset = 0;
         this.state.items = [];
+        this.syncBrowserSettings();
         this.loadItems();
       }, 300));
     }
@@ -382,6 +405,7 @@ class UnifiedMediaBrowser {
         this.state.sortDir = sortDir;
         this.state.offset = 0;
         this.state.items = [];
+        this.syncBrowserSettings();
         this.loadItems();
       });
     }
@@ -754,7 +778,8 @@ app.registerExtension({
 
     const HIDDEN_WIDGETS = [
       "selection_data", "directory", "active_directory", "media_type", "recursive", "view_mode",
-      "fallback_mode", "batch_count", "start_index", "random_seed", "aspect_ratio"
+      "fallback_mode", "batch_count", "start_index", "random_seed", "aspect_ratio",
+      "keyword", "sort_by", "sort_dir"
     ];
 
     const hideWidgets = (node) => {
@@ -807,7 +832,8 @@ app.registerExtension({
       const el = document.createElement("div");
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
 
-      this.addDOMWidget("unified_media_browser", "div", el, { serialize: false });
+      const widget = this.addDOMWidget("unified_media_browser", "div", el, { serialize: false, canvasOnly: true });
+      widget.width = undefined;
 
       const nodeRef = this;
       const applyFrame = (size) => {
@@ -826,6 +852,7 @@ app.registerExtension({
 
       try {
         this._umbApp = new UnifiedMediaBrowser(el, this);
+        this._eagleRestoreUiState = () => this._umbApp?.reloadStateFromNode();
       } catch (e) {
         console.error("[UnifiedMediaBrowser] 初始化失败:", e);
         el.replaceChildren();
@@ -852,7 +879,10 @@ app.registerExtension({
       const result = onConfigure?.apply(this, arguments);
       normalizeOutputSlots(this);
       const nodeRef = this;
-      setTimeout(() => nodeRef._umbApplyFrame?.(nodeRef.size), 0);
+      setTimeout(() => {
+        nodeRef._umbApplyFrame?.(nodeRef.size);
+        nodeRef._eagleRestoreUiState?.();
+      }, 0);
       return result;
     };
 
@@ -862,6 +892,7 @@ app.registerExtension({
         this._umbApp = null;
       }
       this._umbApplyFrame = null;
+      this._eagleRestoreUiState = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

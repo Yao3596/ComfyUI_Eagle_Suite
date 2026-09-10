@@ -142,8 +142,8 @@ var H3D_CSS = `
 .h3d-media-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.h3d-media-detail{border:1px solid var(--h3d-bd);border-radius:7px;background:var(--h3d-bg2);padding:7px;min-width:0}
 .h3d-media-detail-preview{height:82px;border-radius:5px;overflow:hidden;background:#0b0d12;display:flex;align-items:center;justify-content:center;position:relative}.h3d-media-detail-preview img,.h3d-media-detail-preview video{width:100%;height:100%;object-fit:cover}.h3d-media-detail-preview .audio-icon{font-size:30px;color:#73b7ed}
 .h3d-media-missing{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:5px;text-align:center;background:#12151c;color:#8f98a8;font-size:9px}
-.h3d-media-dropzone{min-height:118px;border:2px dashed #465064;border-radius:9px;background:linear-gradient(180deg,#111722,#0e1118);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:var(--h3d-muted);cursor:pointer;transition:.15s;flex-shrink:0}
-.h3d-media-dropzone:hover{border-color:var(--h3d-primary);background:#131c2b;color:#fff}.h3d-media-dropzone .drop-icon{font-size:26px;color:#73a7ef;line-height:1}.h3d-media-dropzone .drop-title{font-size:12px;font-weight:600}.h3d-media-dropzone .drop-sub{font-size:10px;color:var(--h3d-muted)}
+.h3d-media-dropzone{position:relative;min-height:118px;border:2px dashed #465064;border-radius:9px;background:linear-gradient(180deg,#111722,#0e1118);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;padding:12px 112px 12px 18px;color:var(--h3d-muted);cursor:pointer;transition:.15s;flex-shrink:0;text-align:center}
+.h3d-media-dropzone:hover{border-color:var(--h3d-primary);background:#131c2b;color:#fff}.h3d-media-dropzone .drop-icon{font-size:26px;color:#73a7ef;line-height:1}.h3d-media-dropzone .drop-title{font-size:12px;font-weight:600}.h3d-media-dropzone .drop-sub{font-size:10px;line-height:1.5;color:var(--h3d-muted);max-width:620px}.h3d-media-drop-actions{position:absolute;right:9px;top:9px;display:flex;flex-direction:column;gap:5px;z-index:2}
 .h3d-trim-overlay{position:absolute;z-index:40;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px}.h3d-trim-dialog{width:min(760px,94%);background:#171b23;border:1px solid #465064;border-radius:9px;padding:14px;box-shadow:0 14px 50px rgba(0,0,0,.55)}
 .h3d-trim-preview{height:220px;background:#090b0f;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin:10px 0}.h3d-trim-preview video{max-width:100%;max-height:100%}.h3d-trim-preview audio{width:92%}
 .h3d-trim-ranges{display:grid;grid-template-columns:72px 1fr 70px;gap:7px;align-items:center;margin:8px 0}.h3d-trim-ranges input[type=range]{width:100%}
@@ -182,17 +182,36 @@ function createShot(id) {
 }
 function createDialogue(id) { return { id: id, role: '', text: '', time: '' }; }
 function createRef() { return { url: '', filename: '', name: '', kind: 'person', retention: 'fully_preserved' }; }
+var LEGACY_MEDIA_ROLES = {
+    person:'subject_person', prop:'subject_prop', style:'style_reference',
+    environment:'scene_reference', composition:'composition_reference', reference:'motion_reference'
+};
+function defaultMediaRole(type, kind) {
+    if (type === 'video') return 'motion_reference';
+    if (type === 'audio') return 'voice_timbre';
+    return LEGACY_MEDIA_ROLES[kind || 'person'] || 'subject_person';
+}
 function createMediaRef(data) {
     data = data || {};
+    var type = ['image','video','audio'].indexOf(data.type) >= 0 ? data.type : 'image';
+    var kind = data.kind || (type === 'image' ? 'person' : 'reference');
+    var retention = data.retention || (type === 'audio' ? 'reference' : 'fully_preserved');
+    if (retention === 'style_only') retention = 'attribute_transfer';
+    if (type === 'audio' && ['fully_copy','partially_copy','reference','weak_reference'].indexOf(retention) < 0) retention = 'reference';
+    if (type !== 'audio' && ['fully_preserved','partially_preserved','attribute_transfer','weak_reference'].indexOf(retention) < 0) retention = 'fully_preserved';
     var duration = Math.max(0, Number(data.duration) || 0);
     return {
         id: data.id || ('media-' + Date.now() + '-' + Math.random().toString(16).slice(2)),
-        type: ['image','video','audio'].indexOf(data.type) >= 0 ? data.type : 'image',
+        type: type,
         filename: data.filename || '',
         originalName: data.originalName || data.name || data.filename || '',
         name: data.name || '',
-        kind: data.kind || (data.type === 'image' ? 'person' : 'reference'),
-        retention: data.retention || 'fully_preserved',
+        kind: kind,
+        role: data.role || defaultMediaRole(type, kind),
+        purpose: data.purpose || '',
+        retention: retention,
+        useEmbeddedAudio: type === 'video' ? !!data.useEmbeddedAudio : false,
+        speakerId: data.speakerId || '',
         duration: duration,
         trimStart: Math.max(0, Number(data.trimStart) || 0),
         trimEnd: Number.isFinite(Number(data.trimEnd)) && Number(data.trimEnd) > 0 ? Number(data.trimEnd) : duration,
@@ -353,6 +372,9 @@ function saveState(node, project, scenes, immediate) {
             var json = JSON.stringify(clean);
             w.value = json;
             if (typeof w.callback === 'function') w.callback(w.value, w, node);
+            if (typeof node._eagleSyncContextLoopBridges === 'function') {
+                node._eagleSyncContextLoopBridges();
+            }
             if (node.graph) node.graph.change();
         } catch(e) { console.warn('[EagleH3Director] saveState error:', e); }
     };
@@ -459,49 +481,83 @@ function compilePrompt(project, scene) {
     var parts = [];
     var mode = (project.mode || 't2v').toUpperCase();
     var secs = scene.defaultSeconds || 10;
-    parts.push('Task: ' + mode + ', ' + secs + 's, ' + (project.aspect||'9:16') + ', ' + (project.resolution||'720p') + ', ' + (project.fps||24) + 'fps.');
 
-    // Shared prompt：自动 prepend 到每个场景开头
+    var mediaRefs = (project.mediaRefs || []).filter(function(r) { return r && r.filename; });
+    var isReferenceMode = ['R2V','RV2V','V2V'].indexOf(mode) >= 0;
+
+    // Base 模式在最终 timeline 完成后统一编译三字段；Ref2VA 走六字段。
     var fd = (project.foundation || '').trim();
-    if (fd) {
-        if (fd.trimStart().startsWith('integrated_multimodal_description:')) {
-            parts.push(fd);
-        } else {
-            parts.push('integrated_multimodal_description:\n  ' + fd.replace(/\n/g, '\n  '));
-        }
-    } else {
-        parts.push('integrated_multimodal_description:\n  (Shared prompt placeholder — fill in 世界构建 & 风格基础 to prepend to every scene.)');
-    }
 
     // 多模态参考信息：编号在各媒体类型内独立计算。
-    var mediaRefs = (project.mediaRefs || []).filter(function(r) { return r && r.filename; });
-    var refs = mediaRefs.filter(function(r) { return r.type === 'image'; });
-    var noun = { person:'a character', prop:'a prop', style:'an art style', environment:'an environment', composition:'a composition' };
+    var roleText = {
+        subject_person:'a person or character identity reference', subject_animal:'an animal or creature identity reference',
+        subject_prop:'an object, costume, or prop identity reference', scene_reference:'a scene or environment reference',
+        style_reference:'a visual style reference', action_reference:'an action or pose reference',
+        expression_reference:'an expression reference', composition_reference:'a composition or storyboard reference',
+        first_frame:'the required first-frame anchor', last_frame:'the required last-frame anchor',
+        keyframe:'a keyframe anchor', storyboard:'a storyboard or composition anchor',
+        subject_reference:'a subject appearance reference', motion_reference:'a motion reference',
+        camera_reference:'a camera-movement reference', rhythm_reference:'an editing rhythm and timing reference',
+        edit_source:'a source clip to edit', continuation_source:'a source clip to continue',
+        voice_timbre:'a speaker voice-timbre reference', music_style:'a music style reference',
+        dialogue_content:'dialogue content to reuse', sound_effect:'a sound-effect reference', full_track:'an audio track to reuse'
+    };
+    var subjectRoles = {subject_person:1,subject_animal:1,subject_prop:1,subject_reference:1};
+    var subjectNumber = 0;
     var subj = mediaRefs.map(function(r) {
         var tag = mediaTagFor(r, mediaRefs);
         var name = (r.name || '').trim();
-        var ofName = name ? ' of ' + name : '';
-        var description = r.type === 'image' ? (noun[r.kind] || 'an image') : (r.type === 'video' ? 'a video' : 'an audio');
-        return '  ' + tag + ' is ' + description + ofName + ' reference.';
+        var purpose = (r.purpose || '').trim();
+        var role = r.role || defaultMediaRole(r.type, r.kind);
+        var description = roleText[role] || 'a multimodal reference';
+        var line;
+        if (subjectRoles[role]) {
+            subjectNumber++;
+            line = '  <Subject ' + subjectNumber + '> is ' + (name || purpose || description) + ', defined by ' + tag + '; ' + description + '.';
+        } else {
+            line = '  ' + tag + ' is ' + description + (name ? ' named ' + name : '') + '.';
+        }
+        if (purpose && purpose !== name) line += ' Primary use: ' + purpose + '.';
+        if (r.type === 'video' && r.useEmbeddedAudio) line += ' Its synchronized source audio is explicitly enabled.';
+        if (r.type === 'audio' && r.speakerId) line += ' Bind voice identity to (' + r.speakerId + ').';
+        return line;
     }).join('\n');
-    if (subj) parts.push('subject_definitions:\n' + subj);
-    var ret = refs.map(function(r) {
+    if (isReferenceMode) parts.push('subject_definitions:\n' + (subj || '  N/A'));
+    if (isReferenceMode) {
+        var roles = mediaRefs.map(function(r) { return r.role || defaultMediaRole(r.type, r.kind); });
+        var taskType = roles.indexOf('edit_source') >= 0 ? 'video editing' :
+            (roles.indexOf('continuation_source') >= 0 ? 'video continuation' :
+            (roles.some(function(r) { return ['first_frame','last_frame','keyframe','storyboard'].indexOf(r) >= 0; }) ? 'keyframe completion' :
+            (mediaRefs.some(function(r) { return r.type === 'audio' && ['fully_copy','partially_copy'].indexOf(r.retention) >= 0; }) ? 'audio reuse' :
+            (mediaRefs.some(function(r) { return r.type === 'audio'; }) ? 'audio reference' : 'reference generation'))));
+        var summaryText = fd.replace(/^integrated_multimodal_description:\s*/i, '').trim() ||
+            'Generate the requested scene while applying each reference only to its declared primary use.';
+        parts.push('summary:\n  Task type: ' + taskType + '. ' + summaryText);
+    }
+    subjectNumber = 0;
+    var ret = mediaRefs.map(function(r) {
         var tag = mediaTagFor(r, mediaRefs);
         var name = (r.name || '').trim();
         var nameTag = name ? ' (' + name + ')' : '';
-        var line = '  ' + tag + nameTag + ': ' + (r.retention||'fully_preserved') + '.';
-        if (r.kind === 'person') line += ' Do not copy the background of the reference image; keep only the character design.';
+        var role = r.role || defaultMediaRole(r.type, r.kind);
+        var label = tag;
+        if (subjectRoles[role]) { subjectNumber++; label = '<Subject ' + subjectNumber + '> [' + tag + ']'; }
+        var line = '  ' + label + nameTag + ': ' + (r.retention || (r.type === 'audio' ? 'reference' : 'fully_preserved')) + '.';
+        if (r.type === 'image' && (role === 'subject_person' || role === 'subject_animal' || role === 'subject_prop')) {
+            line += ' Background: weak_reference; do not copy the reference-image background, keep only the declared subject design.';
+        }
         return line;
     }).join('\n');
-    if (ret) parts.push('retention_analysis:\n' + ret);
+    if (isReferenceMode) parts.push('retention_analysis:\n' + (ret || '  N/A'));
 
     var activePreamble = stripDisabledTokens(scene, scene.preamble || '');
     var preamble = activePreamble.replace(/<d>[\s\S]*?<\/d>/g,'').replace(/\n{3,}/g,'\n\n').trim();
     var shots = scene.shots || [];
     var shotLines = shots.map(function(s, i) {
         var p = [];
-        if (s.time) p.push('At ' + s.time + ',');
-        if (s.framing) p.push('[' + s.framing + ']');
+        if (i > 0 && s.time) p.push('At ' + s.time + ', the camera cuts to');
+        if (s.framing) p.push(s.framing);
+        if (s.title) p.push('a shot titled ' + s.title + '.');
         if (s.transitionIn) p.push('Transition in: ' + s.transitionIn + '.');
         p.push(s.content || '(no content)');
         if (s.intent) p.push('Narrative intent: ' + s.intent + '.');
@@ -510,20 +566,56 @@ function compilePrompt(project, scene) {
         if (s.lens) p.push('Lens/focus: ' + s.lens + '.');
         if (s.sound) p.push('Sound: ' + s.sound + '.');
         if (s.transitionOut) p.push('Transition out: ' + s.transitionOut + '.');
-        return '[Shot ' + (i+1) + ': ' + (s.title||'untitled') + '] ' + p.join(' ');
+        return '[Shot ' + (i+1) + '] ' + p.join(' ');
     }).join('\n\n  ');
-    var detailed = shots.length ? 'detailed_description:\n  ' + shotLines : '';
     var disabled = Array.isArray(scene.disabledTokens) ? scene.disabledTokens : [];
+    var dialogueLanguage = (project.skill && project.skill.dialogueLanguage) || 'Chinese';
+    var speakerIds = {};
     var dlgs = (scene.dialogues || []).filter(function(d) {
         return d && d.role && d.text && disabled.indexOf(buildDTag(d.role, d.text)) < 0;
-    }).map(function(d) { return '  ' + buildDTag(d.role, d.text); }).join('\n');
-    var dialogue = dlgs ? 'Dialogue:\n' + dlgs : '';
-    var body = [preamble, detailed, dialogue].filter(Boolean).join('\n\n');
-    if (body) parts.push(body);
+    }).map(function(d) {
+        if (!speakerIds[d.role]) speakerIds[d.role] = 'S' + (Object.keys(speakerIds).length + 1);
+        var timePrefix = d.time ? ('At ' + d.time + ', ') : '';
+        if (d.voiceover) {
+            return timePrefix + d.role + ' (' + speakerIds[d.role] + ') says in an off-screen voiceover: <d>[' +
+                dialogueLanguage + '] ' + d.text + "</d> while the on-screen character's lips remain completely closed.";
+        }
+        return timePrefix + d.role + ' (' + speakerIds[d.role] + ') says: <d>[' + dialogueLanguage + '] ' + d.text + '</d>';
+    }).join('\n  ');
+    var timeline = [preamble, shotLines, dlgs].filter(Boolean).join('\n\n') || 'N/A';
+    if (isReferenceMode) {
+        parts.push('detailed_description:\n  ' + timeline.replace(/\n/g, '\n  '));
+    } else {
+        var imageRefs = mediaRefs.filter(function(r) { return r.type === 'image'; });
+        if (mode === 'I2V' && imageRefs.length) {
+            var firstIndex = imageRefs.findIndex(function(r) { return r.role === 'first_frame'; });
+            firstIndex = firstIndex < 0 ? 0 : firstIndex;
+            parts.push('For the target video, at 0.00 seconds into the target video, <Picture ' +
+                (firstIndex + 1) + '> (from [Shot 1]) is fully referenced.');
+        } else if (mode === 'FL2V' && imageRefs.length >= 2) {
+            var opening = imageRefs.findIndex(function(r) { return r.role === 'first_frame'; });
+            var ending = imageRefs.findIndex(function(r) { return r.role === 'last_frame'; });
+            opening = opening < 0 ? 0 : opening;
+            ending = ending < 0 ? 1 : ending;
+            parts.push('How the reference pictures align with the target video — Picture ' + (opening + 1) +
+                ' (from Shot 1) aligns with the 0.00-second mark of the target video; Picture ' + (ending + 1) +
+                ' (from Shot ' + Math.max(1, shots.length) + ') aligns with the ' + Number(secs).toFixed(2) +
+                '-second mark of the target video.');
+        } else if (mode === 'L2V' && imageRefs.length) {
+            var lastOnly = imageRefs.findIndex(function(r) { return r.role === 'last_frame'; });
+            lastOnly = lastOnly < 0 ? 0 : lastOnly;
+            parts.push('How the reference pictures align with the target video — <Picture ' + (lastOnly + 1) +
+                '> (from [Shot ' + Math.max(1, shots.length) + ']) aligns with the ' + Number(secs).toFixed(2) +
+                '-second mark of the target video.');
+        }
+        var foundation = fd.replace(/^\s*integrated_multimodal_description\s*:\s*/i, '').trim();
+        var integrated = [foundation, timeline].filter(Boolean).join('\n\n');
+        parts.push('integrated_multimodal_description:\n  ' + integrated.replace(/\n/g, '\n  '));
+    }
     var sounds = shots.map(function(s) { return s.sound; }).filter(Boolean).join(', ');
-    if (sounds) parts.push('overall_soundscape:\n  ' + sounds);
+    parts.push('overall_soundscape:\n  ' + (sounds || project.globalSoundscape || 'N/A'));
     var music = project.globalMusic || scene.music || '';
-    if (music) parts.push('non_diegetic_music:\n  ' + music);
+    parts.push('non_diegetic_music:\n  ' + (music || 'N/A'));
     return parts.join('\n\n');
 }
 
@@ -553,7 +645,9 @@ var H3DirectorApp = defineComponent({
             },
             directorLibrary: {
                 items: [], loading: false, error: '', source: 'eagle',
-                path: '', fallbackReason: ''
+                path: '', fallbackReason: '', editorOpen: false, saving: false,
+                inference: false,
+                draft: { id:'', name:'', category:'video_to_image_editing', tasks:['script','shots'], tagsText:'', content:'', filmstrip:[] }
             }
         });
 
@@ -588,6 +682,38 @@ var H3DirectorApp = defineComponent({
             } catch(e) { console.warn('[EagleH3Director] reloadFromWidget error:', e); }
         }
         props.node._h3ReloadState = reloadFromWidget;
+
+        // Context Loop 的编辑器直接读取其 Plan 节点的 plan_json 控件，而不是
+        // H3_CHAIN_PLAN 连线中的 Python 对象。暴露一个前端镜像，让 Eagle 的
+        // 兼容桥在无需先 Queue 的情况下也能立即显示导演台当前场景。
+        props.node._h3ContextLoopPlanJson = function() {
+            var sourceProject = store.project || {};
+            var fps = Math.max(1, Number(sourceProject.fps) || 24);
+            var defaultSeconds = Math.max(0.1, Number(sourceProject.globalDuration) || 7);
+            var defaultSteps = Math.max(1, Number(sourceProject.globalSteps) || 8);
+            var shots = (store.scenes || []).map(function(scene, index) {
+                var seconds = Math.max(0.1, Number(scene.defaultSeconds) || defaultSeconds);
+                var requested = Math.max(5, Math.ceil(seconds * fps - 1e-9));
+                var length = requested + ((5 - requested % 17) % 17);
+                var explicitSeed = Number(scene.seed);
+                var seed = Number.isFinite(explicitSeed)
+                    ? explicitSeed
+                    : (Math.max(0, Number(sourceProject.baseSeed) || 0) + index + 1);
+                return {
+                    id: String(scene.id || ('scene_' + (index + 1))),
+                    prompt: compilePrompt(sourceProject, scene),
+                    length: length,
+                    seed: String(seed),
+                    steps: Math.max(1, Number(scene.defaultSteps) || defaultSteps),
+                };
+            });
+            return JSON.stringify({
+                // compilePrompt 已包含世界观与全局风格；这里留空可避免预览重复 prepend。
+                prompt_prefix: '',
+                defaults: {duration_seconds: defaultSeconds, steps: defaultSteps},
+                shots: shots,
+            }, null, 2);
+        };
 
         var flashMsg = ref('');
         var flashTimer = null;
@@ -653,6 +779,83 @@ var H3DirectorApp = defineComponent({
             if (index >= 0) ids.splice(index, 1); else ids.push(skill.id);
             compileDirectorLibrary();
             markDirty(true);
+        }
+
+        function editDirectorLibrarySkill(skill) {
+            skill = skill || {};
+            Object.assign(store.directorLibrary.draft, {
+                id: skill.id || '',
+                name: skill.name || '',
+                category: skill.category || 'video_to_image_editing',
+                tasks: Array.isArray(skill.tasks) && skill.tasks.length ? skill.tasks.slice() : ['script','shots'],
+                tagsText: Array.isArray(skill.tags) ? skill.tags.join(', ') : '',
+                content: skill.content || '',
+                filmstrip: Array.isArray(skill.filmstrip) ? skill.filmstrip.slice() : []
+            });
+            store.directorLibrary.editorOpen = true;
+        }
+
+        function newDirectorLibrarySkill() {
+            editDirectorLibrarySkill({
+                name: '视频参考编辑 Skill', category: 'video_to_image_editing',
+                tasks: ['script','shots'], tags: ['video-reference','identity-lock'], content: ''
+            });
+        }
+
+        async function saveDirectorLibrarySkill() {
+            var lib = store.directorLibrary;
+            var draft = lib.draft || {};
+            if (!String(draft.name || '').trim()) { flash('请填写 Skill 名称'); return; }
+            if (!String(draft.content || '').trim()) { flash('请填写 Skill 内容'); return; }
+            lib.saving = true; lib.error = '';
+            try {
+                var skill = {
+                    id: draft.id || undefined,
+                    name: String(draft.name).trim(),
+                    category: String(draft.category || 'video_to_image_editing').trim(),
+                    tasks: Array.isArray(draft.tasks) && draft.tasks.length ? draft.tasks.slice() : ['script','shots'],
+                    tags: String(draft.tagsText || '').split(/[,，]/).map(function(item) { return item.trim(); }).filter(Boolean),
+                    content: String(draft.content || '').trim(),
+                    filmstrip: Array.isArray(draft.filmstrip) ? draft.filmstrip.slice() : []
+                };
+                var response = await api.fetchApi('/eaglePromptPresets/director_skills', {
+                    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({skill:skill})
+                });
+                var text = await response.text();
+                if (!text.trim()) throw new Error('技能库接口返回空响应');
+                var data = JSON.parse(text);
+                if (!response.ok || !data.success) throw new Error(data.error || ('HTTP ' + response.status));
+                await loadDirectorLibrary();
+                var saved = data.data || skill;
+                editDirectorLibrarySkill(saved);
+                flash('Skill 已保存到共享技能库');
+            } catch (error) {
+                lib.error = error && error.message ? error.message : String(error);
+                flash('Skill 保存失败');
+            } finally { lib.saving = false; }
+        }
+
+        async function deleteDirectorLibrarySkill() {
+            var lib = store.directorLibrary;
+            var id = lib.draft && lib.draft.id;
+            if (!id) { lib.editorOpen = false; return; }
+            if (!window.confirm('确定删除这个导演 Skill？')) return;
+            lib.saving = true; lib.error = '';
+            try {
+                var response = await api.fetchApi('/eaglePromptPresets/director_skills/delete', {
+                    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:id})
+                });
+                var text = await response.text();
+                if (!text.trim()) throw new Error('技能库接口返回空响应');
+                var data = JSON.parse(text);
+                if (!response.ok || !data.success) throw new Error(data.error || ('HTTP ' + response.status));
+                store.project.skill.librarySkillIds = (store.project.skill.librarySkillIds || []).filter(function(value) { return value !== id; });
+                lib.editorOpen = false;
+                await loadDirectorLibrary();
+                flash('Skill 已删除');
+            } catch (error) {
+                lib.error = error && error.message ? error.message : String(error);
+            } finally { lib.saving = false; }
         }
 
         nextTick(function() { loadDirectorLibrary(); });
@@ -823,9 +1026,11 @@ var H3DirectorApp = defineComponent({
             var sc = currentScene.value;
             if (!sc || !sc.shots || !sc.shots.length) w.push('当前场景没有镜头。');
             if (!sc || !(sc.dialogues || []).length) w.push('当前场景没有台词。');
-            if (['i2v','fl2v','r2v','rv2v'].indexOf(store.project.mode) !== -1) {
+            if (['i2v','fl2v','l2v','r2v','rv2v'].indexOf(store.project.mode) !== -1) {
                 var usedRefs = (store.project.mediaRefs || []).filter(function(r) { return r.type === 'image' && r.filename; }).length;
                 if (!usedRefs) w.push('该模式通常需要参考图。');
+                if (store.project.mode === 'fl2v' && usedRefs < 2) w.push('FL2VA 需要首帧和尾帧两张参考图。');
+                if (store.project.mode === 'l2v' && usedRefs < 1) w.push('L2VA 需要一张尾帧参考图。');
             }
             var refs = (store.project.mediaRefs || []).filter(function(r) { return r && r.filename; });
             var limits = { image:9, video:3, audio:3 };
@@ -839,10 +1044,15 @@ var H3DirectorApp = defineComponent({
                 if (start < 0 || end < 0 || (end > 0 && end <= start) || (duration > 0 && (start >= duration || end > duration + 0.01))) {
                     w.push('素材「' + (r.originalName || r.filename) + '」的裁剪区间无效。');
                 }
+                if (!r.role) w.push('素材「' + (r.originalName || r.filename) + '」尚未指定主要用途。');
+                if (!String(r.purpose || '').trim()) w.push('素材「' + (r.originalName || r.filename) + '」建议补充用途说明。');
             });
             Object.keys(limits).forEach(function(kind) {
                 if (counts[kind] > limits[kind]) w.push(kind + ' 素材超过端口上限 ' + limits[kind] + '。');
             });
+            if (counts.image + counts.video + counts.audio > 12) w.push('混合参考素材超过 MiniMax H3 上限 12 个。');
+            if (counts.audio && !counts.image && !counts.video) w.push('音频不能单独作为 H3 参考；请至少添加一张图片或一段视频。');
+            if (['r2v','rv2v','v2v'].indexOf(store.project.mode) >= 0 && !refs.length) w.push('Ref2VA 模式至少需要一个参考素材。');
             if ((store.project.referencePolicy || 'warn') !== 'off') {
                 var tagCounts = { picture:counts.image, video:counts.video, audio:counts.audio };
                 var text = currentPreviewPage.value || '';
@@ -853,6 +1063,25 @@ var H3DirectorApp = defineComponent({
                     if (index < 1 || index > available) w.push(match[0] + ' 无对应素材（可用 ' + available + '）。');
                 }
             }
+            var duration = Number(sc && sc.defaultSeconds) || 0;
+            if (duration < 4 || duration > 15) {
+                w.push('[H3-E006] MiniMax H3 单段生成时长必须在 4–15 秒。');
+            }
+            var previousCut = 0;
+            (sc && sc.shots || []).forEach(function(shot, shotIndex) {
+                if ((Number(shot.estSeconds) || 0) > 15) {
+                    w.push('[H3-E006] Shot ' + (shotIndex + 1) + ' 预估时长超过 15 秒。');
+                }
+                if (shotIndex === 0) return;
+                var tm = String(shot.time || '').match(/^(?:(\d+):)?(\d{1,2})(?:\.(\d{1,3}))?$/);
+                var cut = null;
+                if (tm && Number(tm[2]) < 60) {
+                    cut = Number(tm[1] || 0) * 60 + Number(tm[2]) + Number(('0.' + (tm[3] || '0')));
+                }
+                if (cut == null || cut <= previousCut || cut >= duration) {
+                    w.push('[H3-E005] Shot ' + (shotIndex + 1) + ' 切镜时间必须严格递增且小于场景时长。');
+                } else previousCut = cut;
+            });
             return w;
         });
 
@@ -874,6 +1103,41 @@ var H3DirectorApp = defineComponent({
         // ── 导演 Skill：手动「生成」按钮 ──
         function skillRequestWidget() {
             return (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
+        }
+        function inferDirectorSkill() {
+            var lib = store.directorLibrary;
+            if (lib.inference || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
+            var scene = currentScene.value;
+            var widget = skillRequestWidget();
+            if (!scene || !widget) { flash('当前场景或 skill_request 不可用'); return; }
+            editDirectorLibrarySkill({
+                name:'正在反推…', category:'video_to_image_editing', tasks:['script','shots'],
+                tags:['video-reference','identity-lock'], content:'模型正在从当前场景提示词提炼可复用规则…'
+            });
+            lib.inference = true;
+            lib.error = '';
+            var skillConfig = store.project.skill || {};
+            var request = {
+                run:true, operation:'extract_skill', sceneId:scene.id,
+                requestId:'h3skill-extract-' + Date.now(), tasks:[],
+                temperature:0.25, modelPref:skillConfig.modelPref || 'local',
+                sourcePrompt:currentPreviewPage.value || scene.preamble || '',
+                hint:skillConfig.hint || '', blockDownstream:true, releaseAfter:false
+            };
+            widget.value = JSON.stringify(request);
+            if (typeof widget.callback === 'function') widget.callback(widget.value, widget, props.node);
+            if (props.node.graph) props.node.graph.change();
+            try {
+                var queued = app.queuePrompt();
+                if (queued && typeof queued.catch === 'function') queued.catch(function(error) {
+                    lib.inference = false;
+                    lib.error = error && error.message ? error.message : String(error);
+                    clearSkillRequest();
+                });
+            } catch (error) {
+                lib.inference = false; lib.error = error && error.message ? error.message : String(error);
+                clearSkillRequest();
+            }
         }
         function finishSkillBatch(message, queueDownstream) {
             var batch = store.skillBatch;
@@ -1006,6 +1270,19 @@ var H3DirectorApp = defineComponent({
         }
         function applySkillResult(data) {
             if (!data) return;
+            if (data.operation === 'extract_skill') {
+                store.directorLibrary.inference = false;
+                clearSkillRequest();
+                if (data.error) {
+                    store.directorLibrary.error = data.error;
+                    flash('Skill 反推失败');
+                    return;
+                }
+                var draft = data.skillDraft || {};
+                editDirectorLibrarySkill(draft);
+                flash('已生成 Skill 草稿，请检查后保存');
+                return;
+            }
             var batch = store.skillBatch;
             if (batch.active && data.batchId && data.batchId !== batch.batchId) return;
             if (batch.active && data.requestId && data.requestId !== batch.requestId) return;
@@ -1093,6 +1370,11 @@ var H3DirectorApp = defineComponent({
             generateSkill: generateSkill, stopSkillGeneration: stopSkillGeneration,
             loadDirectorLibrary: loadDirectorLibrary,
             toggleDirectorLibrarySkill: toggleDirectorLibrarySkill,
+            editDirectorLibrarySkill: editDirectorLibrarySkill,
+            newDirectorLibrarySkill: newDirectorLibrarySkill,
+            saveDirectorLibrarySkill: saveDirectorLibrarySkill,
+            deleteDirectorLibrarySkill: deleteDirectorLibrarySkill,
+            inferDirectorSkill: inferDirectorSkill,
             markDirty: markDirty, flash: flash, copyCompiled: copyCompiled, copyParams: copyParams
         });
 
@@ -1120,9 +1402,10 @@ var H3DirectorApp = defineComponent({
     <h1>🦅 H3 Director <span class="h3d-badge">v1</span></h1>
     <div class="h3d-field"><label>任务</label>
       <select class="h3d-sel" v-model="store.project.mode">
-        <option value="t2v">t2v 文生视频</option><option value="i2v">i2v 图生视频</option>
-        <option value="fl2v">fl2v 首末帧</option><option value="r2v">r2v 角色一致</option>
-        <option value="rv2v">rv2v 角色+视频</option><option value="v2v">v2v 视频重绘</option>
+        <option value="t2v">T2VA · 文生视频</option><option value="i2v">I2VA · 首帧图生视频</option>
+        <option value="fl2v">FL2VA · 首帧+尾帧</option><option value="l2v">L2VA · 尾帧图生视频</option>
+        <option value="r2v">Ref2VA · 全能参考</option>
+        <option value="rv2v">Ref2VA · 主体+视频</option><option value="v2v">Ref2VA · 编辑/续写视频</option>
       </select>
     </div>
     <div class="h3d-field"><label>尺寸</label>
@@ -1942,14 +2225,14 @@ var EditorPanel = defineComponent({
 
         <!-- 参考 -->
         <div v-show="store.editorTab==='ref'" style="display:flex;flex-direction:column;gap:8px">
-          <div class="h3d-row" style="justify-content:space-between">
-            <div class="h3d-hint">与台本上方素材栏共用同一份数据；不自动排序，拖拽卡片可调整位置。图片最多9张，视频/音频各3个。</div>
-            <span style="display:flex;gap:5px"><button class="h3d-btn sm" @click="openInputPicker">▾ input 图片</button><button class="h3d-btn sm primary" @click="openMediaPicker">＋ 添加素材</button></span>
-          </div>
           <div class="h3d-media-dropzone" @click="openMediaPicker" @dragover.prevent @drop.stop.prevent="onExternalDrop">
+            <div class="h3d-media-drop-actions">
+              <button class="h3d-btn sm" @click.stop="openInputPicker">▾ input 图片</button>
+              <button class="h3d-btn sm primary" @click.stop="openMediaPicker">＋ 添加素材</button>
+            </div>
             <div class="drop-icon">⇩</div>
             <div class="drop-title">将图片、视频或音频拖入这里</div>
-            <div class="drop-sub">也可以点击此区域选择文件 · 支持多选</div>
+            <div class="drop-sub">点击此区域选择文件 · 支持多选<br>物理类型决定端口，主要用途决定控制内容，保留策略决定复制强度；一个素材只设一个主要职责。图片最多9张，视频/音频各3个，混合最多12个；音频不能单独使用。</div>
           </div>
           <div v-if="mediaItems.length" class="h3d-media-grid" @dragover.prevent @drop.prevent="onExternalDrop">
             <div v-for="(item,i) in mediaItems" :key="item.id" class="h3d-media-detail" draggable="true"
@@ -1963,15 +2246,40 @@ var EditorPanel = defineComponent({
                 <span class="h3d-tag" style="position:absolute;left:4px;top:4px">{{ mediaTagFor(item, mediaItems) }}</span>
               </div>
               <input class="h3d-inp sm" v-model="item.name" :placeholder="item.originalName || '素材名称'" @input="actions.markDirty" style="width:100%;margin-top:6px">
-              <template v-if="item.type==='image'">
-                <select class="h3d-sel" v-model="item.kind" @change="actions.markDirty" style="width:100%;margin-top:5px">
-                  <option value="person">人物</option><option value="prop">道具</option><option value="style">风格</option>
-                  <option value="environment">环境</option><option value="composition">构图</option>
-                </select>
-                <select class="h3d-sel" v-model="item.retention" @change="actions.markDirty" style="width:100%;margin-top:5px">
-                  <option value="fully_preserved">完全保留</option><option value="partially_preserved">部分保留</option><option value="style_only">仅风格</option>
-                </select>
-              </template>
+              <select v-if="item.type==='image'" class="h3d-sel" v-model="item.role" @change="actions.markDirty" style="width:100%;margin-top:5px">
+                <option value="subject_person">主体 · 人物/角色</option><option value="subject_animal">主体 · 动物/生物</option>
+                <option value="subject_prop">主体 · 物体/服装/道具</option><option value="scene_reference">场景/环境</option>
+                <option value="style_reference">视觉风格</option><option value="action_reference">动作/姿态</option>
+                <option value="expression_reference">表情</option><option value="composition_reference">构图</option>
+                <option value="first_frame">首帧锚点</option><option value="last_frame">尾帧锚点</option>
+                <option value="keyframe">关键帧</option><option value="storyboard">故事板</option>
+              </select>
+              <select v-else-if="item.type==='video'" class="h3d-sel" v-model="item.role" @change="actions.markDirty" style="width:100%;margin-top:5px">
+                <option value="subject_reference">主体外观</option><option value="motion_reference">动作</option>
+                <option value="camera_reference">运镜</option><option value="rhythm_reference">剪辑/节奏/时序</option>
+                <option value="edit_source">编辑源视频</option><option value="continuation_source">续写起点</option>
+                <option value="style_reference">视觉风格</option><option value="scene_reference">场景/环境</option>
+              </select>
+              <select v-else class="h3d-sel" v-model="item.role" @change="actions.markDirty" style="width:100%;margin-top:5px">
+                <option value="voice_timbre">说话人音色</option><option value="full_track">整段复用</option>
+                <option value="dialogue_content">对白内容</option><option value="music_style">音乐风格</option>
+                <option value="rhythm_reference">节奏</option><option value="sound_effect">音效</option>
+              </select>
+              <select class="h3d-sel" v-model="item.retention" @change="actions.markDirty" style="width:100%;margin-top:5px">
+                <template v-if="item.type==='audio'">
+                  <option value="fully_copy">完整复制</option><option value="partially_copy">部分复制</option>
+                  <option value="reference">参考</option><option value="weak_reference">弱参考</option>
+                </template>
+                <template v-else>
+                  <option value="fully_preserved">完全保留</option><option value="partially_preserved">部分保留</option>
+                  <option value="attribute_transfer">属性迁移</option><option value="weak_reference">弱参考</option>
+                </template>
+              </select>
+              <input class="h3d-inp sm" v-model="item.purpose" placeholder="用途说明：绑定谁/控制什么（建议填写）" @input="actions.markDirty" style="width:100%;margin-top:5px">
+              <input v-if="item.type==='audio' && item.role==='voice_timbre'" class="h3d-inp sm" v-model="item.speakerId" placeholder="绑定说话人，如 S1" @input="actions.markDirty" style="width:100%;margin-top:5px">
+              <label v-if="item.type==='video'" class="h3d-row" style="gap:5px;margin-top:6px;font-size:10px;cursor:pointer">
+                <input type="checkbox" v-model="item.useEmbeddedAudio" @change="actions.markDirty"> 启用该视频原声为音频参考
+              </label>
               <div class="h3d-row" style="margin-top:6px;justify-content:space-between">
                 <span class="h3d-mini" v-if="item.type!=='image'">选区 {{ formatDuration(selectedDuration(item)) }}</span><span v-else></span>
                 <span style="display:flex;gap:4px">
@@ -2074,22 +2382,44 @@ var EditorPanel = defineComponent({
               <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
                 <b style="font-size:11px">导演技能库</b>
                 <span class="h3d-mini">已启用 {{ store.project.skill.librarySkillIds.length }} 项</span>
-                <button class="h3d-btn sm" style="margin-left:auto" :disabled="store.directorLibrary.loading" @click="actions.loadDirectorLibrary">
+                <button class="h3d-btn sm" style="margin-left:auto" @click="actions.newDirectorLibrarySkill">＋ 新建</button>
+                <button class="h3d-btn sm" :disabled="store.directorLibrary.inference || store.skillBatch.active" @click="actions.inferDirectorSkill">
+                  {{ store.directorLibrary.inference ? '反推中…' : '↺ 从当前提示词反推' }}
+                </button>
+                <button class="h3d-btn sm" :disabled="store.directorLibrary.loading" @click="actions.loadDirectorLibrary">
                   {{ store.directorLibrary.loading ? '读取中…' : '刷新' }}
                 </button>
               </div>
               <div v-if="store.directorLibrary.error" class="h3d-mini" style="color:var(--h3d-danger);margin-bottom:5px">{{ store.directorLibrary.error }}</div>
               <div v-else-if="store.directorLibrary.fallbackReason" class="h3d-mini" style="color:#d5a84b;margin-bottom:5px">已回退到 {{ store.directorLibrary.source }}：{{ store.directorLibrary.fallbackReason }}</div>
               <div v-if="store.directorLibrary.items.length" style="display:flex;flex-wrap:wrap;gap:5px">
-                <button v-for="skill in store.directorLibrary.items" :key="skill.id" class="h3d-btn sm"
-                        :class="{primary:store.project.skill.librarySkillIds.includes(skill.id)}"
-                        :title="(skill.category || 'custom') + (skill.tasks && skill.tasks.length ? ' · ' + skill.tasks.join('/') : '')"
-                        @click="actions.toggleDirectorLibrarySkill(skill)">
-                  {{ store.project.skill.librarySkillIds.includes(skill.id) ? '✓ ' : '' }}{{ skill.name }}
-                </button>
+                <span v-for="skill in store.directorLibrary.items" :key="skill.id" style="display:inline-flex;gap:2px">
+                  <button class="h3d-btn sm" :class="{primary:store.project.skill.librarySkillIds.includes(skill.id)}"
+                          :title="(skill.category || 'custom') + (skill.tasks && skill.tasks.length ? ' · ' + skill.tasks.join('/') : '')"
+                          @click="actions.toggleDirectorLibrarySkill(skill)">
+                    {{ store.project.skill.librarySkillIds.includes(skill.id) ? '✓ ' : '' }}{{ skill.name }}
+                  </button>
+                  <button class="h3d-btn sm" title="编辑 Skill" @click="actions.editDirectorLibrarySkill(skill)">✎</button>
+                </span>
               </div>
-              <div v-else-if="!store.directorLibrary.loading && !store.directorLibrary.error" class="h3d-mini">技能库为空，可在“导演技能库”节点中新建。</div>
+              <div v-else-if="!store.directorLibrary.loading && !store.directorLibrary.error" class="h3d-mini">技能库为空，可直接在这里新建或反推。</div>
               <div v-if="store.directorLibrary.path" class="h3d-mini" :title="store.directorLibrary.path" style="margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ store.directorLibrary.source }} · {{ store.directorLibrary.path }}</div>
+              <div v-if="store.directorLibrary.editorOpen" style="border-top:1px solid var(--h3d-bd);margin-top:8px;padding-top:8px">
+                <div class="h3d-grid2" style="margin-bottom:6px">
+                  <div class="h3d-row col"><label class="h3d-label">Skill 名称</label><input class="h3d-inp" v-model="store.directorLibrary.draft.name"></div>
+                  <div class="h3d-row col"><label class="h3d-label">分类</label><input class="h3d-inp" v-model="store.directorLibrary.draft.category"></div>
+                </div>
+                <label class="h3d-label">标签（逗号分隔）</label>
+                <input class="h3d-inp" style="width:100%;margin-bottom:6px" v-model="store.directorLibrary.draft.tagsText" placeholder="video-reference, identity-lock">
+                <label class="h3d-label">Skill Markdown</label>
+                <textarea class="h3d-textarea" style="min-height:150px" v-model="store.directorLibrary.draft.content"></textarea>
+                <div class="h3d-hint" style="margin-top:5px">反推会分析当前已编译提示词和素材角色元数据；当前文本模型链路不会读取视频像素。草稿需确认后才会保存。</div>
+                <div class="h3d-row" style="justify-content:flex-end;margin-top:7px">
+                  <button class="h3d-btn sm danger" v-if="store.directorLibrary.draft.id" :disabled="store.directorLibrary.saving" @click="actions.deleteDirectorLibrarySkill">删除</button>
+                  <button class="h3d-btn sm" @click="store.directorLibrary.editorOpen=false">关闭</button>
+                  <button class="h3d-btn sm primary" :disabled="store.directorLibrary.saving || store.directorLibrary.inference" @click="actions.saveDirectorLibrarySkill">{{ store.directorLibrary.saving ? '保存中…' : '保存 Skill' }}</button>
+                </div>
+              </div>
             </div>
             <textarea class="h3d-textarea" style="min-height:60px;margin-bottom:8px" v-model="store.project.skill.hint" placeholder="给模型的额外指令（如：风格偏赛博朋克、主角 Nali 是龙女仆）"></textarea>
             <div v-if="store.skillBatch.active || store.skillBatch.status" style="margin:0 0 7px">
@@ -2307,7 +2637,8 @@ app.registerExtension({
             var el = document.createElement('div');
             el.style.cssText = 'display:block;min-width:0;max-width:100%;overflow:hidden;position:relative;box-sizing:border-box;';
 
-            var widget = this.addDOMWidget('h3_director_ui', 'div', el, { serialize: false });
+            var widget = this.addDOMWidget('h3_director_ui', 'div', el, { serialize: false, canvasOnly: true });
+            widget.width = undefined;
 
             var applySize = function(size) {
                 size = size || node.size || [1300, 1080];
@@ -2402,6 +2733,8 @@ app.registerExtension({
             if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
             this._h3ReloadState = null;
             this._h3ApplyNodeSize = null;
+            this._h3ContextLoopPlanJson = null;
+            this._eagleSyncContextLoopBridges = null;
             if (onRemoved) onRemoved.apply(this, arguments);
         };
     }

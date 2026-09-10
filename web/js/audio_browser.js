@@ -165,13 +165,15 @@ class AudioBrowser {
     }
 
     var directory = String(this.getWidget("directory")?.value || "").trim();
+    var activeDirectory = String(this.getWidget("active_directory")?.value || "").trim();
     var recursiveValue = this.getWidget("recursive")?.value;
     var viewMode = String(this.getWidget("view_mode")?.value || "grid");
 
     this.state.directory = directory;
-    this.state.currentDirectory = directory;
+    this.state.currentDirectory = activeDirectory || directory;
     this.state.recursive = recursiveValue === undefined ? true : Boolean(recursiveValue);
     this.state.viewMode = viewMode === "list" ? "list" : "grid";
+    this.state.selectedItems.clear();
 
     try {
       var saved = JSON.parse(this.getWidget("selection_data")?.value || "[]");
@@ -196,6 +198,18 @@ class AudioBrowser {
       var widget = this.getWidget(name);
       if (widget) widget.value = values[name];
     }
+    this.node.graph?.change?.();
+  }
+
+  reloadStateFromNode() {
+    clearTimeout(this._stateReloadTimer);
+    this._stateReloadTimer = setTimeout(() => {
+      this.restoreStateFromNode();
+      this.render();
+      this.renderSelected();
+      this.updateCounts();
+      this.attachEvents();
+    }, 0);
   }
 
   init() {
@@ -752,7 +766,8 @@ app.registerExtension({
 
       var el = document.createElement("div");
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
-      this.addDOMWidget("audio_browser", "div", el, { serialize: false });
+      var widget = this.addDOMWidget("audio_browser", "div", el, { serialize: false, canvasOnly: true });
+      widget.width = undefined;
 
       var nodeRef = this;
       var applyFrame = function(size) {
@@ -769,6 +784,7 @@ app.registerExtension({
 
       try {
         this._abApp = new AudioBrowser(el, this);
+        this._eagleRestoreUiState = () => this._abApp?.reloadStateFromNode();
       } catch (e) {
         console.error("[AudioBrowser] 初始化失败:", e);
         el.replaceChildren();
@@ -795,6 +811,7 @@ app.registerExtension({
       var nodeRef = this;
       setTimeout(function() {
         if (nodeRef._abApplyFrame) nodeRef._abApplyFrame(nodeRef.size);
+        nodeRef._eagleRestoreUiState?.();
       }, 0);
       return result;
     };
@@ -803,6 +820,7 @@ app.registerExtension({
     nodeType.prototype.onRemoved = function() {
       if (this._abApp) { this._abApp = null; }
       this._abApplyFrame = null;
+      this._eagleRestoreUiState = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

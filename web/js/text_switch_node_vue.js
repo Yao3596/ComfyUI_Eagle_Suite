@@ -1,11 +1,11 @@
 /**
  * 多重文本切换 — 动态输入端口（照抄 KJNodes「合并字符串（多重）」的交互模式）
- * 后端在 INPUT_TYPES 里把 字符串_1 ~ 字符串_32 全部声明成 optional，
+ * 后端在 INPUT_TYPES 里把 字符串_1 ~ 字符串_9 全部声明成 optional，
  * 这里负责把节点上实际显示的端口数量，同步成「输入数量」widget 的值。
  */
 import { app } from "../../../scripts/app.js";
 
-var MAX_INPUTS = 32;
+var MAX_INPUTS = 9;
 var PREFIX = "字符串_";
 
 function syncInputs(node) {
@@ -38,6 +38,7 @@ function syncInputs(node) {
   // 空白（节点创建瞬间先按 32 个端口撑到最大，裁到 4 个之后空出来的那部分）。
   var newSize = node.computeSize();
   node.setSize([Math.max(node.size[0], newSize[0]), newSize[1]]);
+  node.graph?.change?.();
   node.setDirtyCanvas(true, true);
 }
 
@@ -50,8 +51,8 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       onNodeCreated?.apply(this, arguments);
       var node = this;
-      // 等 ComfyUI 把 INPUT_TYPES 里声明的全部 32 个 optional 输入端口都建好之后，
-      // 再裁到「输入数量」widget 的默认值（4），不然一开始就是 32 个端口糊一脸。
+      // 等 ComfyUI 把 INPUT_TYPES 里声明的全部 9 个 optional 输入端口都建好之后，
+      // 再裁到「输入数量」widget 的默认值（4）。
       setTimeout(function () { syncInputs(node); }, 30);
 
       // 「更新输入」是纯前端按钮，Python 的 INPUT_TYPES 里不会有这个 widget

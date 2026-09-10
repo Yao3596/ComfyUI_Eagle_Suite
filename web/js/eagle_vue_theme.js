@@ -14,6 +14,7 @@ const ROOT_SELECTOR = [
   ".lg-root",
   ".eg-root",
   ".dbs-root",
+  ".evfe-root",
   ".whg-root"
 ].join(",");
 
@@ -72,10 +73,14 @@ export function isComfyDefaultTheme() {
 
 const THEME_CSS = `
 .eagle-vue-default-blue{
-  --eagle-vue-bg:#0d1420;--eagle-vue-panel:#121b2a;--eagle-vue-surface:#182337;
-  --eagle-vue-surface-alt:#202d45;--eagle-vue-input:#0e1624;--eagle-vue-border:#2b3b57;
-  --eagle-vue-text:#dce8fa;--eagle-vue-muted:#8fa1bc;--eagle-vue-primary:#4a7de0;
-  --eagle-vue-primary-hover:#6394ef;color-scheme:dark;background:var(--eagle-vue-bg)!important;
+  /* Original Eagle deep-blue palette: neutral dark space, restrained navy
+     surfaces and a bright accent only where interaction needs attention. */
+  --eagle-vue-bg:#101116;--eagle-vue-panel:#15171d;--eagle-vue-surface:#191b23;
+  --eagle-vue-surface-alt:#20232d;--eagle-vue-input:#0c0e13;--eagle-vue-border:#303441;
+  --eagle-vue-text:#e4e7ee;--eagle-vue-muted:#9299aa;--eagle-vue-primary:#2f82db;
+  --eagle-vue-primary-hover:#4c9bea;--eagle-vue-primary-deep:#294f8f;
+  --eagle-vue-hover:#252a36;--eagle-vue-selected:#243451;
+  color-scheme:dark;background:var(--eagle-vue-bg)!important;
   color:var(--eagle-vue-text)!important;
 }
 
@@ -83,14 +88,25 @@ const THEME_CSS = `
 .h3d-root.eagle-vue-default-blue{
   --h3d-theme-bg:var(--eagle-vue-bg);--h3d-fg:var(--eagle-vue-text);
   --h3d-bg:var(--eagle-vue-bg);--h3d-bg2:var(--eagle-vue-panel);--h3d-bg3:var(--eagle-vue-surface);
-  --h3d-bg4:var(--eagle-vue-surface-alt);--h3d-bd:var(--eagle-vue-border);--h3d-bdh:#41577d;
+  --h3d-bg4:var(--eagle-vue-surface-alt);--h3d-bd:var(--eagle-vue-border);--h3d-bdh:#4a5368;
   --h3d-muted:var(--eagle-vue-muted);--h3d-primary:var(--eagle-vue-primary);--h3d-primaryh:var(--eagle-vue-primary-hover);
 }
 .h3c-root.eagle-vue-default-blue{
   --h3c-theme-bg:var(--eagle-vue-bg);--h3c-fg:var(--eagle-vue-text);
   --h3c-bg:var(--eagle-vue-bg);--h3c-bg2:var(--eagle-vue-panel);--h3c-bg3:var(--eagle-vue-surface);
-  --h3c-bg4:var(--eagle-vue-surface-alt);--h3c-bd:var(--eagle-vue-border);--h3c-bdh:#41577d;
+  --h3c-bg4:var(--eagle-vue-surface-alt);--h3c-bd:var(--eagle-vue-border);--h3c-bdh:#4a5368;
   --h3c-muted:var(--eagle-vue-muted);--h3c-primary:var(--eagle-vue-primary);--h3c-primaryh:var(--eagle-vue-primary-hover);
+}
+.h3d-root.eagle-vue-default-blue .h3d-textarea{
+  background:var(--eagle-vue-input)!important;
+}
+.h3d-root.eagle-vue-default-blue .h3d-scene.active{
+  background:var(--eagle-vue-selected)!important;
+  border-color:var(--eagle-vue-primary)!important;
+}
+.h3c-root.eagle-vue-default-blue .h3c-btn.primary{
+  background:var(--eagle-vue-primary-deep)!important;
+  border-color:var(--eagle-vue-primary)!important;
 }
 
 /* Prompt presets and director skill library share ppui tokens. */
@@ -98,10 +114,30 @@ const THEME_CSS = `
 .eagle-prompt-presets-root.eagle-vue-default-blue{
   --ppui-theme-bg:var(--eagle-vue-bg);--ppui-bg:var(--eagle-vue-bg);
   --ppui-panel:var(--eagle-vue-panel);--ppui-surface:var(--eagle-vue-surface);
-  --ppui-surface-alt:var(--eagle-vue-surface-alt);--ppui-hover:#263754;
+  --ppui-surface-alt:var(--eagle-vue-surface-alt);--ppui-hover:var(--eagle-vue-hover);
   --ppui-input:var(--eagle-vue-input);--ppui-border:var(--eagle-vue-border);
   --ppui-text:var(--eagle-vue-text);--ppui-muted:var(--eagle-vue-muted);
   --ppui-primary:var(--eagle-vue-primary);--ppui-primary-hover:var(--eagle-vue-primary-hover);
+}
+.eagle-director-skill-root.eagle-vue-default-blue .pp-skill-item.enabled,
+.eagle-prompt-presets-root.eagle-vue-default-blue .pp-master-item.active{
+  background:var(--eagle-vue-selected)!important;
+  border-color:var(--eagle-vue-primary)!important;
+  box-shadow:inset 3px 0 var(--eagle-vue-primary)!important;
+}
+.eagle-director-skill-root.eagle-vue-default-blue .pp-skill-item.enabled:hover,
+.eagle-prompt-presets-root.eagle-vue-default-blue .pp-master-item.active:hover{
+  background:#2a3c5b!important;
+}
+.eagle-director-skill-root.eagle-vue-default-blue :is(.pp-director-editor,.pp-preview-markdown),
+.eagle-prompt-presets-root.eagle-vue-default-blue :is(.pp-template-source,.pp-output-preview,.pp-markdown-preview,.pp-preview-textarea){
+  background:var(--eagle-vue-input)!important;
+  border-color:var(--eagle-vue-border)!important;
+}
+.eagle-director-skill-root.eagle-vue-default-blue .ppui-btn.primary,
+.eagle-prompt-presets-root.eagle-vue-default-blue .ppui-btn.primary{
+  background:var(--eagle-vue-primary-deep)!important;
+  border-color:var(--eagle-vue-primary)!important;
 }
 
 /* LoRA gallery.  Keep media pixels and semantic status colours intact. */
@@ -110,7 +146,8 @@ const THEME_CSS = `
 .lg-root.eagle-vue-default-blue :is(.lg-main,.lg-quick-columns){background:var(--eagle-vue-bg)!important}
 .lg-root.eagle-vue-default-blue :is(.lg-card,.lg-sel-item,.lg-btn,.lg-quick-crumb.current){background:var(--eagle-vue-surface-alt)!important;border-color:var(--eagle-vue-border)!important}
 .lg-root.eagle-vue-default-blue :is(.lg-srch,.lg-sel,.lg-folder-srch,.lg-quick-search,.lg-sel-manual-input,.lg-sel-weight,.lg-modal-input,.lg-detail-words){background:var(--eagle-vue-input)!important;border-color:var(--eagle-vue-border)!important;color:var(--eagle-vue-text)!important}
-.lg-root.eagle-vue-default-blue :is(.lg-card.sel,.lg-sel-item.enabled){background:#203556!important;border-color:var(--eagle-vue-primary)!important}
+.lg-root.eagle-vue-default-blue :is(.lg-card.sel,.lg-sel-item.enabled){background:var(--eagle-vue-selected)!important;border-color:var(--eagle-vue-primary)!important}
+.lg-root.eagle-vue-default-blue :is(.lg-btn.primary,.lg-btn.on){background:var(--eagle-vue-primary-deep)!important;border-color:var(--eagle-vue-primary)!important;color:#fff!important}
 
 /* Eagle image gallery. */
 .eg-root.eagle-vue-default-blue :is(.eg-bar,.eg-foot){background:var(--eagle-vue-panel)!important;border-color:var(--eagle-vue-border)!important}
@@ -118,7 +155,8 @@ const THEME_CSS = `
 .eg-root.eagle-vue-default-blue :is(.eg-body,.eg-main){background:var(--eagle-vue-bg)!important}
 .eg-root.eagle-vue-default-blue :is(.g-card,.eg-btn,.tg-it){background:var(--eagle-vue-surface-alt)!important;border-color:var(--eagle-vue-border)!important}
 .eg-root.eagle-vue-default-blue :is(.eg-srch,.eg-sel,.eg-idi,.eg-folder-srch,.sd-inp,.cl-trig){background:var(--eagle-vue-input)!important;border-color:var(--eagle-vue-border)!important;color:var(--eagle-vue-text)!important}
-.eg-root.eagle-vue-default-blue .g-card.sel{background:#203556!important;border-color:var(--eagle-vue-primary)!important}
+.eg-root.eagle-vue-default-blue .g-card.sel{background:var(--eagle-vue-selected)!important;border-color:var(--eagle-vue-primary)!important}
+.eg-root.eagle-vue-default-blue :is(.eg-btn-primary,.eg-btn.on){background:var(--eagle-vue-primary-deep)!important;border-color:var(--eagle-vue-primary)!important;color:#fff!important}
 
 /* Danbooru semantic search and gallery. */
 .dbs-root.eagle-vue-default-blue :is(.dbs-preview-bar,.dbs-selected-side,.dbs-search-box,.dbs-selected-header,.dbs-related-header,.dbs-settings-head,.dbs-settings-footer,.dbs-detail-footer){background:var(--eagle-vue-panel)!important;border-color:var(--eagle-vue-border)!important}
@@ -126,7 +164,8 @@ const THEME_CSS = `
 .dbs-root.eagle-vue-default-blue :is(.dbs-layout,.dbs-collapsed-tools,.dbs-settings-content){background:var(--eagle-vue-bg)!important}
 .dbs-root.eagle-vue-default-blue :is(.dbs-btn,.dbg-btn,.dbs-detail-btn,.dbs-select,.dbte-toggle,.dbte-remove,.dbcm-tag,.dbcm-tabs button){background:var(--eagle-vue-surface-alt)!important;border-color:var(--eagle-vue-border)!important;color:var(--eagle-vue-text)!important}
 .dbs-root.eagle-vue-default-blue :is(.dbs-input,.dbs-input-line,.dbte-kind-select,.dbte-translation input,.dbte-weight){background:var(--eagle-vue-input)!important;border-color:var(--eagle-vue-border)!important;color:var(--eagle-vue-text)!important}
-.dbs-root.eagle-vue-default-blue :is(.dbs-row.selected,.dbs-btn.primary,.dbg-btn.primary,.dbs-detail-btn.primary,.dbs-settings-nav button.active){background:#294b79!important;border-color:var(--eagle-vue-primary)!important}
+.dbs-root.eagle-vue-default-blue :is(.dbs-row.selected,.dbs-settings-nav button.active){background:var(--eagle-vue-selected)!important;border-color:var(--eagle-vue-primary)!important}
+.dbs-root.eagle-vue-default-blue :is(.dbs-btn.primary,.dbg-btn.primary,.dbs-detail-btn.primary){background:var(--eagle-vue-primary-deep)!important;border-color:var(--eagle-vue-primary)!important;color:#fff!important}
 
 /* Wallhaven gallery. */
 .whg-root.eagle-vue-default-blue :is(.whg-preview,.whg-header,.whg-footer){background:var(--eagle-vue-panel)!important;border-color:var(--eagle-vue-border)!important}
