@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -31,6 +32,8 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
 TIMELINE_VERSION = 1
 MAX_ASSETS = 128
 MAX_CLIPS = 256
+TIMELINE_PREVIEW_COUNT = 12
+TIMELINE_PREVIEW_WIDTH = 192
 
 
 def _empty_project():
@@ -284,6 +287,93 @@ async def upload_timeline_media(request):
             path.unlink(missing_ok=True)
         except OSError:
             pass
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+
+
+def _timeline_preview_frames(path, count=TIMELINE_PREVIEW_COUNT, width=TIMELINE_PREVIEW_WIDTH):
+    """Extract a small, cached contact strip without decoding the full video."""
+    import cv2
+
+    count = max(3, min(32, int(count or TIMELINE_PREVIEW_COUNT)))
+    width = max(96, min(320, int(width or TIMELINE_PREVIEW_WIDTH)))
+    stat = os.stat(path)
+    fingerprint = f"{os.path.realpath(path)}|{stat.st_size}|{stat.st_mtime_ns}|{count}|{width}"
+    cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
+    relative_dir = pathlib.Path("eagle_timeline_thumbnails", cache_key)
+    output_dir = pathlib.Path(folder_paths.get_temp_directory(), relative_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    capture = cv2.VideoCapture(path)
+    if not capture.isOpened():
+        raise ValueError("无法解码视频预览帧")
+    fps = _safe_number(capture.get(cv2.CAP_PROP_FPS), 0, 0, 1000)
+    frame_count = max(0, int(_safe_number(capture.get(cv2.CAP_PROP_FRAME_COUNT), 0, 0)))
+    source_width = max(0, int(_safe_number(capture.get(cv2.CAP_PROP_FRAME_WIDTH), 0, 0)))
+    source_height = max(0, int(_safe_number(capture.get(cv2.CAP_PROP_FRAME_HEIGHT), 0, 0)))
+    metadata = _probe_media(path)
+    duration = _safe_number(metadata.get("duration"), 0, 0, 86400)
+    if duration <= 0 and fps > 0 and frame_count > 0:
+        duration = frame_count / fps
+
+    sample_count = min(count, frame_count) if frame_count > 0 else count
+    sample_count = max(1, sample_count)
+    if frame_count > 1:
+        indices = np.linspace(0, frame_count - 1, sample_count, dtype=np.int64).tolist()
+    else:
+        indices = [0] * sample_count
+
+    frames = []
+    try:
+        for order, frame_index in enumerate(indices):
+            filename = f"frame_{order:03d}.jpg"
+            output_path = output_dir / filename
+            timestamp = frame_index / fps if fps > 0 else duration * order / max(1, sample_count - 1)
+            if not output_path.is_file():
+                if frame_count > 0:
+                    capture.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+                else:
+                    capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp) * 1000.0)
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    continue
+                height = max(1, int(round(frame.shape[0] * width / max(1, frame.shape[1]))))
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                if not cv2.imwrite(str(output_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82]):
+                    continue
+            frames.append({
+                "filename": filename,
+                "subfolder": relative_dir.as_posix(),
+                "type": "temp",
+                "time": round(max(0.0, timestamp), 6),
+                "frame": int(frame_index),
+            })
+    finally:
+        capture.release()
+    if not frames:
+        raise ValueError("视频中没有可提取的预览帧")
+    return {
+        "frames": frames,
+        "duration": round(duration, 6),
+        "fps": round(fps, 6),
+        "width": source_width,
+        "height": source_height,
+    }
+
+
+@route("GET", "/eagle/media_timeline/preview_frames")
+async def timeline_preview_frames(request):
+    if not is_trusted_browser_request(request):
+        return web.json_response({"success": False, "error": "仅允许同源界面读取"}, status=403)
+    filename = request.query.get("filename", "")
+    path = _input_media_path(filename)
+    if not path or pathlib.Path(path).suffix.lower() not in VIDEO_EXTENSIONS:
+        return web.json_response({"success": False, "error": "视频文件不存在或不受支持"}, status=404)
+    try:
+        count = int(request.query.get("count", TIMELINE_PREVIEW_COUNT))
+        width = int(request.query.get("width", TIMELINE_PREVIEW_WIDTH))
+        result = await asyncio.to_thread(_timeline_preview_frames, path, count, width)
+        return web.json_response({"success": True, **result})
+    except (OSError, ValueError, TypeError) as error:
         return web.json_response({"success": False, "error": str(error)}, status=400)
 
 
@@ -612,6 +702,10 @@ class EagleMediaTimelineEditor:
         frame_source = str(final_video if final_video.is_file() else video_only)
         if wants_frames and os.path.isfile(frame_source):
             images, image_count = _decode_frames(frame_source, frame_step, max_frames)
+        elif wants_video and os.path.isfile(frame_source):
+            # Keep the IMAGE output meaningful in the default lightweight mode:
+            # one real preview frame instead of a misleading 64x64 black tensor.
+            images, image_count = _decode_frames(frame_source, 1, 1)
         else:
             images, image_count = torch.zeros((1, 64, 64, 3), dtype=torch.float32), 0
         video_output = VideoFromFile(str(final_video)) if wants_video and final_video.is_file() else None
@@ -625,6 +719,8 @@ class EagleMediaTimelineEditor:
         )
         if wants_frames:
             info += f" · 输出帧 {image_count}"
+        elif wants_video and image_count:
+            info += " · 图像口首帧预览"
         preview_url = _register_video_preview(str(final_video)) if final_video.is_file() else ""
         return {
             "ui": {

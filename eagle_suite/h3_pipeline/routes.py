@@ -16,6 +16,7 @@ import folder_paths
 from ..route_registry import route
 from ..logger import logger
 from ..utils import is_safe_path, strip_path
+from .review_runtime import resolve_review
 
 
 CHAIN_SUBDIR = "h3_eagle_chains"
@@ -115,7 +116,7 @@ async def post_review(request):
         return web.json_response({"error": f"JSON 解析失败: {e}"}, status=400)
 
     decision = body.get("decision", "").strip().lower()
-    if decision not in ("approve", "retry", "reroll", "stop"):
+    if decision not in ("approve", "retry", "reroll", "stop", "approve_stop", "resume"):
         return web.json_response({"error": f"无效 decision: {decision}"}, status=400)
 
     token = body.get("token", "")
@@ -126,7 +127,8 @@ async def post_review(request):
     except Exception as e:
         return web.json_response({"error": f"写入决策失败: {e}"}, status=500)
 
-    return web.json_response({"status": "ok", "decision": decision})
+    resolved = resolve_review(token, body)
+    return web.json_response({"status": "ok", "decision": decision, "resolved": resolved})
 
 
 @route("GET", "/eagle_h3_pipeline/preview")

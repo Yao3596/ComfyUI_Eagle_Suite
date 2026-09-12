@@ -40,10 +40,18 @@ const H3C_CSS = `
 .h3c-btn.primary{background:var(--h3c-primary); color:#fff; border-color:var(--h3c-primary);}
 .h3c-btn.danger:hover{border-color:var(--h3c-danger); color:var(--h3c-danger);}
 .h3c-btn:disabled{opacity:.5; cursor:not-allowed;}
+.h3c-input,.h3c-textarea{background:var(--h3c-bg);color:var(--h3c-fg);border:1px solid var(--h3c-bd);border-radius:6px;padding:6px;font:inherit;min-width:0;}
+.h3c-input{width:120px;}.h3c-textarea{width:100%;min-height:66px;resize:vertical;}
 .h3c-video{width:100%; border-radius:6px; background:#000;}
 .h3c-root.compact{padding:5px;}
 .h3c-root.compact .h3c-card{padding:7px;gap:4px;}
-.h3c-root.review .h3c-video{display:block;max-height:190px;object-fit:contain;}
+.h3c-root.review .h3c-video{display:block;max-height:220px;object-fit:contain;}
+.h3c-review-history{display:flex;gap:5px;overflow-x:auto;padding:2px 0 4px;scrollbar-width:thin;}
+.h3c-review-take{flex:0 0 auto;min-width:64px;padding:4px 8px;}
+.h3c-review-take.active{background:var(--h3c-primary);border-color:var(--h3c-primary);color:#fff;}
+.h3c-input,.h3c-textarea{background:var(--h3c-bg);color:var(--h3c-fg);border:1px solid var(--h3c-bd);border-radius:6px;padding:5px 7px;font:inherit;}
+.h3c-input{width:110px;}
+.h3c-textarea{width:100%;min-height:68px;resize:vertical;}
 .h3c-bar{height:6px; background:#262a33; border-radius:3px; overflow:hidden; margin-top:4px;}
 .h3c-bar>i{display:block; height:100%; background:var(--h3c-primary); transition:width .3s;}
 .h3c-preview-img{max-width:100%; max-height:180px; border-radius:6px; border:1px solid var(--h3c-bd);}
@@ -68,20 +76,34 @@ function setWidgetValue(node, name, value) {
 }
 
 function hideReviewDecisionWidget(node) {
-  const widget = getWidget(node, "review_decision");
-  if (!widget) return false;
-  widget.type = "hidden";
-  widget.hidden = true;
-  widget.computeSize = () => [0, -4];
-  return true;
+  let found = false;
+  for (const name of [
+    "review_decision", "retry_prompt", "retry_seed", "retry_length",
+    "resume_scene", "assemble_partial_on_stop", "auto_continue_timeout_minutes",
+    "unload_models_while_waiting",
+  ]) {
+    const widget = getWidget(node, name);
+    if (!widget) continue;
+    widget.type = "hidden";
+    widget.hidden = true;
+    widget.computeSize = () => [0, -4];
+    found = true;
+  }
+  return found;
 }
 
 function resizeReviewPanel(node, vueApp, review = {}) {
   const widget = vueApp && vueApp._h3cWidget;
   if (!widget) return;
-  const hasPreview = Boolean(buildViewUrl(review.preview_clip));
+  const hasPreview = Boolean(
+    buildViewUrl(review.preview_clip)
+    || (review.history || []).some(item => buildViewUrl(item && item.clip_path))
+  );
+  const hasHistory = (review.history || []).length > 1;
   const hasActions = Boolean(review.awaiting_review);
-  const panelHeight = hasPreview ? (hasActions ? 300 : 250) : (hasActions ? 145 : 105);
+  const panelHeight = hasPreview
+    ? (hasActions ? (hasHistory ? 560 : 520) : (hasHistory ? 330 : 290))
+    : (hasActions ? 335 : 115);
   const nodeHeight = panelHeight + 225;
   widget._h3cHeight = panelHeight;
 
@@ -100,6 +122,11 @@ function resizeReviewPanel(node, vueApp, review = {}) {
 
 function repairNativeEndWidgets(node) {
   const filename = getWidget(node, "filename");
+  if (filename) {
+    filename.label = "文件名前缀";
+    filename.options ||= {};
+    filename.options.tooltip = "自动保存为 前缀_0001、前缀_0002…，不会覆盖已有视频";
+  }
   const format = getWidget(node, "format");
   const fps = getWidget(node, "fps_override");
   const formats = ["mp4", "mov", "mkv"];
@@ -115,6 +142,20 @@ function repairNativeEndWidgets(node) {
   const eagleFolder = getWidget(node, "eagle_folder");
   if (localPath && localPath.value == null) localPath.value = "";
   if (eagleFolder && eagleFolder.value == null) eagleFolder.value = "";
+}
+
+function repairReferenceConditionWidgets(node, serialized) {
+  const values = serialized && Array.isArray(serialized.widgets_values)
+    ? serialized.widgets_values
+    : [];
+  // V1 把 prompt/width/height/length 保存为四个本地控件；V2 将它们改为
+  // 强制数据端口。按旧数组尾部恢复真正的配置控件，防止值整体左移。
+  if (values.length >= 8) {
+    setWidgetValue(node, "reference_scope", values[4]);
+    setWidgetValue(node, "ref_image_size", values[5]);
+    setWidgetValue(node, "use_context_guide", values[6]);
+    setWidgetValue(node, "has_context", values[7]);
+  }
 }
 
 function buildViewUrl(filePath) {
@@ -220,21 +261,24 @@ function createStartPanel() {
   return {
     setup() {
       const info = ref({});
+      const hasPlan = computed(() => Number(info.value.total_shots || 0) > 0);
       const pct = computed(() => {
-        const c = info.value.current_index || 0;
+        const c = info.value.completed_shots ?? info.value.current_index ?? 0;
         const t = info.value.total_shots || 1;
         return Math.min(100, Math.max(0, (c / t) * 100));
       });
-      return { info, pct };
+      return { info, pct, hasPlan };
     },
     template: `
       <div class="h3c-root">
         <div class="h3c-card">
           <div class="h3c-title">🦅 H3 链 · 开始</div>
-          <div class="h3c-row">
-            <span class="h3c-muted">进度: {{ (info.current_index || 0) + 1 }} / {{ info.total_shots || 0 }}</span>
+          <div class="h3c-row" v-if="hasPlan">
+            <span class="h3c-muted">当前: {{ Math.min((info.current_index || 0) + 1, info.total_shots) }} / {{ info.total_shots }}</span>
             <span class="h3c-muted">模式: {{ info.mode || 'auto' }}</span>
+            <span class="h3c-muted">单次队列 · 动态 {{ info.total_shots }} 场景</span>
           </div>
+          <div class="h3c-muted" v-else>等待导演台计划同步…</div>
           <div class="h3c-bar"><i :style="{ width: pct + '%' }"></i></div>
           <div v-if="info.summary" class="h3c-muted" style="margin-top:4px;">{{ info.summary }}</div>
         </div>
@@ -251,35 +295,119 @@ function createReviewPanel(node) {
     setup() {
       const review = ref({});
       const busy = ref(false);
-      const previewUrl = computed(() => buildViewUrl(review.value.preview_clip));
+      const selectedIndex = ref(-1);
+      const retryPrompt = ref("");
+      const retrySeed = ref(-1);
+      const retryLength = ref(0);
+      const assemblePartial = ref(Boolean(getWidget(node, "assemble_partial_on_stop")?.value ?? true));
+      const timeoutMinutes = ref(Number(getWidget(node, "auto_continue_timeout_minutes")?.value || 0));
+      const unloadModels = ref(Boolean(getWidget(node, "unload_models_while_waiting")?.value || false));
+      const history = computed(() => Array.isArray(review.value.history) ? review.value.history : []);
+      const selectedTake = computed(() => {
+        const items = history.value;
+        if (!items.length) return null;
+        const index = selectedIndex.value >= 0 && selectedIndex.value < items.length
+          ? selectedIndex.value
+          : items.length - 1;
+        return items[index];
+      });
+      const previewUrl = computed(() => buildViewUrl(
+        (selectedTake.value && selectedTake.value.clip_path) || review.value.preview_clip
+      ));
+      const selectedLabel = computed(() => {
+        const take = selectedTake.value;
+        if (!take) return `场景 ${(review.value.current_index || 0) + 1}`;
+        return `场景 ${Number(take.index || 0) + 1} · r${String(Number(take.revision || 1)).padStart(4, "0")}`;
+      });
 
-      function decide(decision) {
+      async function decide(decision) {
         busy.value = true;
+        setWidgetValue(node, "retry_prompt", retryPrompt.value || "");
+        setWidgetValue(node, "retry_seed", Number(retrySeed.value ?? -1));
+        setWidgetValue(node, "retry_length", Number(retryLength.value || 0));
+        setWidgetValue(node, "assemble_partial_on_stop", Boolean(assemblePartial.value));
+        setWidgetValue(node, "auto_continue_timeout_minutes", Number(timeoutMinutes.value || 0));
+        setWidgetValue(node, "unload_models_while_waiting", Boolean(unloadModels.value));
+        let selectedScene = 0;
+        if (decision === "resume") {
+          const take = selectedTake.value;
+          selectedScene = take ? Number(take.index || 0) + 1 : 0;
+          setWidgetValue(node, "resume_scene", selectedScene);
+        }
+        const token = review.value.token || "";
+        if (token && review.value.run_name) {
+          try {
+            const response = await api.fetchApi(
+              `/eagle_h3_pipeline/review?run=${encodeURIComponent(review.value.run_name)}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  token,
+                  decision,
+                  retry_prompt: retryPrompt.value || "",
+                  retry_seed: Number(retrySeed.value ?? -1),
+                  retry_length: Number(retryLength.value || 0),
+                  resume_scene: selectedScene,
+                  assemble_partial_on_stop: Boolean(assemblePartial.value),
+                }),
+              },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return;
+          } catch (error) {
+            console.warn("[EagleH3Pipeline] live review resume failed; falling back to queue", error);
+          }
+        }
         setWidgetValue(node, "review_decision", decision);
         queuePrompt();
         setTimeout(() => { busy.value = false; }, 800);
       }
 
-      return { review, busy, previewUrl, decide };
+      return {
+        review, busy, history, selectedIndex, selectedTake, selectedLabel, previewUrl,
+        retryPrompt, retrySeed, retryLength, assemblePartial, timeoutMinutes, unloadModels, decide,
+      };
     },
     template: `
       <div class="h3c-root">
         <div class="h3c-card">
           <div class="h3c-title">🦅 H3 链 · 审查门</div>
           <div class="h3c-row">
-            <span class="h3c-muted">Shot {{ (review.current_index || 0) + 1 }}</span>
+            <span class="h3c-muted">{{ selectedLabel }}</span>
+            <span class="h3c-muted" v-if="review.clip_count">累计预览: {{ history.length }} / {{ review.clip_count }}</span>
             <span class="h3c-muted" v-if="review.mode">模式: {{ review.mode }}</span>
+          </div>
+          <div class="h3c-review-history" v-if="history.length > 1">
+            <button v-for="(take, index) in history" :key="take.index + ':' + take.clip_path"
+                    class="h3c-btn h3c-review-take"
+                    :class="{ active: (selectedIndex < 0 ? history.length - 1 : selectedIndex) === index }"
+                    @click="selectedIndex = index">
+              S{{ Number(take.index || 0) + 1 }} · r{{ String(Number(take.revision || 1)).padStart(4, '0') }}
+            </button>
           </div>
           <div v-if="previewUrl" style="margin:6px 0;">
             <video class="h3c-video" :src="previewUrl" controls></video>
           </div>
           <div v-else class="h3c-muted">等待预览视频…</div>
           <div v-if="review.summary" class="h3c-muted">{{ review.summary }}</div>
+          <template v-if="review.awaiting_review">
+            <div class="h3c-muted">重试可修改当前镜头提示词、种子和 H3 原始帧数（必须满足 17k+5）。</div>
+            <textarea class="h3c-textarea" v-model="retryPrompt" placeholder="当前镜头提示词"></textarea>
+            <div class="h3c-row">
+              <label class="h3c-muted">种子 <input class="h3c-input" type="number" v-model.number="retrySeed"></label>
+              <label class="h3c-muted">length <input class="h3c-input" type="number" min="5" max="3592" step="17" v-model.number="retryLength"></label>
+              <label class="h3c-muted"><input type="checkbox" v-model="assemblePartial"> 停止时合成已批准片段</label>
+              <label class="h3c-muted">自动通过(分) <input class="h3c-input" type="number" min="0" step="0.5" v-model.number="timeoutMinutes"></label>
+              <label class="h3c-muted"><input type="checkbox" v-model="unloadModels"> 等待时卸载模型</label>
+            </div>
+          </template>
           <div v-if="review.awaiting_review" class="h3c-row" style="margin-top:6px;">
             <button class="h3c-btn primary" @click="decide('approve')" :disabled="busy">批准 & 继续</button>
-            <button class="h3c-btn" @click="decide('retry')" :disabled="busy">重试 (改提示/种子/时长)</button>
-            <button class="h3c-btn" @click="decide('reroll')" :disabled="busy">重roll 种子</button>
-            <button class="h3c-btn danger" @click="decide('stop')" :disabled="busy">停止</button>
+            <button class="h3c-btn" @click="decide('retry')" :disabled="busy">按修改重试</button>
+            <button class="h3c-btn" @click="decide('reroll')" :disabled="busy">换种子重抽</button>
+            <button class="h3c-btn" v-if="selectedTake" @click="decide('resume')" :disabled="busy">从所选场景重做</button>
+            <button class="h3c-btn danger" @click="decide('approve_stop')" :disabled="busy">批准并停止</button>
           </div>
           <div v-else-if="review.decision" class="h3c-muted" style="margin-top:6px;">
             已决策: {{ review.decision }}
@@ -288,6 +416,43 @@ function createReviewPanel(node) {
       </div>
     `,
   };
+}
+
+function applyReviewPayload(node, payload) {
+  const view = node?._h3cVueApp?._instance?.data;
+  if (!view || !payload) return;
+  view.busy.value = false;
+  view.review.value = payload;
+  if (payload.awaiting_review) {
+    view.retryPrompt.value = payload.prompt || "";
+    view.retrySeed.value = Number(payload.seed ?? -1);
+    view.retryLength.value = Number(payload.length || 0);
+  }
+  if (payload.reset_decision) {
+    setWidgetValue(node, "review_decision", "");
+    setWidgetValue(node, "resume_scene", 0);
+  }
+  setTimeout(() => resizeReviewPanel(node, node._h3cVueApp, payload), 0);
+}
+
+let reviewEventInstalled = false;
+function installLiveReviewEvent() {
+  if (reviewEventInstalled) return;
+  reviewEventInstalled = true;
+  api.addEventListener("eagle_h3_review_pending", event => {
+    const payload = event?.detail || {};
+    const rawId = String(payload.node_id || "");
+    let node = rawId && app.graph?.getNodeById?.(Number(rawId));
+    if (!node) {
+      const candidates = (app.graph?._nodes || []).filter(
+        item => item.type === "EagleH3CheckpointReviewNode"
+      );
+      node = candidates.length === 1 ? candidates[0] : candidates.find(
+        item => String(item.id) === rawId || rawId.endsWith(`.${item.id}`)
+      );
+    }
+    if (node) applyReviewPayload(node, payload);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -397,10 +562,338 @@ function slotIndex(node, side, name) {
   return slots.findIndex(slot => slot && slot.name === name);
 }
 
-function connectNamed(fromNode, outputName, toNode, inputName) {
+function connectNamed(fromNode, outputName, toNode, inputName, options = {}) {
   const output = slotIndex(fromNode, "output", outputName);
   const input = slotIndex(toNode, "input", inputName);
-  if (output >= 0 && input >= 0) fromNode.connect(output, toNode, input);
+  if (output < 0 || input < 0) return false;
+  const target = toNode.inputs && toNode.inputs[input];
+  const existing = target && target.link != null
+    ? graphLink(toNode.graph, target.link)
+    : null;
+  if (existing && existing.origin_id === fromNode.id && existing.origin_slot === output) {
+    return false;
+  }
+  if (options.onlyIfEmpty && target && target.link != null) return false;
+  fromNode.connect(output, toNode, input);
+  return true;
+}
+
+function uniqueNode(graph, type) {
+  const matches = (graph?._nodes || []).filter(node => node && node.type === type);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function inputLinkSource(graph, node, inputName) {
+  const inputIndex = slotIndex(node, "input", inputName);
+  const input = inputIndex >= 0 && node.inputs ? node.inputs[inputIndex] : null;
+  const link = input ? graphLink(graph, input.link) : null;
+  const source = link && graph?.getNodeById ? graph.getNodeById(link.origin_id) : null;
+  return { inputIndex, input, link, source };
+}
+
+function primaryH3Sampler(graph, reference) {
+  if (!(graph && reference)) return null;
+  const candidates = (graph._nodes || []).filter(node => {
+    if (!node || node.type !== "SamplerCustomAdvanced") return false;
+    return inputLinkSource(graph, node, "latent_image").source?.id === reference.id;
+  });
+  return candidates.find(node => (
+    inputLinkSource(graph, node, "sigmas").source?.type === "BasicScheduler"
+  )) || candidates[0] || null;
+}
+
+function samplerLatentOutputName(sampler) {
+  const preferred = (sampler?.outputs || []).find(output => output?.name === "output");
+  const latent = preferred || (sampler?.outputs || []).find(output => output?.type === "LATENT");
+  return latent?.name || "";
+}
+
+function repairMediaBridgePorts(node) {
+  if (!node || node.type !== "EagleH3MediaBridgeNode" || !node.outputs?.[1]) return false;
+  const aliases = {
+    reference_images: "ref_images",
+    video_frames_1: "ref_video_0",
+    video_frames_2: "ref_video_1",
+    video_frames_3: "ref_video_2",
+    video_audio_1: "ref_video_audio_0",
+    video_audio_2: "ref_video_audio_1",
+    video_audio_3: "ref_video_audio_2",
+    reference_audio_1: "ref_audio_0",
+    reference_audio_2: "ref_audio_1",
+    reference_audio_3: "ref_audio_2",
+  };
+  let changed = false;
+  (node.inputs || []).forEach(input => {
+    if (aliases[input?.name]) {
+      input.name = aliases[input.name];
+      changed = true;
+    }
+  });
+  (node.outputs || []).forEach(output => {
+    if (aliases[output?.name]) {
+      output.name = aliases[output.name];
+      changed = true;
+    }
+  });
+  const output = node.outputs[1];
+  changed = output.name !== "first_reference_image" || output.shape != null || changed;
+  output.name = "first_reference_image";
+  output.localized_name = "首张参考图";
+  // V1 将该槽声明为 Comfy 列表（GRID shape），但下游 seed_image
+  // 需要普通 IMAGE。清除序列化遗留的列表形状，后端同步返回单张图。
+  if (output.shape != null) delete output.shape;
+  return changed;
+}
+
+function repairShotContextPorts(node) {
+  if (!node || node.type !== "EagleH3ShotContextNode") return false;
+  const output = (node.outputs || []).find(slot => slot?.name === "raw_frames");
+  if (!output) return false;
+  output.name = "length";
+  output.localized_name = "H3 生成帧长";
+  return true;
+}
+
+function repairMediaBridgeSeedLink(graph) {
+  const bridge = uniqueNode(graph, "EagleH3MediaBridgeNode");
+  const shot = uniqueNode(graph, "EagleH3ShotContextNode");
+  if (!(bridge && shot)) return 0;
+  repairMediaBridgePorts(bridge);
+  const linked = inputLinkSource(graph, shot, "seed_image");
+  if (!(linked.source && linked.source.id === bridge.id && linked.link)) return 0;
+  if (linked.link.origin_slot === 1) return 0;
+  // V1 全工作流误把槽 2（video_frames_1/ref_video_0）接到 seed_image。
+  if (linked.link.origin_slot !== 2) return 0;
+  return connectNamed(
+    bridge, "first_reference_image", shot, "seed_image", { onlyIfEmpty: false }
+  ) ? 1 : 0;
+}
+
+function disconnectDirectorPlanOverride(graph, director, plan) {
+  const linked = inputLinkSource(graph, plan, "plan_json_input");
+  if (!(linked.source && linked.source.id === director.id && linked.link)) return false;
+  const output = linked.source.outputs?.[linked.link.origin_slot];
+  if (!output || output.name !== "context_loop_plan_json") return false;
+  if (typeof plan.disconnectInput === "function") plan.disconnectInput(linked.inputIndex);
+  else if (typeof graph.removeLink === "function") {
+    graph.removeLink(linked.link.id ?? linked.input?.link);
+  }
+  return true;
+}
+
+function syncContextLoopPlanWidget(director) {
+  const graph = director?.graph;
+  const plan = uniqueNode(graph, "MiniMaxH3ChainPlan");
+  const exporter = director?._h3ContextLoopPlanJson;
+  const widget = plan?.widgets?.find(item => item && item.name === "plan_json");
+  if (!(plan && widget && typeof exporter === "function")) return false;
+  let value = "";
+  try {
+    value = String(exporter() || "");
+    JSON.parse(value);
+  } catch (error) {
+    console.warn("[H3Pipeline] 导演台计划镜像不是有效 JSON", error);
+    return false;
+  }
+  if (!value || String(widget.value || "") === value) return false;
+  widget.value = value;
+  if (typeof widget.callback === "function") widget.callback(value, widget, plan);
+  plan.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+function syncNativeLoopStartInfo(director) {
+  const graph = director?.graph;
+  const start = uniqueNode(graph, "EagleH3NativeLoopStartNode");
+  const exporter = director?._h3ContextLoopPlanJson;
+  const infoRef = start?._h3cVueApp?._instance?.data?.info;
+  if (!(start && infoRef && typeof exporter === "function")) return false;
+  let mirror;
+  try {
+    mirror = JSON.parse(String(exporter() || "{}"));
+  } catch (error) {
+    console.warn("[H3Pipeline] 无法同步原生循环场景数", error);
+    return false;
+  }
+  const total = Array.isArray(mirror.shots) ? mirror.shots.length : 0;
+  const old = infoRef.value || {};
+  const running = old.run_name || old.base_dir;
+  infoRef.value = {
+    ...old,
+    current_index: running ? Number(old.current_index || 0) : 0,
+    completed_shots: running ? Number(old.completed_shots || 0) : 0,
+    total_shots: total,
+    clip_count: total,
+    mode: old.mode || "auto",
+    queue_contract: "single_queue_dynamic_scenes",
+  };
+  start.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+function installContextLoopPlanSync(director) {
+  if (!director) return;
+  director._eagleSyncContextLoopBridges = () => {
+    const thirdParty = syncContextLoopPlanWidget(director);
+    const nativeLoop = syncNativeLoopStartInfo(director);
+    return thirdParty || nativeLoop;
+  };
+  // Director Vue 在 onNodeCreated 中挂载；旧图 configure 后可能晚一个 tick
+  // 才暴露 exporter，小延时重试能避免首次刷新仍显示空计划。
+  [0, 50, 250].forEach(delay => setTimeout(() => {
+    director._eagleSyncContextLoopBridges?.();
+  }, delay));
+}
+
+function repairNativeCoreLinks(graph, options = {}) {
+  if (!graph) return 0;
+  const director = uniqueNode(graph, "EagleH3DirectorNode");
+  const start = uniqueNode(graph, "EagleH3NativeLoopStartNode");
+  const shot = uniqueNode(graph, "EagleH3ShotContextNode");
+  const reference = uniqueNode(graph, "EagleH3ReferenceConditionNode");
+  const trim = uniqueNode(graph, "EagleH3FrameTrimNode");
+  const review = uniqueNode(graph, "EagleH3CheckpointReviewNode");
+  const end = uniqueNode(graph, "EagleH3NativeLoopEndNode");
+  if (!(director && start && shot && reference && trim && review && end)) return 0;
+  const sampler = primaryH3Sampler(graph, reference);
+  const samplerOutput = samplerLatentOutputName(sampler);
+
+  const links = [
+    [director, "plan", start, "plan"],
+    [director, "media_bundle", reference, "media_bundle"],
+    [start, "state", shot, "state"],
+    [start, "width", reference, "width"],
+    [start, "height", reference, "height"],
+    [start, "fps", trim, "fps"],
+    [shot, "state", reference, "state"],
+    [shot, "prompt", reference, "prompt"],
+    // length 是逐镜数据，不允许静默退回固定 124 帧。
+    [shot, "length", reference, "length"],
+    [shot, "context_image", reference, "context_image"],
+    [shot, "has_context", reference, "has_context"],
+    [reference, "trim_frames", trim, "trim_frames"],
+    [shot, "delivered_frames", trim, "target_frames"],
+    [shot, "state", review, "state"],
+    [trim, "images", review, "images"],
+    [trim, "audio", review, "audio"],
+    [trim, "images_with_overlap", review, "images_with_overlap"],
+    [start, "flow", end, "flow"],
+    [review, "state", end, "state"],
+    [trim, "images", end, "images"],
+  ];
+  if (sampler && samplerOutput) {
+    links.push(
+      [sampler, samplerOutput, review, "sampled_latent"],
+      [sampler, samplerOutput, end, "sampled_latent"],
+    );
+  }
+  let repaired = 0;
+  links.forEach(args => {
+    if (connectNamed(...args, { onlyIfEmpty: options.onlyIfEmpty !== false })) repaired += 1;
+  });
+  if (repaired) graph.setDirtyCanvas(true, true);
+  return repaired;
+}
+
+function repairContextLoopAuthoringLinks(graph, options = {}) {
+  if (!graph) return 0;
+  const director = uniqueNode(graph, "EagleH3DirectorNode");
+  const editors = (graph._nodes || []).filter(node => node && [
+    "MiniMaxH3ChainScenePromptEditor",
+    "MiniMaxH3ChainRichScenePromptEditor",
+    "MiniMaxH3ChainPlanStudio",
+  ].includes(node.type));
+  if (!director) return 0;
+
+  let plan = uniqueNode(graph, "MiniMaxH3ChainPlan");
+  let repaired = 0;
+  // 旧图常用 Eagle State Interop 伪装 Plan 桥。第三方编辑器必须能回溯
+  // 到真实 MiniMaxH3ChainPlan；只在单导演台+单编辑器时自动补建，避免猜链。
+  if (!plan && options.createMissing && editors.length === 1) {
+    const editor = editors[0];
+    plan = createH3Node(graph, "MiniMaxH3ChainPlan", [
+      Math.round(editor.pos[0] - 620),
+      Math.round(editor.pos[1]),
+    ]);
+    if (plan) repaired += 1;
+  }
+  if (!plan) return 0;
+
+  // plan_json_input 是后端强制覆盖。若一直连着导演台，第三方编辑器写回
+  // plan_json 的修改会被忽略。改用前端镜像初始值，才能同时正常预览和编辑。
+  if (disconnectDirectorPlanOverride(graph, director, plan)) repaired += 1;
+  installContextLoopPlanSync(director);
+  if (syncContextLoopPlanWidget(director)) repaired += 1;
+
+  editors.forEach(editor => {
+    const linked = inputLinkSource(graph, editor, "plan");
+    const { input, link, source } = linked;
+    const directFromEagle = source && source.type === "EagleH3DirectorNode";
+    const interopInput = source && source.type === "EagleH3StateInteropNode"
+      ? slotIndex(source, "input", "source")
+      : -1;
+    const interopLink = interopInput >= 0 && source.inputs
+      ? graphLink(graph, source.inputs[interopInput]?.link)
+      : null;
+    const interopSource = interopLink && graph.getNodeById
+      ? graph.getNodeById(interopLink.origin_id)
+      : null;
+    const badInteropBridge = Boolean(interopSource && interopSource.type === "EagleH3DirectorNode");
+    if (!input || input.link == null || directFromEagle || badInteropBridge) {
+      if (connectNamed(plan, "plan", editor, "plan", { onlyIfEmpty: false })) repaired += 1;
+    }
+  });
+
+  // 编辑结果必须进入 Loop Start，否则 UI 看似可编辑、执行仍用导演台旧计划。
+  const loopStart = uniqueNode(graph, "MiniMaxH3ChainLoopStart");
+  const editor = editors.length === 1 ? editors[0] : null;
+  if (loopStart && editor && connectNamed(
+    editor, "plan", loopStart, "plan", { onlyIfEmpty: false }
+  )) repaired += 1;
+
+  if (repaired) graph.setDirtyCanvas(true, true);
+  return repaired;
+}
+
+function outputTargetsType(graph, node, outputName, targetType) {
+  const outputIndex = slotIndex(node, "output", outputName);
+  const output = outputIndex >= 0 && node.outputs ? node.outputs[outputIndex] : null;
+  return Boolean(output && (output.links || []).some(linkId => {
+    const link = graphLink(graph, linkId);
+    const target = link && graph.getNodeById ? graph.getNodeById(link.target_id) : null;
+    return target && target.type === targetType;
+  }));
+}
+
+function repairContextLoopReferenceLinks(graph, options = {}) {
+  if (!graph) return 0;
+  const current = uniqueNode(graph, "MiniMaxH3ChainCurrent");
+  const reference = uniqueNode(graph, "EagleH3ReferenceConditionNode");
+  if (!(current && reference)) return 0;
+  // 只在明确接入第三方 Context 的混合参考链中自动改线；右键手动修复可强制。
+  const activeThirdPartyChain = outputTargetsType(
+    graph, reference, "positive", "MiniMaxH3ChainContext"
+  );
+  if (!options.force && !activeThirdPartyChain) return 0;
+
+  let repaired = 0;
+  for (const [outputName, inputName] of [
+    ["state", "state"],
+    ["prompt", "prompt"],
+    ["length", "length"],
+    ["width", "width"],
+    ["height", "height"],
+  ]) {
+    if (connectNamed(current, outputName, reference, inputName, { onlyIfEmpty: false })) {
+      repaired += 1;
+    }
+  }
+  const director = uniqueNode(graph, "EagleH3DirectorNode");
+  if (director && connectNamed(
+    director, "media_bundle", reference, "media_bundle", { onlyIfEmpty: true }
+  )) repaired += 1;
+  if (repaired) graph.setDirtyCanvas(true, true);
+  return repaired;
 }
 
 function createH3Node(graph, type, pos) {
@@ -423,7 +916,7 @@ function addNextCoreNode(source, type) {
   else if (source.type === "EagleH3ShotContextNode") {
     connectNamed(source, "state", next, "state");
     connectNamed(source, "prompt", next, "prompt");
-    connectNamed(source, "raw_frames", next, "length");
+    connectNamed(source, "length", next, "length");
     connectNamed(source, "context_image", next, "context_image");
     connectNamed(source, "has_context", next, "has_context");
     const starts = (graph._nodes || []).filter(node => node.type === "EagleH3NativeLoopStartNode");
@@ -438,6 +931,8 @@ function addNextCoreNode(source, type) {
     connectNamed(source, "trim_frames", next, "trim_frames");
     const starts = (graph._nodes || []).filter(node => node.type === "EagleH3NativeLoopStartNode");
     if (starts.length === 1) connectNamed(starts[0], "fps", next, "fps");
+    const shots = (graph._nodes || []).filter(node => node.type === "EagleH3ShotContextNode");
+    if (shots.length === 1) connectNamed(shots[0], "delivered_frames", next, "target_frames");
   }
   else if (source.type === "EagleH3FrameTrimNode") {
     connectNamed(source, "images", next, "images");
@@ -450,6 +945,15 @@ function addNextCoreNode(source, type) {
     connectNamed(source, "state", next, "state");
     const starts = (graph._nodes || []).filter(node => node.type === "EagleH3NativeLoopStartNode");
     if (starts.length === 1) connectNamed(starts[0], "flow", next, "flow");
+    const trims = (graph._nodes || []).filter(node => node.type === "EagleH3FrameTrimNode");
+    if (trims.length === 1) connectNamed(trims[0], "images", next, "images");
+    const references = (graph._nodes || []).filter(node => node.type === "EagleH3ReferenceConditionNode");
+    const sampler = references.length === 1 ? primaryH3Sampler(graph, references[0]) : null;
+    const output = samplerLatentOutputName(sampler);
+    if (sampler && output) {
+      connectNamed(sampler, output, source, "sampled_latent");
+      connectNamed(sampler, output, next, "sampled_latent");
+    }
   }
   graph.setDirtyCanvas(true, true);
   return next;
@@ -505,16 +1009,39 @@ function createCoreChain(directorNode) {
   connectNamed(start, "fps", trim, "fps");
   connectNamed(shot, "state", reference, "state");
   connectNamed(shot, "prompt", reference, "prompt");
-  connectNamed(shot, "raw_frames", reference, "length");
+  connectNamed(shot, "length", reference, "length");
   connectNamed(shot, "context_image", reference, "context_image");
   connectNamed(shot, "has_context", reference, "has_context");
   connectNamed(reference, "trim_frames", trim, "trim_frames");
+  connectNamed(shot, "delivered_frames", trim, "target_frames");
   connectNamed(shot, "state", review, "state");
   connectNamed(trim, "images", review, "images");
   connectNamed(trim, "audio", review, "audio");
   connectNamed(trim, "images_with_overlap", review, "images_with_overlap");
   connectNamed(start, "flow", end, "flow");
   connectNamed(review, "state", end, "state");
+  graph.setDirtyCanvas(true, true);
+}
+
+function createContextLoopAuthoringBridge(directorNode) {
+  const graph = directorNode && directorNode.graph;
+  if (!graph) return;
+  const x = directorNode.pos[0] + directorNode.size[0] + 70;
+  const y = directorNode.pos[1] + Math.max(420, directorNode.size[1] + 70);
+  const plan = createH3Node(graph, "MiniMaxH3ChainPlan", [x, y]);
+  if (!plan) {
+    console.warn("[H3Pipeline] 未安装 MiniMaxH3-Context-Loop，无法创建兼容编辑链");
+    return;
+  }
+  const editor = createH3Node(
+    graph,
+    "MiniMaxH3ChainScenePromptEditor",
+    [x + Math.max(520, plan.size?.[0] || 0) + 70, y]
+  );
+  if (editor) connectNamed(plan, "plan", editor, "plan");
+  const loopStart = uniqueNode(graph, "MiniMaxH3ChainLoopStart");
+  if (editor && loopStart) connectNamed(editor, "plan", loopStart, "plan");
+  installContextLoopPlanSync(directorNode);
   graph.setDirtyCanvas(true, true);
 }
 
@@ -537,6 +1064,16 @@ function installCoreQuickAdd(nodeType, nodeData) {
         callback: () => addNextCoreNode(this, next[0]),
       });
     }
+    options.push({
+      content: "🦅 修复 H3 原生主链连接",
+      callback: () => repairNativeCoreLinks(this.graph, { onlyIfEmpty: true }),
+    });
+    if (nodeData.name === "EagleH3ReferenceConditionNode") {
+      options.push({
+        content: "🦅 接入 Context Loop Current Shot 数据",
+        callback: () => repairContextLoopReferenceLinks(this.graph, { force: true }),
+      });
+    }
     if (hasStateOutput) {
       options.push({
         content: "🦅 添加状态 / 上一片段互操作桥",
@@ -547,6 +1084,14 @@ function installCoreQuickAdd(nodeType, nodeData) {
       options.push({
         content: "🦅 创建 H3 核心主链",
         callback: () => createCoreChain(this),
+      });
+      options.push({
+        content: "🦅 创建 Context Loop 兼容编辑链",
+        callback: () => createContextLoopAuthoringBridge(this),
+      });
+      options.push({
+        content: "🦅 修复 Context Loop 编辑预览链",
+        callback: () => repairContextLoopAuthoringLinks(this.graph, { onlyIfEmpty: true }),
       });
       options.push({
         content: "🦅 添加计划 JSON 互操作桥",
@@ -633,13 +1178,50 @@ function migrateLegacyMediaPorts() {
 
 app.registerExtension({
   name: "EagleH3Pipeline",
+  async setup() {
+    installLiveReviewEvent();
+  },
   async afterGraphConfigured() {
     // 先让 LiteGraph 恢复所有 link，再做语义化迁移。
-    setTimeout(migrateLegacyMediaPorts, 0);
+    setTimeout(() => {
+      migrateLegacyMediaPorts();
+      repairMediaBridgeSeedLink(app.graph);
+      repairNativeCoreLinks(app.graph, { onlyIfEmpty: true });
+      installContextLoopPlanSync(uniqueNode(app.graph, "EagleH3DirectorNode"));
+      repairContextLoopAuthoringLinks(app.graph, { onlyIfEmpty: true, createMissing: true });
+      repairContextLoopReferenceLinks(app.graph);
+    }, 0);
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     const name = nodeData.name;
     installCoreQuickAdd(nodeType, nodeData);
+
+    if (name === "EagleH3ReferenceConditionNode") {
+      const _configured = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function (serialized) {
+        const r = _configured ? _configured.apply(this, arguments) : undefined;
+        repairReferenceConditionWidgets(this, serialized);
+        return r;
+      };
+    }
+
+    if (name === "EagleH3MediaBridgeNode") {
+      const _configured = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function (serialized) {
+        const r = _configured ? _configured.apply(this, arguments) : undefined;
+        repairMediaBridgePorts(this);
+        return r;
+      };
+    }
+
+    if (name === "EagleH3ShotContextNode") {
+      const _configured = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function (serialized) {
+        const r = _configured ? _configured.apply(this, arguments) : undefined;
+        repairShotContextPorts(this);
+        return r;
+      };
+    }
 
     // ── Plan ──
     if (name === "EagleH3PlanNode") {
@@ -737,8 +1319,7 @@ app.registerExtension({
       nodeType.prototype.onExecuted = function (data) {
         if (_exec) _exec.apply(this, arguments);
         if (this._h3cVueApp && data && data.h3_review) {
-          this._h3cVueApp._instance.data.review.value = data.h3_review;
-          setTimeout(() => resizeReviewPanel(this, this._h3cVueApp, data.h3_review), 0);
+          applyReviewPayload(this, data.h3_review);
         }
       };
     }

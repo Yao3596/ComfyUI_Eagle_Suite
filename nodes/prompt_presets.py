@@ -1274,33 +1274,65 @@ def _director_obsidian_file(config: dict) -> Optional[Path]:
 
 def _director_skills_to_markdown(skills: Dict) -> str:
     """Store many skills in one Obsidian-friendly Markdown document."""
+    today = datetime.now().date().isoformat()
+    created_candidates = []
+    for skill in skills.values():
+        raw_created = str((skill or {}).get("created_at") or "").strip()
+        match = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})", raw_created)
+        if match:
+            created_candidates.append(
+                f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+            )
+    created_date = min(created_candidates) if created_candidates else today
     blocks = [
         "---",
-        "eagle_type: director_skill_library",
-        "version: 1",
-        f"updated_at: {datetime.now().isoformat()}",
+        "title: Eagle Director Skills",
+        "type: director-skill-library",
+        "aliases:",
+        "  - Eagle 导演技能库",
+        "tags:",
+        "  - ComfyUI/DirectorSkills",
+        "  - AI视频/MiniMax-H3",
+        f"created: {created_date}",
+        f"updated: {today}",
+        "eagle_schema: eagle-director-skills/v2",
+        "eagle_version: 2",
         "---",
         "",
         "# Eagle Director Skills",
         "",
-        "> 此文件由 ComfyUI Eagle Suite 管理；每个 skill 区块都可以在 Obsidian 中直接编辑。",
+        "> [!abstract] 用途",
+        "> 此文件由 ComfyUI Eagle Suite 管理。每个技能区块均可在 Obsidian 中编辑，并可由节点无损回读。",
+        "",
+        "## 技能库",
         "",
     ]
     for skill in skills.values():
+        heading = re.sub(r"[\r\n#]+", " ", str(skill.get("name") or "未命名技能")).strip()
+        content = str(skill.get("content") or "").strip()
+        # The vault standard permits one H1 per note. Skill fragments are nested
+        # below an H3 entry, so H1-H3 supplied by users are demoted to H4-H6.
+        content = re.sub(
+            r"(?m)^(#{1,3})(\s+)",
+            lambda match: "#" * min(6, len(match.group(1)) + 3) + match.group(2),
+            content,
+        )
         metadata = {
             "id": str(skill.get("id") or uuid.uuid4()),
-            "name": str(skill.get("name") or "未命名技能"),
+            "name": heading or "未命名技能",
             "category": str(skill.get("category") or "custom"),
             "tasks": list(skill.get("tasks") or []),
             "tags": list(skill.get("tags") or []),
         }
         blocks.extend([
+            f"### {heading or '未命名技能'}",
+            "",
             "<!-- eagle-skill:start -->",
             "```eagle-skill-meta",
             json.dumps(metadata, ensure_ascii=False),
             "```",
             "",
-            str(skill.get("content") or "").strip(),
+            content,
             "",
             "<!-- eagle-skill:end -->",
             "",

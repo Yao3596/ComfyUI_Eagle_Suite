@@ -3,6 +3,7 @@
 H3 链下游承接节点单元/集成测试。
 """
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -30,6 +31,7 @@ SPEC.loader.exec_module(PACKAGE)
 
 from eagle_suite_test_package.eagle_suite.h3_pipeline import state as h3_state
 from eagle_suite_test_package.eagle_suite.h3_pipeline import media_utils
+from eagle_suite_test_package.eagle_suite.h3_pipeline import nodes as h3_nodes
 from eagle_suite_test_package.eagle_suite.h3_pipeline.nodes import (
     EagleH3PlanNode,
     EagleH3PlanInteropNode,
@@ -42,6 +44,7 @@ from eagle_suite_test_package.eagle_suite.h3_pipeline.nodes import (
     EagleH3ShotContextNode,
     EagleH3ReferenceConditionNode,
     EagleH3FrameTrimNode,
+    EagleH3ReviewGateNode,
     EagleH3EndNode,
     EagleH3AssembleNode,
     EagleH3ContextNode,
@@ -52,7 +55,10 @@ from eagle_suite_test_package.eagle_suite.h3_pipeline.nodes import (
     _prepare_reference_condition,
     _reference_short_edge,
 )
-from eagle_suite_test_package.eagle_suite.h3_director_node import compile_h3_params
+from eagle_suite_test_package.eagle_suite.h3_director_node import (
+    compile_h3_params,
+    export_context_loop_plan_json,
+)
 from eagle_suite_test_package.eagle_suite.h3_director_node import (
     EagleH3MediaBridgeNode,
 )
@@ -170,20 +176,33 @@ class H3ChainTests(unittest.TestCase):
         video_frames = torch.rand((5, 8, 8, 3), dtype=torch.float32)
         audio = {"waveform": torch.ones((1, 1, 800)), "sample_rate": 8000}
         result = EagleH3MediaBridgeNode().execute(
-            reference_images=images,
-            video_frames_1=video_frames,
-            video_audio_1=audio,
-            reference_audio_1=audio,
+            ref_images=images,
+            ref_video_0=video_frames,
+            ref_video_audio_0=audio,
+            ref_audio_0=audio,
         )
         bundle = result[0]
         self.assertEqual(2, result[12])
         self.assertEqual(1, result[13])
         self.assertEqual(1, result[14])
-        self.assertEqual(2, len(result[1]))
+        self.assertIs(result[1], bundle["ref_images"][0])
+        self.assertEqual((1, 8, 8, 3), tuple(result[1].shape))
         self.assertIs(result[2], video_frames)
         self.assertIs(result[5], audio)
         self.assertIs(result[8], audio)
         self.assertEqual(2, len(bundle["ref_images"]))
+
+    def test_standard_media_bridge_first_image_is_not_a_comfy_list_output(self):
+        self.assertEqual(
+            "first_reference_image", EagleH3MediaBridgeNode.RETURN_NAMES[1]
+        )
+        self.assertFalse(EagleH3MediaBridgeNode.OUTPUT_IS_LIST[1])
+        optional = EagleH3MediaBridgeNode.INPUT_TYPES()["optional"]
+        self.assertIn("ref_images", optional)
+        self.assertIn("ref_video_0", optional)
+        self.assertIn("ref_video_audio_0", optional)
+        self.assertIn("ref_audio_0", optional)
+        self.assertNotIn("video_frames_1", optional)
 
     def test_start_node_outputs_dimensions(self):
         plan = _sample_plan()
@@ -201,10 +220,11 @@ class H3ChainTests(unittest.TestCase):
         out = EagleH3NativeLoopStartNode().execute(
             plan, 1, output_dir=str(self.tmpdir), resume_policy="overwrite"
         )
-        flow, native_state, width, height, fps, status = out["result"]
+        flow, native_state, width, height, fps, status, clip_count = out["result"]
         self.assertEqual(flow, "eagle_h3_native_loop")
         self.assertEqual((width, height, fps), (1080, 1920, 24))
         self.assertEqual(native_state["plan"]["plan_hash"], "testhash")
+        self.assertEqual(clip_count, 2)
         self.assertTrue(status)
 
     def test_native_end_expands_body_in_auto_mode(self):
@@ -225,7 +245,13 @@ class H3ChainTests(unittest.TestCase):
                 return str(node_id)
 
         result = EagleH3NativeLoopEndNode().execute(
-            ["2", 0], state, dynprompt=FakeDynPrompt(), unique_id="4"
+            ["2", 0], state,
+            images=torch.zeros((24, 8, 8, 3), dtype=torch.float32),
+            sampled_latent={"samples": [
+                torch.zeros((1, 16, 3, 2, 2)),
+                torch.zeros((1, 32, 2, 8)),
+            ]},
+            dynprompt=FakeDynPrompt(), unique_id="4"
         )
         self.assertIn("expand", result)
         self.assertEqual(len(result["result"]), len(EagleH3NativeLoopEndNode.RETURN_TYPES))
@@ -389,8 +415,114 @@ class H3ChainTests(unittest.TestCase):
             "EagleH3DirectorNode", "EagleH3NativeLoopStartNode", "EagleH3ShotContextNode",
             "EagleH3ReferenceConditionNode", "EagleH3FrameTrimNode",
             "EagleH3CheckpointReviewNode", "EagleH3NativeLoopEndNode",
+            "MiniMaxChunkFeedForward",
         ):
             self.assertIn(node_type, nodes)
+
+        by_id = {node["id"]: node for node in workflow["nodes"]}
+        edges = set()
+        for link_id, origin_id, origin_slot, target_id, target_slot, *_ in workflow["links"]:
+            origin = by_id[origin_id]
+            target = by_id[target_id]
+            output = origin["outputs"][origin_slot]
+            input_ = target["inputs"][target_slot]
+            self.assertEqual(link_id, input_.get("link"))
+            self.assertEqual(output["type"], input_["type"])
+            self.assertIn(link_id, output.get("links") or [])
+            edges.add((origin["type"], output["name"], target["type"], input_["name"]))
+
+        required_edges = {
+            ("EagleH3DirectorNode", "plan", "EagleH3NativeLoopStartNode", "plan"),
+            ("EagleH3DirectorNode", "media_bundle", "EagleH3ReferenceConditionNode", "media_bundle"),
+            ("EagleH3NativeLoopStartNode", "state", "EagleH3ShotContextNode", "state"),
+            ("EagleH3NativeLoopStartNode", "width", "EagleH3ReferenceConditionNode", "width"),
+            ("EagleH3NativeLoopStartNode", "height", "EagleH3ReferenceConditionNode", "height"),
+            ("EagleH3ShotContextNode", "state", "EagleH3ReferenceConditionNode", "state"),
+            ("EagleH3ShotContextNode", "prompt", "EagleH3ReferenceConditionNode", "prompt"),
+            ("EagleH3ShotContextNode", "length", "EagleH3ReferenceConditionNode", "length"),
+            ("EagleH3ShotContextNode", "context_image", "EagleH3ReferenceConditionNode", "context_image"),
+            ("EagleH3ShotContextNode", "has_context", "EagleH3ReferenceConditionNode", "has_context"),
+            ("EagleH3ReferenceConditionNode", "trim_frames", "EagleH3FrameTrimNode", "trim_frames"),
+            ("EagleH3ShotContextNode", "delivered_frames", "EagleH3FrameTrimNode", "target_frames"),
+            ("SamplerCustomAdvanced", "output", "EagleH3CheckpointReviewNode", "sampled_latent"),
+            ("EagleH3CheckpointReviewNode", "state", "EagleH3NativeLoopEndNode", "state"),
+            ("EagleH3FrameTrimNode", "images", "EagleH3NativeLoopEndNode", "images"),
+            ("SamplerCustomAdvanced", "output", "EagleH3NativeLoopEndNode", "sampled_latent"),
+        }
+        self.assertTrue(required_edges.issubset(edges), required_edges - edges)
+        self.assertEqual(
+            ["h3_state", "LLM_HINT", "foundation_input", "api_config", "local_model",
+             "skill_request", "director_skill"],
+            [item["name"] for item in nodes["EagleH3DirectorNode"]["inputs"]],
+        )
+        checkpoint = nodes["EagleH3CheckpointReviewNode"]
+        loop_end = nodes["EagleH3NativeLoopEndNode"]
+        self.assertIn("sampled_latent", [item["name"] for item in checkpoint["inputs"]])
+        self.assertIn("retry_prompt", [item["name"] for item in checkpoint["inputs"]])
+        self.assertIn("resume_scene", [item["name"] for item in checkpoint["inputs"]])
+        self.assertEqual(
+            ["segment", "manifest"],
+            [item["name"] for item in checkpoint["outputs"][-2:]],
+        )
+        self.assertIn("auto_assemble", [item["name"] for item in loop_end["inputs"]])
+        self.assertEqual(
+            ["manifest", "partial", "last_context_frames", "last_context_latent"],
+            [item["name"] for item in loop_end["outputs"][-4:]],
+        )
+
+    def test_h3_frontend_repairs_native_and_context_loop_authoring_links(self):
+        source = (REPO / "web" / "js" / "h3_pipeline.js").read_text(encoding="utf-8")
+        self.assertIn('"length", reference, "length"', source)
+        self.assertIn('output.name = "length"', source)
+        self.assertIn('"delivered_frames", trim, "target_frames"', source)
+        self.assertIn('sampler, samplerOutput, review, "sampled_latent"', source)
+        self.assertIn('sampler, samplerOutput, end, "sampled_latent"', source)
+        self.assertIn('repairNativeCoreLinks(app.graph', source)
+        self.assertIn('repairReferenceConditionWidgets(this, serialized)', source)
+        self.assertIn('disconnectDirectorPlanOverride(graph, director, plan)', source)
+        self.assertIn('syncContextLoopPlanWidget(director)', source)
+        self.assertIn('syncNativeLoopStartInfo(director)', source)
+        self.assertIn('单次队列 · 动态 {{ info.total_shots }} 场景', source)
+        self.assertIn('累计预览: {{ history.length }} / {{ review.clip_count }}', source)
+        self.assertIn('_eagleSyncContextLoopBridges', source)
+        self.assertIn('"MiniMaxH3ChainScenePromptEditor"', source)
+        self.assertIn('"MiniMaxH3ChainLoopStart"', source)
+        self.assertIn('editor, "plan", loopStart, "plan"', source)
+        self.assertIn('createMissing: true', source)
+        self.assertIn('repairContextLoopReferenceLinks(app.graph)', source)
+        self.assertIn('["length", "length"]', source)
+        self.assertIn('filename.label = "文件名前缀"', source)
+        self.assertIn('前缀_0001、前缀_0002', source)
+
+    def test_director_authoring_json_is_accepted_by_installed_context_loop_plan(self):
+        plugin_root = COMFY_ROOT / "custom_nodes" / "ComfyUI-MiniMaxH3-Contex-Loop"
+        if not (plugin_root / "chain_nodes.py").is_file():
+            self.skipTest("MiniMaxH3-Context-Loop is not installed")
+        custom_nodes = str(COMFY_ROOT / "custom_nodes")
+        if custom_nodes not in sys.path:
+            sys.path.insert(0, custom_nodes)
+        chain_nodes = __import__(
+            "ComfyUI-MiniMaxH3-Contex-Loop.chain_nodes",
+            fromlist=["MiniMaxH3ChainPlan"],
+        )
+        project = {
+            "mode": "t2va", "fps": 24, "width": 960, "height": 544,
+            "foundation": "A concise cinematic test.",
+        }
+        scenes = [{
+            "id": "scene_01", "title": "test", "defaultSeconds": 5,
+            "preamble": "A slow push-in on a quiet room.", "shots": [], "dialogues": [],
+        }]
+        payload = export_context_loop_plan_json(compile_h3_params(project, scenes))
+        result = chain_nodes.MiniMaxH3ChainPlan().build(
+            "[]", "eagle_context_loop_test", "2", 960, 544, 22,
+            "video", "head", "disabled", "generated_audio", 22,
+            5.0, 8, 0, 18, 0, "guide", plan_json_input=payload,
+        )
+        plan = result[0]
+        self.assertEqual("H3_CHAIN_PLAN", chain_nodes.PLAN_TYPE)
+        self.assertEqual(1, len(plan["shots"]))
+        self.assertEqual((960, 544), (result[3], result[4]))
 
     def test_director_plan_exposes_context_loop_aliases_and_atomic_ignores(self):
         project = {
@@ -413,6 +545,149 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(["<Picture 1>"], shot["disabled_reference_tags"])
         self.assertEqual([], shot["scene_reference_tags"])
         self.assertIn("reference_fingerprint", plan["compatibility"])
+
+    def test_character_pv_contract_reaches_prompt_plan_and_skill_generation(self):
+        from eagle_suite_test_package.eagle_suite.h3_director_node import _build_skill_prompts
+
+        project = {
+            "workflowType": "character_pv",
+            "fps": 24,
+            "width": 960,
+            "height": 544,
+            "pv": {
+                "enabled": True,
+                "template": "image_flash",
+                "rhythm": "beat_sync",
+                "cutDensity": "dense",
+                "bpm": 120,
+                "beatOffsetMs": 250,
+                "title": "EAGLE",
+                "subtitle": "Character PV",
+                "reserveTitleSafeArea": True,
+                "transitions": ["flash_cut", "mask_wipe"],
+                "effects": ["deep_glow", "pixel_sort"],
+            },
+        }
+        scene = {
+            "id": 1, "title": "PV", "defaultSeconds": 5,
+            "preamble": "The character turns toward camera.",
+            "shots": [], "dialogues": [],
+        }
+        plan = compile_h3_params(project, [scene])
+        shot = plan["shots"][0]
+        self.assertEqual("character_pv", plan["workflow_type"])
+        self.assertEqual("eagle-character-pv-post@1.0", plan["post_production"]["schema"])
+        self.assertEqual([0.25, 0.75, 1.25, 1.75, 2.25, 2.75, 3.25, 3.75, 4.25, 4.75],
+                         shot["post_production_cues"]["beat_times_seconds"])
+        self.assertIn("CHARACTER PV / MOTION-GRAPHICS CONTRACT", shot["scene_prompt"])
+        self.assertIn("Exact post title (metadata only; do not render in generation): EAGLE", shot["scene_prompt"])
+        self.assertIn("pixel_sort", shot["scene_prompt"])
+        _system, user = _build_skill_prompts("script", project, scene, "", request={"pv": project["pv"]})
+        self.assertIn("【项目专项合同】", user)
+        self.assertIn("CHARACTER PV / MOTION-GRAPHICS CONTRACT", user)
+
+    def test_character_interaction_contract_is_not_frontend_only(self):
+        project = {
+            "workflowType": "character_interaction",
+            "fps": 24, "width": 960, "height": 544,
+            "interaction": {
+                "enabled": True,
+                "productionLevel": "SSR",
+                "visualStyle": "anime",
+                "dynamicType": "gesture",
+                "outputMode": "single_loop",
+                "interactionIntent": "wave once, then return to the opening pose",
+            },
+        }
+        scene = {"id": 1, "defaultSeconds": 5, "preamble": "Character portrait.", "shots": [], "dialogues": []}
+        prompt = compile_h3_params(project, [scene])["shots"][0]["scene_prompt"]
+        self.assertIn("CHARACTER INTERACTION CONTRACT", prompt)
+        self.assertIn("wave once", prompt)
+        self.assertIn("ANIME PERFORMANCE", prompt)
+        self.assertIn("avoid photoreal skin", prompt)
+        self.assertIn("Adult-content profile: OFF", prompt)
+
+    def test_legacy_size_preset_is_authoritative_and_custom_dimensions_snap(self):
+        scene = [{"id": 1, "defaultSeconds": 5, "preamble": "test",
+                  "shots": [], "dialogues": []}]
+        legacy = compile_h3_params(
+            {"fps": 24, "sizePreset": "16:9|mp0.5|960|544"}, scene
+        )
+        self.assertEqual((960, 544), (
+            legacy["compatibility"]["width"], legacy["compatibility"]["height"]
+        ))
+        custom = compile_h3_params(
+            {"fps": 24, "sizePreset": "custom", "width": 1001, "height": 557}, scene
+        )
+        self.assertEqual((992, 544), (
+            custom["compatibility"]["width"], custom["compatibility"]["height"]
+        ))
+
+    def test_all_required_h3_size_presets_resolve_exactly(self):
+        scene = [{"id": 1, "defaultSeconds": 5, "preamble": "test",
+                  "shots": [], "dialogues": []}]
+        required = {
+            "0.2": (608, 352), "0.3": (736, 416), "0.4": (864, 480),
+            "0.5": (960, 544), "0.6": (1056, 608), "0.7": (1152, 640),
+            "0.8": (1216, 672), "0.9": (1280, 736), "0.98": (1344, 768),
+            "1.0": (1376, 768), "1.2": (1504, 832), "1.5": (1664, 928),
+            "1.8": (1824, 1024), "2.0": (1920, 1088),
+        }
+        for megapixels, (width, height) in required.items():
+            with self.subTest(megapixels=megapixels, aspect="16:9"):
+                plan = compile_h3_params({
+                    "fps": 24,
+                    "sizePreset": f"16:9|mp{megapixels}|{width}|{height}",
+                }, scene)
+                self.assertEqual((width, height), (
+                    plan["compatibility"]["width"], plan["compatibility"]["height"]
+                ))
+            with self.subTest(megapixels=megapixels, aspect="9:16"):
+                plan = compile_h3_params({
+                    "fps": 24,
+                    "sizePreset": f"9:16|mp{megapixels}|{height}|{width}",
+                }, scene)
+                self.assertEqual((height, width), (
+                    plan["compatibility"]["width"], plan["compatibility"]["height"]
+                ))
+
+    def test_editorial_duration_is_exact_while_h3_generation_uses_legal_grid(self):
+        project = {
+            "fps": 24, "sizePreset": "16:9|mp0.5|960|544",
+            "contextLength": 22, "anchorMode": "head",
+        }
+        scenes = [
+            {"id": 1, "defaultSeconds": 10, "preamble": "first",
+             "shots": [], "dialogues": []},
+            {"id": 2, "defaultSeconds": 10, "preamble": "second",
+             "shots": [], "dialogues": []},
+        ]
+        plan = compile_h3_params(project, scenes)
+        first, second = plan["shots"]
+        self.assertEqual((240, 243, 3), (
+            first["delivered_frames"], first["raw_frames"], first["tail_trim_frames"]
+        ))
+        self.assertEqual((240, 277, 22, 15), (
+            second["delivered_frames"], second["raw_frames"],
+            second["context_trim_frames"], second["tail_trim_frames"]
+        ))
+        self.assertEqual(480, plan["total_delivered_frames"])
+        self.assertIn("20.000s", plan["summary"])
+
+    def test_structured_shots_replace_script_shot_blocks_without_duplication(self):
+        project = {"fps": 24, "width": 960, "height": 544}
+        scenes = [{
+            "id": 1, "defaultSeconds": 5,
+            "preamble": "Director setup.\n\n[Shot 1] obsolete draft shot.",
+            "shots": [{"id": 1, "time": "00:00.000", "content": "authoritative shot",
+                       "estSeconds": 5}],
+            "dialogues": [],
+        }]
+        prompt = compile_h3_params(project, scenes)["shots"][0]["scene_prompt"]
+        self.assertIn("Director setup.", prompt)
+        self.assertIn("authoritative shot", prompt)
+        self.assertNotIn("obsolete draft shot", prompt)
+        self.assertEqual(1, prompt.count("[Shot 1]"))
 
     def test_reference_condition_routes_scene_media_without_grid_or_batch_collapse(self):
         image_a = torch.zeros((1, 8, 8, 3), dtype=torch.float32)
@@ -461,12 +736,144 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(1, report["paired_audio_count"])
         self.assertTrue(any(item["reason"] == "ignored_in_director" for item in report["skipped"]))
 
+        context_loop_state = {
+            "index": 2,
+            "plan": {"shots": [state["plan"]["shots"][0], {
+                "scene_prompt": "Use <Picture 1>.",
+                "scene_reference_tags": ["<Picture 1>"],
+                "disabled_reference_tags": [],
+            }]},
+        }
+        _compiled, context_grouped, context_report = _prepare_reference_condition(
+            context_loop_state, bundle, prompt, reference_scope="scene_tags"
+        )
+        self.assertEqual([image_a], [item["value"] for item in context_grouped["image"]])
+        self.assertEqual(2, context_report["scene_index"])
+        self.assertEqual("context_loop", context_report["state_contract"])
+
     def test_reference_condition_node_contract(self):
         inputs = EagleH3ReferenceConditionNode.INPUT_TYPES()
         self.assertEqual("H3_MEDIA_BUNDLE", inputs["required"]["media_bundle"][0])
         self.assertIn("state", inputs["required"])
+        self.assertEqual("EAGLE_H3_STATE,H3_CHAIN_STATE", inputs["required"]["state"][0])
         self.assertNotIn("run_state", inputs["required"])
         self.assertEqual(("CONDITIONING", "LATENT"), EagleH3ReferenceConditionNode.RETURN_TYPES[:2])
+        for name in ("prompt", "width", "height", "length"):
+            self.assertTrue(inputs["required"][name][1].get("forceInput"), name)
+
+    def test_first_shot_seed_does_not_instantiate_motion_context(self):
+        created = []
+
+        class FakeNode:
+            def __init__(self, name):
+                self.name = name
+
+            def set_input(self, _name, _value):
+                return None
+
+            def out(self, index):
+                return (self.name, index)
+
+        class FakeGraph:
+            def node(self, name, _label):
+                created.append(name)
+                return FakeNode(name)
+
+            def finalize(self):
+                return {}
+
+        original = h3_nodes.GraphBuilder
+        h3_nodes.GraphBuilder = FakeGraph
+        try:
+            result = EagleH3ReferenceConditionNode().execute(
+                clip=object(), vae=object(), audio_vae=object(),
+                media_bundle={"media_mapping": "[]"},
+                state={"current_index": 0, "plan": {"shots": [{}]}},
+                prompt="first shot", width=960, height=544, length=124,
+                use_context_guide=True,
+                context_image=torch.zeros((1, 8, 8, 3), dtype=torch.float32),
+                has_context=True,
+            )
+        finally:
+            h3_nodes.GraphBuilder = original
+
+        self.assertEqual(["MiniMaxH3ReferenceToVideo"], created)
+        report = json.loads(result["result"][3])
+        self.assertTrue(report["seed_context"])
+        self.assertFalse(report["context_guide"])
+        self.assertEqual(0, result["result"][5])
+
+    def test_continuation_wires_previous_av_latent_into_motion_context(self):
+        created = {}
+
+        class FakeNode:
+            def __init__(self, name):
+                self.name = name
+                self.inputs = {}
+
+            def set_input(self, name, value):
+                self.inputs[name] = value
+
+            def out(self, index):
+                return (self.name, index)
+
+        class FakeGraph:
+            def node(self, name, _label):
+                node = FakeNode(name)
+                created[name] = node
+                return node
+
+            def finalize(self):
+                return {}
+
+        class FakeMotion:
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {
+                    "required": {
+                        "conditioning": ("CONDITIONING",),
+                        "vae": ("VAE",),
+                        "latent": ("LATENT",),
+                        "context_length": (["22", "5", "39", "56"],),
+                        "audio_context_length": ("INT",),
+                    },
+                    "optional": {
+                        "context_frames": ("IMAGE",),
+                        "context_latent": ("LATENT",),
+                    },
+                }
+
+        state = self._init_state(_sample_plan())
+        state["current_index"] = 1
+        state["previous_latent"] = {"samples": [
+            torch.ones((1, 16, 3, 2, 2)),
+            torch.ones((1, 32, 2, 8)),
+        ]}
+        import nodes as comfy_nodes
+        original_graph = h3_nodes.GraphBuilder
+        original_motion = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3MotionContext")
+        h3_nodes.GraphBuilder = FakeGraph
+        comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3MotionContext"] = FakeMotion
+        try:
+            result = EagleH3ReferenceConditionNode().execute(
+                clip=object(), vae=object(), audio_vae=object(),
+                media_bundle={"media_mapping": "[]"}, state=state,
+                prompt="continued shot", width=1080, height=1920, length=245,
+                context_image=torch.zeros((22, 16, 16, 3)), has_context=True,
+            )
+        finally:
+            h3_nodes.GraphBuilder = original_graph
+            if original_motion is None:
+                comfy_nodes.NODE_CLASS_MAPPINGS.pop("MiniMaxH3MotionContext", None)
+            else:
+                comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3MotionContext"] = original_motion
+
+        motion_inputs = created["MiniMaxH3MotionContext"].inputs
+        self.assertEqual(2, len(motion_inputs["context_latent"]["samples"]))
+        self.assertEqual(22, motion_inputs["audio_context_length"])
+        report = json.loads(result["result"][3])
+        self.assertTrue(report["latent_handoff"])
+        self.assertEqual("runtime", report["latent_source"])
 
     def test_reference_size_presets_map_and_downscale_only(self):
         large = torch.ones((1, 1600, 2400, 3), dtype=torch.float32)
@@ -664,6 +1071,118 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(state["current_index"], 0)
         self.assertEqual(state["reroll_index"], 0)
 
+    def test_reroll_changes_effective_seed_without_mutating_plan(self):
+        plan = _sample_plan()
+        state = self._init_state(plan)
+        original = h3_state.shot_params(state)["effective_seed"]
+        advanced, loop_again, done = h3_state.advance(state, "reroll")
+        self.assertTrue(loop_again)
+        self.assertFalse(done)
+        self.assertEqual(advanced["current_index"], 0)
+        self.assertEqual(advanced["plan"]["shots"][0]["seed"], original)
+        self.assertNotEqual(h3_state.shot_params(advanced)["effective_seed"], original)
+
+    def test_review_overrides_prompt_seed_and_h3_length_without_mutating_plan(self):
+        state = self._init_state(_sample_plan())
+        original_prompt = state["plan"]["shots"][0]["prompt"]
+        h3_state.apply_shot_overrides(
+            state, prompt="revised scene", seed=9876, length=124
+        )
+        params = h3_state.shot_params(state)
+        self.assertEqual("revised scene", params["shot"]["prompt"])
+        self.assertEqual(9876, params["effective_seed"])
+        self.assertEqual(124, params["shot"]["raw_frames"])
+        self.assertEqual(124, params["shot"]["delivered_frames"])
+        self.assertEqual(original_prompt, state["plan"]["shots"][0]["prompt"])
+        with self.assertRaisesRegex(ValueError, "17k\\+5"):
+            h3_state.apply_shot_overrides(state, length=120)
+
+    def test_checkpoint_history_retains_immutable_revisions(self):
+        state = self._init_state(_sample_plan())
+        first = h3_state.record_shot_result(
+            state, "/fake/clip_r0001.mp4", delivered_frames=100,
+            decision="retry", meta={"revision": 1, "seed": 11},
+        )
+        second = h3_state.record_shot_result(
+            state, "/fake/clip_r0002.mp4", delivered_frames=100,
+            decision="reviewing", meta={"revision": 2, "seed": 22},
+        )
+        self.assertEqual(1, first["active_revision"])
+        self.assertEqual(2, second["active_revision"])
+        self.assertEqual(2, len(second["revisions"]))
+        self.assertEqual(
+            ["/fake/clip_r0001.mp4", "/fake/clip_r0002.mp4"],
+            [item["clip"] for item in second["revisions"]],
+        )
+
+    def test_restore_from_scene_preserves_only_predecessor_approvals(self):
+        state = self._init_state(_sample_plan())
+        h3_state.record_shot_result(state, "/fake/scene_1.mp4", decision="approved")
+        state["current_index"] = 1
+        h3_state.record_shot_result(state, "/fake/scene_2.mp4", decision="approved")
+        h3_state.restore_from_scene(state, 2)
+        self.assertEqual(1, state["current_index"])
+        self.assertEqual([0], [item["index"] for item in state["shots"]])
+        self.assertFalse(state["stop"])
+
+    def test_review_payload_lists_all_persisted_scene_previews(self):
+        state = self._init_state(_sample_plan())
+        h3_state.record_shot_result(
+            state, str(self.tmpdir / "scene_01.mp4"), delivered_frames=120,
+            meta={"seed": 101},
+        )
+        state["current_index"] = 1
+        h3_state.record_shot_result(
+            state, str(self.tmpdir / "scene_02.mp4"), delivered_frames=168,
+            meta={"seed": 202},
+        )
+        payload = EagleH3ReviewGateNode()._ui_payload(
+            state, str(self.tmpdir / "scene_02.mp4"), True, False, "", "2 scenes", "auto"
+        )
+        self.assertEqual(2, payload["clip_count"])
+        self.assertEqual([0, 1], [item["index"] for item in payload["history"]])
+        self.assertEqual(["101", "202"], [item["seed"] for item in payload["history"]])
+
+    def test_interactive_review_timeout_continues_same_execution(self):
+        state = self._init_state(_sample_plan())
+        state["mode"] = "interactive"
+        clip = self.tmpdir / "review.mp4"
+        clip.write_bytes(b"preview")
+        h3_state.record_shot_result(state, str(clip), decision="pending")
+        result = asyncio.run(EagleH3ReviewGateNode().execute(
+            state,
+            str(clip),
+            auto_continue_timeout_minutes=0.00001,
+        ))
+        reviewed_state, decision, awaiting, approved, _summary = result["result"]
+        self.assertEqual("approve", decision)
+        self.assertFalse(awaiting)
+        self.assertTrue(approved)
+        self.assertEqual("approved", reviewed_state["shots"][0]["decision"])
+
+    def test_interactive_review_retry_applies_editable_fields(self):
+        state = self._init_state(_sample_plan())
+        state["mode"] = "interactive"
+        clip = self.tmpdir / "review_retry.mp4"
+        clip.write_bytes(b"preview")
+        h3_state.record_shot_result(state, str(clip), decision="reviewing")
+        result = asyncio.run(EagleH3ReviewGateNode().execute(
+            state,
+            str(clip),
+            review_decision="retry",
+            retry_prompt="new movement",
+            retry_seed=456,
+            retry_length=124,
+        ))
+        reviewed_state, decision, awaiting, approved, _summary = result["result"]
+        params = h3_state.shot_params(reviewed_state)
+        self.assertEqual("retry", decision)
+        self.assertFalse(awaiting)
+        self.assertFalse(approved)
+        self.assertEqual("new movement", params["shot"]["prompt"])
+        self.assertEqual(456, params["effective_seed"])
+        self.assertEqual(124, params["shot"]["raw_frames"])
+
     def test_manifest_round_trip(self):
         plan = _sample_plan()
         state = h3_state.init_state(plan, str(self.tmpdir), resume_policy="overwrite")
@@ -673,6 +1192,61 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(loaded["current_index"], state["current_index"])
         self.assertEqual(len(loaded["shots"]), 1)
         self.assertEqual(loaded["shots"][0]["delivered_frames"], 100)
+        manifest_node_result = h3_nodes.EagleH3LoadManifestNode().execute(
+            "", base_dir=state["base_dir"]
+        )
+        self.assertEqual(2, len(manifest_node_result))
+
+    def test_manifest_omits_runtime_frame_and_latent_tensors(self):
+        state = self._init_state(_sample_plan())
+        state["previous_frames"] = torch.zeros((2, 8, 8, 3))
+        state["previous_latent"] = {"samples": [
+            torch.zeros((1, 16, 2, 2, 2)),
+            torch.zeros((1, 32, 2, 4)),
+        ]}
+        h3_state.save_state(state)
+        loaded = h3_state.load_state(state["base_dir"])
+        self.assertNotIn("previous_frames", loaded)
+        self.assertNotIn("previous_latent", loaded)
+        self.assertIn("previous_latent", state)
+
+        exported = EagleH3StateInteropNode().execute(state)
+        portable = json.loads(exported[1])
+        self.assertNotIn("previous_frames", portable)
+        self.assertNotIn("previous_latent", portable)
+        self.assertIn("previous_latent", exported[0])
+
+    def test_previous_av_latent_restores_from_active_checkpoint(self):
+        state = self._init_state(_sample_plan())
+        latent_path = self.tmpdir / "previous.pt"
+        torch.save({"samples": [
+            torch.ones((1, 16, 2, 2, 2)),
+            torch.ones((1, 32, 2, 4)),
+        ]}, latent_path)
+        state["shots"] = [{"index": 0, "latent": str(latent_path)}]
+        restored, source = h3_nodes._previous_latent_from_state(state, 1)
+        self.assertEqual("checkpoint", source)
+        self.assertEqual(2, len(restored["samples"]))
+
+    def test_native_end_carries_compact_av_latent_and_frame_tail(self):
+        state = self._init_state(_sample_plan())
+        state["mode"] = "interactive"
+        images = torch.arange(30 * 2 * 2 * 3, dtype=torch.float32).reshape(
+            30, 2, 2, 3
+        )
+        latent = {"samples": [
+            torch.ones((1, 16, 4, 2, 2)),
+            torch.ones((1, 32, 2, 10)),
+            torch.full((1,), 99.0),
+        ]}
+        result = EagleH3NativeLoopEndNode().execute(
+            ["2", 0], state, images, latent, decision="approve"
+        )
+        carried = result[0]
+        self.assertEqual(22, carried["previous_frames"].shape[0])
+        self.assertEqual(2, len(carried["previous_latent"]["samples"]))
+        self.assertTrue(carried["previous_frames"].device.type == "cpu")
+        self.assertEqual("last_context_latent", EagleH3NativeLoopEndNode.RETURN_NAMES[-1])
 
     def test_media_utils_frames_to_video_and_extract(self):
         frames = np.random.randint(0, 255, (10, 64, 64, 3), dtype=np.uint8)
@@ -714,7 +1288,22 @@ class H3ChainTests(unittest.TestCase):
         h3_state.save_state(state)
         out, summary = EagleH3AssembleNode().execute(state)
         self.assertTrue(out)
-        self.assertTrue(pathlib.Path(media_utils._resolve_video_path(out)).exists())
+        first_path = pathlib.Path(media_utils._resolve_video_path(out))
+        self.assertTrue(first_path.exists())
+        self.assertEqual("test_run_0001.mp4", first_path.name)
+        out_again, _summary_again = EagleH3AssembleNode().execute(state)
+        second_path = pathlib.Path(media_utils._resolve_video_path(out_again))
+        self.assertTrue(second_path.exists())
+        self.assertEqual("test_run_0002.mp4", second_path.name)
+        self.assertNotEqual(first_path, second_path)
+        self.assertTrue(first_path.exists())
+
+        local_dir = self.tmpdir / "manual_exports"
+        first_copy, _ = EagleH3NativeLoopEndNode._copy_final_to_local(first_path, local_dir)
+        second_copy, _ = EagleH3NativeLoopEndNode._copy_final_to_local(first_path, local_dir)
+        self.assertEqual("test_run_0001.mp4", pathlib.Path(first_copy).name)
+        self.assertEqual("test_run_0002.mp4", pathlib.Path(second_copy).name)
+        self.assertTrue(pathlib.Path(first_copy).exists())
 
     def test_combined_nodes_use_native_video_contract(self):
         self.assertEqual("EAGLE_H3_STATE", EagleH3ShotContextNode.RETURN_TYPES[0])
@@ -726,6 +1315,7 @@ class H3ChainTests(unittest.TestCase):
         self.assertIn("plan", start_inputs["required"])
         self.assertNotIn("run_state", start_inputs["required"])
         self.assertEqual("EAGLE_H3_FLOW", EagleH3NativeLoopStartNode.RETURN_TYPES[0])
+        self.assertEqual("clip_count", EagleH3NativeLoopStartNode.RETURN_NAMES[-1])
         review_inputs = EagleH3CheckpointReviewNode.INPUT_TYPES()
         self.assertIn("state", review_inputs["required"])
         self.assertEqual("VIDEO", review_inputs["optional"]["video"][0])
@@ -733,9 +1323,19 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual("IMAGE", review_inputs["optional"]["images_with_overlap"][0])
         self.assertEqual("VIDEO", EagleH3CheckpointReviewNode.RETURN_TYPES[0])
         self.assertEqual("VIDEO", EagleH3NativeLoopEndNode.RETURN_TYPES[1])
+        required_end = EagleH3NativeLoopEndNode.INPUT_TYPES()["required"]
+        self.assertEqual("IMAGE", required_end["images"][0])
+        self.assertEqual("LATENT", required_end["sampled_latent"][0])
         optional = EagleH3NativeLoopEndNode.INPUT_TYPES()["optional"]
         self.assertIn("local_save_path", optional)
         self.assertIn("eagle_folder", optional)
+        self.assertIn("auto_assemble", optional)
+        self.assertEqual("EAGLE_H3_MANIFEST", EagleH3NativeLoopEndNode.RETURN_TYPES[5])
+        self.assertEqual("partial", EagleH3NativeLoopEndNode.RETURN_NAMES[6])
+        self.assertEqual(
+            ("last_context_frames", "last_context_latent"),
+            EagleH3NativeLoopEndNode.RETURN_NAMES[-2:],
+        )
 
     def test_frame_trim_removes_overlap_and_matches_audio_tail(self):
         images = torch.arange(8 * 2 * 2 * 3, dtype=torch.float32).reshape(8, 2, 2, 3)
@@ -755,6 +1355,18 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(7, with_overlap.shape[0])
         self.assertEqual(1, overlap_frames)
         self.assertEqual(3000, synced["waveform"].shape[-1])
+
+    def test_frame_trim_caps_h3_grid_tail_to_exact_target(self):
+        images = torch.zeros((243, 2, 2, 3), dtype=torch.float32)
+        audio = {"waveform": torch.ones((1, 1, 11000)), "sample_rate": 1000}
+        delivered, synced, overlap, overlap_frames = EagleH3FrameTrimNode().execute(
+            images, trim_frames=0, audio=audio, fps=24.0,
+            match_tail=True, retain_overlap_frames=0, target_frames=240,
+        )
+        self.assertEqual(240, delivered.shape[0])
+        self.assertEqual(240, overlap.shape[0])
+        self.assertEqual(0, overlap_frames)
+        self.assertEqual(10000, synced["waveform"].shape[-1])
 
 
 if __name__ == "__main__":

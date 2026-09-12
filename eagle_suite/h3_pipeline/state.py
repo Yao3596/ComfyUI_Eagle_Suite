@@ -4,8 +4,10 @@ H3 循环链路的运行期状态管理：manifest 的初始化、加载、推�
 """
 
 import json
+import hashlib
 import os
 import re
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,9 @@ from ..h3_director_node import H3_PLAN_TYPE
 from ..logger import logger
 
 from .constants import MANIFEST_VERSION, RESUME_POLICIES
+
+
+_RUNTIME_STATE_KEYS = frozenset(("previous_frames", "previous_latent"))
 
 
 def _safe_run_name(name):
@@ -89,6 +94,9 @@ def _default_state(plan, base_dir, mode="auto", max_shots=0):
         "total_shots": total,
         "plan": plan,
         "shots": [],
+        "shot_overrides": {},
+        "seed_overrides": {},
+        "checkpoint_history": [],
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
     }
@@ -149,6 +157,12 @@ def init_state(plan, output_root, run_name_override="", resume_policy="resume", 
                 old["reroll_index"] = None
                 old["stop"] = False
                 old.pop("pending_decision", None)
+                for key in ("shot_overrides", "seed_overrides"):
+                    old[key] = {
+                        str(index): value
+                        for index, value in (old.get(key) or {}).items()
+                        if int(index) < invalid_from
+                    }
                 old["invalidated_from"] = invalid_from
         if max_shots and max_shots < old["total_shots"]:
             old["total_shots"] = max_shots
@@ -177,17 +191,24 @@ def load_state(base_dir):
     state.setdefault("reroll_index", None)
     state.setdefault("stop", False)
     state.setdefault("shots", [])
+    state.setdefault("shot_overrides", {})
+    state.setdefault("seed_overrides", {})
+    state.setdefault("checkpoint_history", [])
     state.setdefault("mode", "auto")
     return state
 
 
 def save_state(state):
-    """原子写 manifest.json。"""
+    """原子写 manifest.json，不把动态循环张量塞进 JSON 清单。"""
     path = _manifest_path(state["base_dir"])
     tmp = path.with_suffix(f".tmp.{os.getpid()}.{int(time.time()*1000)}")
     state["updated_at"] = datetime.now().isoformat()
+    persisted = {
+        key: value for key, value in state.items()
+        if key not in _RUNTIME_STATE_KEYS
+    }
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+        json.dump(persisted, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
@@ -201,7 +222,13 @@ def shot_params(state):
     idx = state.get("current_index", 0)
     if not (0 <= idx < len(shots)):
         return None
-    shot = shots[idx]
+    shot = dict(shots[idx])
+    overrides = state.get("shot_overrides") or {}
+    shot_override = overrides.get(str(idx), overrides.get(idx, {}))
+    if isinstance(shot_override, dict):
+        shot.update(shot_override)
+    seed_overrides = state.get("seed_overrides") or {}
+    effective_seed = seed_overrides.get(str(idx), seed_overrides.get(idx, shot.get("seed", 0)))
     compat = plan.get("compatibility") or {}
     anchor = compat.get("anchor_mode", "head")
     global_blend = int(compat.get("video_blend_frames", 0) or 0) if anchor == "head" else 0
@@ -209,6 +236,7 @@ def shot_params(state):
         "index": idx,
         "total": state.get("total_shots", len(shots)),
         "shot": shot,
+        "effective_seed": int(effective_seed or 0),
         "compatibility": compat,
         "blend_frames": shot.get("blend_frames", global_blend),
         "context_length": shot.get("context_length") or compat.get("context_length", 0),
@@ -217,6 +245,64 @@ def shot_params(state):
         "width": int(compat.get("width", 1080) or 1080),
         "height": int(compat.get("height", 1920) or 1920),
     }
+
+
+def _valid_h3_length(value):
+    value = int(value or 0)
+    return 5 <= value <= 3592 and value % 17 == 5
+
+
+def apply_shot_overrides(state, prompt="", seed=None, length=0):
+    """Apply review-time overrides without mutating the Director plan snapshot."""
+    idx = int(state.get("current_index", 0) or 0)
+    params = shot_params(state)
+    if params is None:
+        raise ValueError("无当前镜头，无法应用重试参数")
+
+    overrides = state.setdefault("shot_overrides", {})
+    current = dict(overrides.get(str(idx), overrides.get(idx, {})) or {})
+    prompt = str(prompt or "").strip()
+    if prompt:
+        current["prompt"] = prompt
+        current["prompt_hash"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+    if length:
+        length = int(length)
+        if not _valid_h3_length(length):
+            raise ValueError(
+                f"H3 length={length} 无效；必须位于 5..3592 且满足 17k+5（length % 17 == 5）"
+            )
+        context = int(params.get("context_length", 0) or 0) if idx > 0 else 0
+        current["raw_frames"] = length
+        current["length"] = length
+        current["delivered_frames"] = max(1, length - context)
+        current["duration_seconds"] = round(length / float(params.get("fps", 24) or 24), 6)
+
+    if current:
+        overrides[str(idx)] = current
+
+    if seed is not None and int(seed) >= 0:
+        state.setdefault("seed_overrides", {})[str(idx)] = int(seed)
+    return state
+
+
+def restore_from_scene(state, scene_number):
+    """Resume by regenerating the requested one-based scene, preserving older approvals."""
+    total = int(state.get("total_shots", 0) or 0)
+    scene_number = int(scene_number or 0)
+    if not 1 <= scene_number <= total:
+        raise ValueError(f"恢复场景必须介于 1..{total}")
+    index = scene_number - 1
+    state["shots"] = [
+        item for item in state.get("shots", [])
+        if int(item.get("index", -1)) < index
+    ]
+    state["current_index"] = index
+    state["reroll_index"] = index
+    state["stop"] = False
+    state.pop("pending_decision", None)
+    state["restored_from_scene"] = scene_number
+    return state
 
 
 def advance(state, decision=None):
@@ -234,6 +320,9 @@ def advance(state, decision=None):
     if decision in ("retry", "reroll"):
         # 保持 current_index 不变，重跑当前镜头
         state["reroll_index"] = state["current_index"]
+        if decision == "reroll":
+            overrides = state.setdefault("seed_overrides", {})
+            overrides[str(state["current_index"])] = secrets.randbits(63)
         return state, True, False
 
     # 正常前进
@@ -246,12 +335,36 @@ def advance(state, decision=None):
 def record_shot_result(state, clip_path, delivered_frames=0, decision="approved", meta=None):
     """在 SegmentCheckpoint 后记录单镜结果。"""
     idx = state.get("current_index", 0)
+    previous = next(
+        (item for item in state.get("shots", []) if int(item.get("index", -1)) == idx),
+        None,
+    )
+    revisions = list((previous or {}).get("revisions") or [])
+    if previous and not revisions and previous.get("clip"):
+        revisions.append({
+            "revision": int(previous.get("active_revision", 1) or 1),
+            "clip": str(previous.get("clip")),
+            "delivered_frames": int(previous.get("delivered_frames", 0) or 0),
+            "decision": str(previous.get("decision") or "approved"),
+            "timestamp": str(previous.get("timestamp") or datetime.now().isoformat()),
+            "seed": int(previous.get("seed", 0) or 0),
+        })
+    next_revision = max([int(item.get("revision", 0) or 0) for item in revisions] + [0]) + 1
+    revision_number = int((meta or {}).get("revision", next_revision) or next_revision)
+    revision = {
+        "revision": revision_number,
+        "clip": str(clip_path),
+        "delivered_frames": int(delivered_frames),
+        "decision": decision,
+        "timestamp": datetime.now().isoformat(),
+    }
     entry = {
         "index": idx,
         "clip": str(clip_path),
         "delivered_frames": int(delivered_frames),
         "decision": decision,
         "timestamp": datetime.now().isoformat(),
+        "active_revision": revision_number,
     }
     params = shot_params(state)
     if params and isinstance(params.get("shot"), dict):
@@ -261,8 +374,18 @@ def record_shot_result(state, clip_path, delivered_frames=0, decision="approved"
         entry["generation_fingerprint"] = (
             params.get("compatibility", {}).get("generation_fingerprint", "")
         )
+        entry["seed"] = int(params.get("effective_seed", shot.get("seed", 0)) or 0)
     if isinstance(meta, dict):
         entry.update(meta)
+        revision.update(meta)
+    revisions.append(revision)
+    entry["revisions"] = revisions
+    state.setdefault("checkpoint_history", []).append({
+        "index": idx,
+        "revision": revision_number,
+        "clip": str(clip_path),
+        "timestamp": revision["timestamp"],
+    })
     # 去重：按 index 替换
     state["shots"] = [s for s in state["shots"] if s.get("index") != idx]
     state["shots"].append(entry)
@@ -292,5 +415,7 @@ __all__ = [
     "shot_params",
     "advance",
     "record_shot_result",
+    "apply_shot_overrides",
+    "restore_from_scene",
     "build_summary",
 ]

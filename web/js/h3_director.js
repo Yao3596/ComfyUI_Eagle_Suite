@@ -170,8 +170,8 @@ var H3D_CSS = `
 // ─────────────────────────────────────────────────────────────────
 // 数据工厂
 // ─────────────────────────────────────────────────────────────────
-function createScene(id) {
-    return { id: id, title: '', defaultSeconds: 10, defaultSteps: 8, shots: [], dialogues: [], preamble: '', disabledTokens: [] };
+function createScene(id, defaultSeconds) {
+    return { id: id, title: '', defaultSeconds: Number(defaultSeconds) || 7, defaultSteps: 8, shots: [], dialogues: [], preamble: '', disabledTokens: [] };
 }
 function createShot(id) {
     return {
@@ -256,12 +256,100 @@ function migrateMediaRefs(project) {
         });
     }
 }
+function defaultInteraction() {
+    return {
+        enabled: true,
+        visualStyle: 'auto',
+        productionLevel: 'SR',
+        dynamicType: 'auto',
+        outputMode: 'single_loop',
+        loopMode: 'pose_cycle',
+        aiMotionAutofill: true,
+        automationEnabled: true,
+        autoScene: true,
+        autoEffects: true,
+        autoCamera: true,
+        autoQualityCheck: true,
+        allowVideoReference: false,
+        expressionPack: 'auto',
+        sceneTheme: 'auto',
+        effectStyle: 'auto',
+        interactionIntent: '',
+        adultEnabled: false,
+        adultTier: 'off',
+        adultSubjectsVerified: false,
+        consentConfirmed: false
+    };
+}
+
+var PV_TRANSITION_OPTIONS = [
+    ['hard_cut','硬切'], ['cut_on_action','动作点切'], ['flash_cut','闪白切'], ['match_cut','匹配剪辑'],
+    ['graphic_match','图形匹配'], ['whip_pan','甩镜平移'], ['whip_zoom','甩镜缩放'],
+    ['foreground_wipe','前景遮挡切'], ['luma_wipe','亮度擦除'], ['mask_wipe','遮罩擦除'],
+    ['split_screen_push','分屏推进'], ['parallax_push','视差推进'], ['speed_ramp','变速转场'],
+    ['freeze_smash','定格冲切'], ['film_burn','胶片灼烧'], ['glitch_slice','故障切片'],
+    ['zoom_blur','缩放模糊'], ['light_sweep','扫光转场'], ['dip_to_color','浸色过渡']
+];
+var PV_EFFECT_OPTIONS = [
+    ['deep_glow','Deep Glow'], ['bokeh','Bokeh'], ['rgb_split','RGB 分离'], ['pixel_sort','Pixel Sort'],
+    ['jpeg_glitch','JPEG Glitch'], ['frame_echo','帧回声'], ['light_leak','漏光'], ['thick_stroke','描边'],
+    ['halftone','半调网点'], ['chromatic_trails','彩色拖影'], ['particle_burst','粒子爆发'],
+    ['scanline','扫描线'], ['film_grain','胶片颗粒'], ['lens_distortion','镜头畸变'],
+    ['bloom_pulse','辉光脉冲'], ['silhouette','剪影'], ['posterize','色阶海报化'],
+    ['ink_spread','墨迹扩散'], ['hologram','全息层'], ['graphic_shapes','动态图形']
+];
+
+function defaultPv() {
+    return {
+        enabled: false,
+        theme: 'auto',
+        visualStyle: 'auto',
+        editGrammar: 'auto',
+        actionProfile: 'calm',
+        textTreatment: 'safe_title',
+        template: 'character_reveal',
+        rhythm: 'beat_sync',
+        cutDensity: 'medium',
+        bpm: 120,
+        beatOffsetMs: 0,
+        title: '',
+        subtitle: '',
+        reserveTitleSafeArea: true,
+        allowVideoReference: true,
+        transitions: ['flash_cut', 'match_cut', 'whip_zoom'],
+        effects: ['deep_glow', 'bokeh', 'rgb_split'],
+        creativeBrief: '',
+        actionDirection: '',
+        titleConcept: '',
+        selectedCardId: '',
+        drawMode: 'character_match',
+        modelMode: 'auto',
+        drawCount: 3,
+        drawing: false,
+        cards: [],
+        history: [],
+        lastDrawSummary: '',
+        notes: ''
+    };
+}
+
+function projectAllowsVideoReferences(project) {
+    project = project || {};
+    var interaction = Object.assign(defaultInteraction(), project.interaction || {});
+    var pv = Object.assign(defaultPv(), project.pv || {});
+    if (project.workflowType === 'character_interaction') return !!interaction.allowVideoReference;
+    if (project.workflowType === 'character_pv') return !!(pv.enabled && pv.allowVideoReference);
+    return ['r2v','rv2v','v2v'].indexOf(String(project.mode || '').toLowerCase()) >= 0;
+}
+
 function defaultProject() {
     return {
+        workflowType: 'character_interaction',
         mode: 't2v', globalDuration: 7, globalSteps: 8,
         // 必须与尺寸下拉框的真实 value 完全一致，否则首次打开时没有选中项。
         aspect: '16:9', resolution: 'mp0.5', fps: 24, exportMode: 'all',
-        sizePreset: '16:9|mp0.5|960|544',
+        sizePreset: '16:9|mp0.5|960|544', width: 960, height: 544,
+        sizeLocked: true, sizeRatio: 960 / 544,
         foundation: '',
         contextLength: 22, encodeMode: 'video', anchorMode: 'head', crop: 'disabled',
         audioMode: 'generated_audio', audioContextLength: 22, baseSeed: 0, segmentCrf: 18,
@@ -271,6 +359,12 @@ function defaultProject() {
         mediaRefs: [],
         // 导演台内选择的技能库快照。保存到工作流，确保下次打开仍能复现生成上下文。
         director_skill: '',
+        // AI 生成后的动作/运镜/转场摘要；仅保存短期记录用于跨场景去重。
+        generationHistory: [],
+        // 动态角色交互策略。参考视频保留为高级功能，但新项目默认不启用。
+        interaction: defaultInteraction(),
+        // 角色 PV / 类 AE 动效只负责编排与后期元数据，不让生成模型直接绘制精确文字。
+        pv: defaultPv(),
         skill: {
             tasks: [],            // ['script','shots','dialogue'] 多选
             promptLanguage: 'en', // 视觉/运镜模板语言；H3 默认推荐英文
@@ -279,7 +373,7 @@ function defaultProject() {
             mergeMode: 'overwrite', // 'overwrite' 覆盖 | 'append' 追加
             profile: 'balanced',
             skillPolicy: 'merge',
-            librarySkillIds: [],
+            librarySkillIds: ['pro-v1-h3-character-dynamic-director', 'pro-v2-h3-character-interaction-automation'],
             temperature: 0.7,
             hint: ''
         }
@@ -287,14 +381,63 @@ function defaultProject() {
 }
 function normalizeProjectEnums(project) {
     if (!project) return;
+    var hadInteraction = !!(project.interaction && typeof project.interaction === 'object');
+    var legacyHasVideo = !hadInteraction && Array.isArray(project.mediaRefs) && project.mediaRefs.some(function(item) {
+        return item && item.filename && item.type === 'video';
+    });
     if (project.encodeMode === 'image') project.encodeMode = 'frames';
     if (project.anchorMode === 'frame' || project.anchorMode === 'tail') project.anchorMode = 'before';
     if (project.continuationMode === 'strict' || project.continuationMode === 'free') project.continuationMode = 'guide';
     if (project.audioMode === 'off') project.audioMode = 'generated_audio';
     if (['off','warn','strict'].indexOf(project.referencePolicy) < 0) project.referencePolicy = 'warn';
+    var sizeParts = String(project.sizePreset || '').split('|');
+    if (project.sizePreset !== 'custom' && sizeParts.length >= 4) {
+        project.width = parseInt(sizeParts[2], 10) || 960;
+        project.height = parseInt(sizeParts[3], 10) || 544;
+    }
+    project.width = snapDimension(project.width || 960);
+    project.height = snapDimension(project.height || 544);
+    project.sizeLocked = project.sizeLocked !== false;
+    if (!(Number(project.sizeRatio) > 0)) project.sizeRatio = project.width / project.height;
+    if (['ai_drama','character_interaction','character_pv'].indexOf(project.workflowType) < 0) project.workflowType = 'ai_drama';
     project.skill = Object.assign(defaultProject().skill, project.skill || {});
+    project.interaction = Object.assign(defaultInteraction(), project.interaction || {});
+    project.pv = Object.assign(defaultPv(), project.pv || {});
+    if (legacyHasVideo) project.interaction.allowVideoReference = true;
     if (['en', 'zh'].indexOf(project.skill.promptLanguage) < 0) project.skill.promptLanguage = 'en';
     if (!project.skill.dialogueLanguage) project.skill.dialogueLanguage = 'Chinese';
+    if (['S','SR','SSR','UR'].indexOf(project.interaction.productionLevel) < 0) project.interaction.productionLevel = 'SR';
+    if (['auto','live_action','anime'].indexOf(project.interaction.visualStyle) < 0) project.interaction.visualStyle = 'auto';
+    if (['single_clip','single_loop','optional_chain','continuous_chain'].indexOf(project.interaction.outputMode) < 0) project.interaction.outputMode = 'single_loop';
+    if (!project.interaction.adultEnabled) project.interaction.adultTier = 'off';
+    if (['character_reveal','kinetic_typography','image_flash','mixed_pv','action_showcase','emotional_memory','fashion_editorial'].indexOf(project.pv.template) < 0) project.pv.template = 'character_reveal';
+    if (['beat_sync','impact_accents','smooth_cinematic','glitch_cut','syncopated','crescendo'].indexOf(project.pv.rhythm) < 0) project.pv.rhythm = 'beat_sync';
+    if (['sparse','medium','dense'].indexOf(project.pv.cutDensity) < 0) project.pv.cutDensity = 'medium';
+    if (['auto','hero_origin','neon_idol','fantasy_relic','urban_chase','dream_archive','dark_rival','festival_stage','tech_interface','fashion_editorial','quiet_portrait'].indexOf(project.pv.theme) < 0) project.pv.theme = 'auto';
+    if (['auto','anime_cel','live_action_cinematic','graphic_comic','y2k_digital','retro_film','luxury_editorial','minimal_monochrome','holographic','ink_paper'].indexOf(project.pv.visualStyle) < 0) project.pv.visualStyle = 'auto';
+    if (['auto','detail_to_hero','match_on_action','shape_match','color_match','eyeline_bridge','beat_strobe','time_remap','split_screen','freeze_smash','foreground_wipe'].indexOf(project.pv.editGrammar) < 0) project.pv.editGrammar = 'auto';
+    if (['calm','graceful','energetic','combat','idol','mysterious','comedic'].indexOf(project.pv.actionProfile) < 0) project.pv.actionProfile = 'calm';
+    if (['safe_title','hero_nameplate','kinetic_words','subtitle_card','no_text'].indexOf(project.pv.textTreatment) < 0) project.pv.textTreatment = 'safe_title';
+    if (['character_match','balanced','surprise'].indexOf(project.pv.drawMode) < 0) project.pv.drawMode = 'character_match';
+    if (['auto','local_only','model_refine'].indexOf(project.pv.modelMode) < 0) project.pv.modelMode = 'auto';
+    project.pv.bpm = Math.max(40, Math.min(240, Number(project.pv.bpm) || 120));
+    project.pv.beatOffsetMs = Math.max(-2000, Math.min(2000, Number(project.pv.beatOffsetMs) || 0));
+    project.pv.drawCount = Math.max(1, Math.min(8, Number(project.pv.drawCount) || 3));
+    if (!Array.isArray(project.pv.transitions)) project.pv.transitions = defaultPv().transitions.slice();
+    if (!Array.isArray(project.pv.effects)) project.pv.effects = defaultPv().effects.slice();
+    if (!Array.isArray(project.pv.cards)) project.pv.cards = [];
+    if (!Array.isArray(project.pv.history)) project.pv.history = [];
+    project.pv.drawing = false;
+    if (!Array.isArray(project.generationHistory)) project.generationHistory = [];
+}
+
+function snapDimension(value) {
+    return Math.max(32, Math.min(4096, Math.round((Number(value) || 32) / 32) * 32));
+}
+
+function h3LegalLength(requestedFrames) {
+    var requested = Math.max(5, Math.ceil(Number(requestedFrames) || 5));
+    return requested + ((5 - requested % 17) % 17);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -308,11 +451,17 @@ function loadState(node) {
         if (w && w.value && w.value !== '{}') {
             var data = JSON.parse(w.value);
             if (data && data.project) Object.assign(project, data.project);
+            if (data && data.project && !Object.prototype.hasOwnProperty.call(data.project, 'workflowType')) {
+                // v1/v2 工作流均视为原有 AI 短剧，避免升级后自动注入角色循环合同。
+                project.workflowType = 'ai_drama';
+                project.interaction = Object.assign(defaultInteraction(), data.project.interaction || {}, { enabled:false });
+            }
             if (data && Array.isArray(data.scenes) && data.scenes.length) scenes = data.scenes;
         }
     } catch(e) { console.warn('[EagleH3Director] loadState error:', e); }
     migrateMediaRefs(project);
     normalizeProjectEnums(project);
+    scenes.forEach(function(scene) { normalizeSceneShotTimes(scene, project.fps, false); });
     return { project: project, scenes: scenes };
 }
 function extractDialoguesIfNeeded(scenes) {
@@ -329,6 +478,7 @@ function extractDialoguesIfNeeded(scenes) {
 }
 function applyStateToReactive(project, scenes, store, data) {
     var savedProject = data.project || {};
+    var legacyDrama = !Object.prototype.hasOwnProperty.call(savedProject, 'workflowType');
     // 兼容旧版 segmentRef → segmentCrf
     if ('segmentRef' in savedProject && !('segmentCrf' in savedProject)) {
         savedProject.segmentCrf = savedProject.segmentRef;
@@ -337,6 +487,10 @@ function applyStateToReactive(project, scenes, store, data) {
     Object.keys(defProject).forEach(function(k) {
         project[k] = (k in savedProject) ? savedProject[k] : defProject[k];
     });
+    if (legacyDrama) {
+        project.workflowType = 'ai_drama';
+        project.interaction = Object.assign(defaultInteraction(), savedProject.interaction || {}, { enabled:false });
+    }
     migrateMediaRefs(project);
     normalizeProjectEnums(project);
     // skill 配置确保字段完整（兼容旧工作流缺失字段）
@@ -355,6 +509,7 @@ function applyStateToReactive(project, scenes, store, data) {
         scenes.push(createScene(1));
     }
     extractDialoguesIfNeeded(scenes);
+    scenes.forEach(function(scene) { normalizeSceneShotTimes(scene, project.fps, false); });
     store.currentSceneId = (scenes[0] && scenes[0].id) || 1;
 }
 function saveState(node, project, scenes, immediate) {
@@ -363,7 +518,8 @@ function saveState(node, project, scenes, immediate) {
     if (node._h3SaveTimer) { clearTimeout(node._h3SaveTimer); node._h3SaveTimer = null; }
     var doSave = function() {
         try {
-            var clean = JSON.parse(JSON.stringify({ version: 2, project: project, scenes: scenes }));
+            (scenes || []).forEach(function(scene) { normalizeSceneShotTimes(scene, project.fps, false); });
+            var clean = JSON.parse(JSON.stringify({ version: 3, project: project, scenes: scenes }));
             (clean.project.mediaRefs || []).forEach(function(r) { if (r) delete r.file; });
             // Keep a legacy image-only mirror so older workflow consumers continue to work.
             clean.project.refs = (clean.project.mediaRefs || []).filter(function(r) { return r.type === 'image'; }).map(function(r) {
@@ -387,8 +543,65 @@ function saveState(node, project, scenes, immediate) {
 // ─────────────────────────────────────────────────────────────────
 function fmtTime(sec) {
     sec = Math.max(0, Number(sec) || 0);
-    var m = Math.floor(sec / 60), s = Math.floor(sec % 60), ms = Math.round((sec - Math.floor(sec)) * 1000);
-    return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + '.' + String(ms).padStart(3,'0');
+    var totalMs = Math.max(0, Math.round(sec * 1000));
+    var h = Math.floor(totalMs / 3600000); totalMs -= h * 3600000;
+    var m = Math.floor(totalMs / 60000); totalMs -= m * 60000;
+    var s = Math.floor(totalMs / 1000), ms = totalMs % 1000;
+    var base = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + '.' + String(ms).padStart(3,'0');
+    return h ? String(h).padStart(2,'0') + ':' + base : base;
+}
+function parseTimecode(value) {
+    var match = String(value || '').trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?$/);
+    if (!match) return null;
+    var hours = Number(match[1] || 0), minutes = Number(match[2]), seconds = Number(match[3]);
+    if ((match[1] && minutes >= 60) || seconds >= 60) return null;
+    var millis = Number(String(match[4] || '0').padEnd(3, '0').slice(0, 3));
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+}
+function buildShotTimings(scene, fps, equalDistribution) {
+    var shots = (scene && Array.isArray(scene.shots)) ? scene.shots : [];
+    if (!shots.length) return [];
+    fps = Math.max(1, Math.round(Number(fps) || 24));
+    var duration = Math.max(0.001, Number(scene.defaultSeconds) || 10);
+    var totalFrames = Math.max(shots.length, Math.round(duration * fps));
+    var starts = [];
+    shots.forEach(function(shot, index) {
+        var frame;
+        if (equalDistribution) frame = Math.round(totalFrames * index / shots.length);
+        else {
+            var parsed = index === 0 ? 0 : parseTimecode(shot && shot.time);
+            frame = parsed == null ? Math.round(totalFrames * index / shots.length) : Math.round(parsed * fps);
+        }
+        var minimum = index ? starts[index - 1] + 1 : 0;
+        var maximum = totalFrames - (shots.length - index);
+        starts.push(Math.max(minimum, Math.min(maximum, frame)));
+    });
+    return shots.map(function(shot, index) {
+        var startFrame = starts[index];
+        var endFrame = index + 1 < starts.length ? starts[index + 1] : totalFrames;
+        var frameCount = Math.max(1, endFrame - startFrame);
+        var startSeconds = startFrame / fps, endSeconds = endFrame / fps;
+        var startTimecode = fmtTime(startSeconds), endTimecode = fmtTime(endSeconds);
+        return {
+            startFrame:startFrame, endFrameExclusive:endFrame, frameCount:frameCount,
+            startSeconds:startSeconds, endSeconds:endSeconds, durationSeconds:frameCount / fps,
+            startTimecode:startTimecode, endTimecode:endTimecode,
+            label:startTimecode + ' → ' + endTimecode + ' · ' + frameCount + 'f'
+        };
+    });
+}
+function normalizeSceneShotTimes(scene, fps, equalDistribution) {
+    var timings = buildShotTimings(scene, fps, !!equalDistribution);
+    (scene && scene.shots || []).forEach(function(shot, index) {
+        var timing = timings[index]; if (!timing) return;
+        shot.time = timing.startTimecode;
+        shot.endTime = timing.endTimecode;
+        shot.estSeconds = Number(timing.durationSeconds.toFixed(6));
+        shot.startFrame = timing.startFrame;
+        shot.endFrameExclusive = timing.endFrameExclusive;
+        shot.frameCount = timing.frameCount;
+    });
+    return timings;
 }
 var DIALOGUE_RE = /<d>\[([^\]]+)\]\s*([^<]+)<\/d>/gi;
 function parseDialogues(text) {
@@ -475,6 +688,162 @@ function highlightText(s, mediaItems) {
     return out;
 }
 
+function buildInteractionDirective(project, scene) {
+    var cfg = Object.assign(defaultInteraction(), (project && project.interaction) || {});
+    if (!cfg.enabled) return '';
+    var duration = Math.max(4, Math.min(15, Number(scene && scene.defaultSeconds) || Number(project && project.globalDuration) || 7));
+    var production = {
+        S: 'S / restrained: one readable interaction beat, stable camera, subtle secondary motion, zero or one lightweight effect layer.',
+        SR: 'SR / standard: anticipation, main action and reaction, one motivated camera move, one or two effect layers.',
+        SSR: 'SSR / advanced: two or three readable performance beats, layered foreground/background motion, motivated camera and effects.',
+        UR: 'UR / showcase: a polished hero performance with at most three clear beats, coordinated camera, environment response and layered effects.'
+    }[cfg.productionLevel] || '';
+    var visualStyle = {
+        auto: 'Infer live-action versus anime motion language from the authoritative character references and preserve that medium.',
+        live_action: 'LIVE-ACTION PERFORMANCE: use physically weighted motion, realistic inertia and joint limits, subtle facial micro-expression, natural blinking and cinematic camera response; avoid anime smear frames, cel-shaded motion shorthand and exaggerated holds.',
+        anime: 'ANIME PERFORMANCE: preserve 2D linework and cel shading, favor readable key poses, controlled anticipation/holds and selective stylized follow-through; avoid photoreal skin, live-action motion blur and 3D-render drift.'
+    }[cfg.visualStyle] || '';
+    var dynamics = {
+        auto: 'Infer a character-appropriate interaction from visible design, scene intent and supplied text.',
+        idle_loop: 'Subtle breathing, blink, gaze shift, small head motion, hair and garment follow-through.',
+        expression_reaction: 'A clear facial reaction supported by restrained head, shoulder and hand motion.',
+        gesture: 'One readable communicative gesture with anticipation, action, reaction and recovery.',
+        dialogue_lipsync: 'Conversational acting with natural lip motion, blink, gaze and restrained gesture.',
+        action: 'A readable action with stable anatomy, center-of-frame staging and controlled follow-through.',
+        dance_performance: 'A short rhythmic performance with a limited move vocabulary and clear recovery pose.',
+        transformation: 'A staged transformation with identity and costume continuity preserved across effects.',
+        vfx_showcase: 'Character-led effects showcase; effects respond to action and never obscure the face.',
+        environment_interaction: 'The character touches or reacts to a clearly defined environmental element.',
+        meme_loop: 'A concise, exaggerated reaction suitable for a looping reaction clip.'
+    }[cfg.dynamicType] || '';
+    var outputs = {
+        single_clip: 'Deliver one self-contained clip with a natural ending; no stitching handoff is required.',
+        single_loop: 'Deliver one seamless loop. Match first and last pose, framing, motion velocity, hair/cloth direction, lighting and effect phase; do not freeze the seam.',
+        optional_chain: 'Each clip must work independently and may additionally expose compatible handoff_in/handoff_out states for optional post-production stitching.',
+        continuous_chain: 'Plan explicit continuity handoffs for later stitching: pose, gaze, screen position, camera velocity, lighting, effects and sound must match.'
+    }[cfg.outputMode] || '';
+    var lines = [
+        'CHARACTER INTERACTION CONTRACT:',
+        '- Duration budget: ' + duration + ' seconds.',
+        '- Production strength: ' + production,
+        '- Visual performance system: ' + visualStyle,
+        '- Dynamic type: ' + dynamics,
+        '- Output strategy: ' + outputs,
+        '- Preserve identity, facial structure, hairstyle, costume construction, signature accessories, body proportions, palette and visual style.',
+        '- Keep the primary action readable in the central 70% of frame. Use observable motions with timing, amplitude, direction, reaction and recovery instead of vague emotion words.'
+    ];
+    if (cfg.aiMotionAutofill) {
+        lines.push('- AI motion completion is enabled: invent physically coherent micro-motion and secondary motion without requiring a reference video; keep the action vocabulary proportional to duration.');
+    }
+    if (!cfg.allowVideoReference) {
+        lines.push('- Reference-video transfer is disabled. Build motion from character design, scene intent and still-image anchors only; do not request or assume a video reference.');
+    }
+    var autoParts = [];
+    if (cfg.autoScene) autoParts.push('scene');
+    if (cfg.autoEffects) autoParts.push('effects');
+    if (cfg.autoCamera) autoParts.push('camera');
+    if (cfg.autoQualityCheck) autoParts.push('continuity/loop quality checks');
+    if (cfg.automationEnabled) lines.push('- Automation is enabled for: ' + (autoParts.join(', ') || 'shot planning') + '. Derive choices from the character and stated intent, and keep every choice editable.');
+    if (cfg.expressionPack && cfg.expressionPack !== 'auto') lines.push('- Expression target: ' + cfg.expressionPack + '.');
+    if (cfg.sceneTheme && cfg.sceneTheme !== 'auto') lines.push('- Scene theme: ' + cfg.sceneTheme + '.');
+    if (cfg.effectStyle && cfg.effectStyle !== 'auto') lines.push('- Effect style: ' + cfg.effectStyle + '.');
+    if (String(cfg.interactionIntent || '').trim()) lines.push('- User interaction intent: ' + String(cfg.interactionIntent).trim());
+    var adultReady = cfg.adultEnabled && cfg.adultTier !== 'off' && cfg.adultSubjectsVerified && cfg.consentConfirmed;
+    if (adultReady) {
+        lines.push('- Adult-content profile: enabled at ' + cfg.adultTier + '. All depicted people are explicitly verified adults and all intimacy is consensual. Apply only the separately enabled adult-safety skill and remain within its limits.');
+    } else {
+        lines.push('- Adult-content profile: OFF. Keep the result general-audience; production strength S/SR/SSR/UR never changes sexual-content level.');
+    }
+    return lines.join('\n');
+}
+
+function buildPvDirective(project, scene) {
+    var cfg = Object.assign(defaultPv(), (project && project.pv) || {});
+    if (!cfg.enabled || (project && project.workflowType !== 'character_pv')) return '';
+    var duration = Math.max(1, Number(scene && scene.defaultSeconds) || Number(project && project.globalDuration) || 7);
+    var templates = {
+        character_reveal: 'Build a hero character reveal: silhouette or detail inserts, identity reveal, signature action, then a clean hero hold.',
+        kinetic_typography: 'Build motion-graphics plates around title rhythm, graphic masks and negative space; exact typography is added in post.',
+        image_flash: 'Build a rhythmic image-flash montage with short readable poses, detail inserts and strong graphic contrast.',
+        mixed_pv: 'Combine character reveal, action inserts, graphic title plates and a decisive end card without overcrowding any beat.',
+        action_showcase: 'Use match-on-action staging: anticipation, peak pose, impact insert and a controlled recovery.',
+        emotional_memory: 'Build lyrical memory fragments, expressive close-ups and visual echoes that resolve on an emotional hero frame.',
+        fashion_editorial: 'Use fashion-editorial posing, material details, graphic negative space and precise visual punctuation.'
+    };
+    var rhythms = {
+        beat_sync: 'Cut and accent on the declared music beat grid.',
+        impact_accents: 'Hold longer between a few strong impact accents; reserve flash frames for real emphasis.',
+        smooth_cinematic: 'Use longer cinematic phrases, motivated match cuts and restrained glow transitions.',
+        glitch_cut: 'Use concise glitch interruptions and datamosh-like transitions while keeping the character readable.',
+        syncopated: 'Alternate on-beat anchors with restrained off-beat inserts so the edit does not feel mechanical.',
+        crescendo: 'Begin with spacious holds, increase cut frequency, then resolve on one clean hero frame.'
+    };
+    var themes = {
+        auto:'Infer a coherent theme from the character, references and brief.', hero_origin:'Hero origin and identity reveal.',
+        neon_idol:'Neon idol stage and fan-energy spectacle.', fantasy_relic:'Fantasy relic awakening and magical lore.',
+        urban_chase:'Urban pursuit and kinetic street energy.', dream_archive:'Dream archive, memory fragments and emotional symbolism.',
+        dark_rival:'Dark rival confrontation and controlled menace.', festival_stage:'Festival stage, celebratory color and rhythmic performance.',
+        tech_interface:'Future interface, scanning graphics and holographic systems.', fashion_editorial:'Fashion editorial, material detail and confident posing.',
+        quiet_portrait:'Quiet portrait, intimate expression and restrained atmosphere.'
+    };
+    var styles = {
+        auto:'Preserve and infer the reference medium.', anime_cel:'Clean 2D anime linework, cel shading and readable key poses.',
+        live_action_cinematic:'Physically weighted live-action movement and cinematic optics.', graphic_comic:'Graphic comic panels, bold shapes and controlled halftone accents.',
+        y2k_digital:'Y2K digital graphics, chrome accents and playful interface motifs.', retro_film:'Analog film texture, optical light and restrained period color.',
+        luxury_editorial:'Luxury editorial lighting, material detail and minimal typography.', minimal_monochrome:'High-contrast monochrome forms and deliberate negative space.',
+        holographic:'Holographic color separation, scanning light and translucent layers.', ink_paper:'Ink-and-paper texture, brush transitions and graphic silhouettes.'
+    };
+    var grammars = {
+        auto:'Choose cuts from action, gaze, shape, color and story continuity.', detail_to_hero:'Move from costume or prop details to a full identity reveal.',
+        match_on_action:'Cut across views on the same readable character action.', shape_match:'Bridge shots through matched silhouettes and graphic shapes.',
+        color_match:'Use one palette accent to motivate each cut.', eyeline_bridge:'Follow gaze and reaction to reveal the next visual beat.',
+        beat_strobe:'Place very short beat inserts around longer readable anchor shots.', time_remap:'Use speed ramps only around clear action peaks and recovery poses.',
+        split_screen:'Build parallel details or before/after states in graphic panels.', freeze_smash:'Freeze a peak pose for post graphics, then smash-cut into motion.',
+        foreground_wipe:'Hide cuts behind a foreground object, cloth, hair or light sweep.'
+    };
+    var actions = {
+        calm:'restrained breathing, gaze, hair/cloth follow-through and a confident hero hold',
+        graceful:'an elegant turn, hand or costume gesture with smooth recovery', energetic:'clear anticipation, fast readable action accents and stable recovery poses',
+        combat:'guard, wind-up, one decisive technique and a readable impact silhouette', idol:'performance gesture, audience-facing eyeline and rhythmic pose changes',
+        mysterious:'partial reveal, controlled gaze, prop interaction and restrained movement', comedic:'concise reaction, readable exaggeration and a clean loopable reset'
+    };
+    var textTreatments = {
+        safe_title:'single title in reserved negative space', hero_nameplate:'character nameplate after the identity reveal',
+        kinetic_words:'short kinetic words animated in post on beat accents', subtitle_card:'title plus one restrained subtitle line', no_text:'no typography'
+    };
+    var density = {
+        sparse: 'sparse / 1–2 major editorial events per 5 seconds',
+        medium: 'medium / 3–5 editorial events per 5 seconds',
+        dense: 'dense / 6–9 short editorial events per 5 seconds; every pose must still be readable'
+    }[cfg.cutDensity] || 'medium';
+    var transitions = (cfg.transitions || []).join(', ') || 'clean cut';
+    var effects = (cfg.effects || []).join(', ') || 'none';
+    var lines = [
+        'CHARACTER PV / MOTION-GRAPHICS CONTRACT:',
+        '- Duration budget: ' + duration.toFixed(3) + ' seconds.',
+        '- Theme: ' + (themes[cfg.theme] || themes.auto),
+        '- Visual style: ' + (styles[cfg.visualStyle] || styles.auto),
+        '- Template: ' + (templates[cfg.template] || templates.character_reveal),
+        '- Rhythm: ' + (rhythms[cfg.rhythm] || rhythms.beat_sync),
+        '- Editing grammar: ' + (grammars[cfg.editGrammar] || grammars.auto),
+        '- Character action profile: ' + (actions[cfg.actionProfile] || actions.calm) + '.',
+        '- Beat grid: ' + Math.round(Number(cfg.bpm) || 120) + ' BPM with ' + Math.round(Number(cfg.beatOffsetMs) || 0) + ' ms offset.',
+        '- Edit density: ' + density + '.',
+        '- Planned transitions for post: ' + transitions + '.',
+        '- Planned effect layers for post: ' + effects + '.',
+        '- Generate clean, temporally stable character plates. Preserve identity, face, hairstyle, costume, proportions, signature props and palette across every cut.',
+        '- Separate generation from compositing: flashes, RGB split, pixel sorting, JPEG glitches, film burns, exact masks and final typography are post-production cues, not requests to deform the character.',
+        '- Do not draw readable titles, logos, UI or watermarks inside generated footage.',
+        '- Typography treatment for post: ' + (textTreatments[cfg.textTreatment] || textTreatments.safe_title) + '.'
+    ];
+    if (cfg.reserveTitleSafeArea) lines.push('- Reserve uncluttered title-safe negative space and keep the face, hands and signature costume details outside it.');
+    if (String(cfg.title || '').trim()) lines.push('- Exact post title (metadata only; do not render in generation): ' + String(cfg.title).trim());
+    if (String(cfg.subtitle || '').trim()) lines.push('- Exact post subtitle (metadata only; do not render in generation): ' + String(cfg.subtitle).trim());
+    if (String(cfg.creativeBrief || '').trim()) lines.push('- Creative brief: ' + String(cfg.creativeBrief).trim());
+    if (String(cfg.notes || '').trim()) lines.push('- User PV direction: ' + String(cfg.notes).trim());
+    return lines.join('\n');
+}
+
 function compilePrompt(project, scene) {
     if (!project) project = {};
     if (!scene) scene = {};
@@ -482,7 +851,9 @@ function compilePrompt(project, scene) {
     var mode = (project.mode || 't2v').toUpperCase();
     var secs = scene.defaultSeconds || 10;
 
-    var mediaRefs = (project.mediaRefs || []).filter(function(r) { return r && r.filename; });
+    var mediaRefs = (project.mediaRefs || []).filter(function(r) {
+        return r && r.filename && (r.type !== 'video' || projectAllowsVideoReferences(project));
+    });
     var isReferenceMode = ['R2V','RV2V','V2V'].indexOf(mode) >= 0;
 
     // Base 模式在最终 timeline 完成后统一编译三字段；Ref2VA 走六字段。
@@ -553,9 +924,16 @@ function compilePrompt(project, scene) {
     var activePreamble = stripDisabledTokens(scene, scene.preamble || '');
     var preamble = activePreamble.replace(/<d>[\s\S]*?<\/d>/g,'').replace(/\n{3,}/g,'\n\n').trim();
     var shots = scene.shots || [];
+    if (shots.length) {
+        // The script task may already contain [Shot N] blocks. Structured shot
+        // rows are the editable authority after decomposition, so retain only
+        // any setup text before the first block and avoid duplicate prompts.
+        preamble = preamble.split(/^\s*\[Shot\s+\d+\]/im)[0].trim();
+    }
+    var shotTimings = buildShotTimings(scene, project.fps, false);
     var shotLines = shots.map(function(s, i) {
         var p = [];
-        if (i > 0 && s.time) p.push('At ' + s.time + ', the camera cuts to');
+        if (i > 0 && shotTimings[i]) p.push('At ' + shotTimings[i].startTimecode + ', the camera cuts to');
         if (s.framing) p.push(s.framing);
         if (s.title) p.push('a shot titled ' + s.title + '.');
         if (s.transitionIn) p.push('Transition in: ' + s.transitionIn + '.');
@@ -582,7 +960,9 @@ function compilePrompt(project, scene) {
         }
         return timePrefix + d.role + ' (' + speakerIds[d.role] + ') says: <d>[' + dialogueLanguage + '] ' + d.text + '</d>';
     }).join('\n  ');
-    var timeline = [preamble, shotLines, dlgs].filter(Boolean).join('\n\n') || 'N/A';
+    var interactionDirective = buildInteractionDirective(project, scene);
+    var pvDirective = buildPvDirective(project, scene);
+    var timeline = [interactionDirective, pvDirective, preamble, shotLines, dlgs].filter(Boolean).join('\n\n') || 'N/A';
     if (isReferenceMode) {
         parts.push('detailed_description:\n  ' + timeline.replace(/\n/g, '\n  '));
     } else {
@@ -658,10 +1038,54 @@ var H3DirectorApp = defineComponent({
             if (parts.length >= 4) {
                 store.project.aspect = parts[0];
                 store.project.resolution = parts[1];
-                store.project.width = parseInt(parts[2]) || 1080;
-                store.project.height = parseInt(parts[3]) || 1920;
+                store.project.width = snapDimension(parts[2]);
+                store.project.height = snapDimension(parts[3]);
+                store.project.sizeRatio = store.project.width / store.project.height;
             }
-            markDirty();
+            markDirty(true);
+        }
+
+        function onCustomDimension(axis) {
+            var width = snapDimension(store.project.width || 960);
+            var height = snapDimension(store.project.height || 544);
+            var ratio = Number(store.project.sizeRatio) || (width / height);
+            if (store.project.sizeLocked) {
+                if (axis === 'width') height = snapDimension(width / ratio);
+                else width = snapDimension(height * ratio);
+            }
+            store.project.width = width;
+            store.project.height = height;
+            if (!store.project.sizeLocked) store.project.sizeRatio = width / height;
+            store.project.sizePreset = 'custom';
+            store.project.aspect = 'custom';
+            store.project.resolution = (width * height / 1000000).toFixed(2) + 'MP';
+            markDirty(true);
+        }
+
+        function toggleSizeLock() {
+            store.project.sizeLocked = !store.project.sizeLocked;
+            if (store.project.sizeLocked) {
+                store.project.sizeRatio = Math.max(1 / 128, Number(store.project.width) / Math.max(1, Number(store.project.height)));
+            }
+            markDirty(true);
+        }
+
+        function onWorkflowType() {
+            var interactionMode = store.project.workflowType === 'character_interaction';
+            var pvMode = store.project.workflowType === 'character_pv';
+            store.project.interaction.enabled = interactionMode;
+            store.project.pv.enabled = pvMode;
+            if (!interactionMode) {
+                store.project.interaction.adultEnabled = false;
+                store.project.interaction.adultTier = 'off';
+            }
+            var ids = store.project.skill.librarySkillIds || (store.project.skill.librarySkillIds = []);
+            var pvSkillId = 'pro-v3-h3-character-pv-motion-graphics';
+            var pvSkillIndex = ids.indexOf(pvSkillId);
+            if (pvMode && pvSkillIndex < 0) ids.push(pvSkillId);
+            if (!pvMode && pvSkillIndex >= 0) ids.splice(pvSkillIndex, 1);
+            compileDirectorLibrary();
+            markDirty(true);
         }
 
         // 初始化时从 preamble + shot.content 同步台词（加载已有工作流时）
@@ -693,8 +1117,11 @@ var H3DirectorApp = defineComponent({
             var defaultSteps = Math.max(1, Number(sourceProject.globalSteps) || 8);
             var shots = (store.scenes || []).map(function(scene, index) {
                 var seconds = Math.max(0.1, Number(scene.defaultSeconds) || defaultSeconds);
-                var requested = Math.max(5, Math.ceil(seconds * fps - 1e-9));
-                var length = requested + ((5 - requested % 17) % 17);
+                var delivered = Math.max(1, Math.round(seconds * fps));
+                var contextFrames = index > 0 && sourceProject.anchorMode === 'head'
+                    ? Math.max(0, Number(scene.contextLength) || Number(sourceProject.contextLength) || 0)
+                    : 0;
+                var length = h3LegalLength(delivered + contextFrames);
                 var explicitSeed = Number(scene.seed);
                 var seed = Number.isFinite(explicitSeed)
                     ? explicitSeed
@@ -703,6 +1130,9 @@ var H3DirectorApp = defineComponent({
                     id: String(scene.id || ('scene_' + (index + 1))),
                     prompt: compilePrompt(sourceProject, scene),
                     length: length,
+                    delivered_frames: delivered,
+                    timeline_frames: delivered,
+                    generated_duration_seconds: length / fps,
                     seed: String(seed),
                     steps: Math.max(1, Number(scene.defaultSteps) || defaultSteps),
                 };
@@ -729,10 +1159,22 @@ var H3DirectorApp = defineComponent({
         var maxId = function(arr) { return arr.reduce(function(m, x) { return Math.max(m, x.id || 0); }, 0); };
 
         function markDirty(immediate) { store.dirty = true; saveState(props.node, project, scenes, immediate); }
+        props.node._h3FlushState = function() { saveState(props.node, project, scenes, true); };
 
         function compileDirectorLibrary() {
             var ids = (store.project.skill && store.project.skill.librarySkillIds) || [];
-            var active = store.directorLibrary.items.filter(function(skill) { return ids.indexOf(skill.id) >= 0; });
+            var interaction = store.project.interaction || defaultInteraction();
+            var interactionMode = store.project.workflowType === 'character_interaction' && interaction.enabled;
+            var pvMode = store.project.workflowType === 'character_pv' && store.project.pv && store.project.pv.enabled;
+            var adultReady = interaction.adultEnabled && interaction.adultTier !== 'off' &&
+                interaction.adultSubjectsVerified && interaction.consentConfirmed;
+            var active = store.directorLibrary.items.filter(function(skill) {
+                if (ids.indexOf(skill.id) < 0) return false;
+                if (skill.category === 'adult_content_safety' && !adultReady) return false;
+                if (skill.category === 'character_pv_motion_graphics' && !pvMode) return false;
+                if ((skill.category === 'character_performance' || skill.category === 'character_interaction_automation') && !interactionMode) return false;
+                return true;
+            });
             store.project.director_skill = active.map(function(skill) {
                 var meta = [];
                 if (skill.category) meta.push('category: ' + skill.category);
@@ -774,9 +1216,35 @@ var H3DirectorApp = defineComponent({
 
         function toggleDirectorLibrarySkill(skill) {
             if (!skill || !skill.id) return;
+            if (skill.category === 'adult_content_safety' && !(store.project.interaction && store.project.interaction.adultEnabled)) {
+                flash('请先在“动态角色交互”中开启成人向技能并完成必要确认');
+                return;
+            }
             var ids = store.project.skill.librarySkillIds || (store.project.skill.librarySkillIds = []);
             var index = ids.indexOf(skill.id);
             if (index >= 0) ids.splice(index, 1); else ids.push(skill.id);
+            compileDirectorLibrary();
+            markDirty(true);
+        }
+
+        function onAdultToggle() {
+            var interaction = store.project.interaction || defaultInteraction();
+            var ids = store.project.skill.librarySkillIds || (store.project.skill.librarySkillIds = []);
+            var adultSkillId = 'pro-v1-h3-r18-scale';
+            var index = ids.indexOf(adultSkillId);
+            if (interaction.adultEnabled) {
+                if (index < 0) ids.push(adultSkillId);
+            } else {
+                if (index >= 0) ids.splice(index, 1);
+                interaction.adultTier = 'off';
+                interaction.adultSubjectsVerified = false;
+                interaction.consentConfirmed = false;
+            }
+            compileDirectorLibrary();
+            markDirty(true);
+        }
+
+        function onAdultSettingsChange() {
             compileDirectorLibrary();
             markDirty(true);
         }
@@ -863,7 +1331,7 @@ var H3DirectorApp = defineComponent({
         // 场景操作
         function addScene() {
             var id = maxId(store.scenes) + 1;
-            store.scenes.push(createScene(id));
+            store.scenes.push(createScene(id, store.project.globalDuration));
             store.currentSceneId = id; markDirty();
         }
         function cloneScene(id) {
@@ -893,21 +1361,20 @@ var H3DirectorApp = defineComponent({
         // 镜头操作
         function addShot() {
             var s = currentScene.value; if (!s) return;
-            var prev = s.shots[s.shots.length - 1];
             var sh = createShot(maxId(s.shots) + 1);
-            if (prev) sh.time = fmtTime(parseFloat(prev.time.replace(':','.').replace('.','m').replace('.','s')) + (prev.estSeconds || 2.5));
-            s.shots.push(sh); markDirty();
+            s.shots.push(sh);
+            normalizeSceneShotTimes(s, store.project.fps, true);
+            markDirty();
         }
         function removeShot(id) {
             var s = currentScene.value; if (!s) return;
-            s.shots = s.shots.filter(function(x) { return x.id !== id; }); markDirty();
+            s.shots = s.shots.filter(function(x) { return x.id !== id; });
+            normalizeSceneShotTimes(s, store.project.fps, false); markDirty();
         }
         function autoAssignTimes() {
             var s = currentScene.value; if (!s || !s.shots.length) return;
-            var per = (s.defaultSeconds || 10) / s.shots.length;
-            var t = 0;
-            s.shots.forEach(function(sh) { sh.time = fmtTime(t); sh.estSeconds = +per.toFixed(2); t += per; });
-            markDirty(); flash('已自动分配时间');
+            normalizeSceneShotTimes(s, store.project.fps, true);
+            markDirty(); flash('已按 ' + (Number(store.project.fps) || 24) + ' fps 帧边界精确分配时间');
         }
 
         // 台词操作
@@ -1073,14 +1540,16 @@ var H3DirectorApp = defineComponent({
                     w.push('[H3-E006] Shot ' + (shotIndex + 1) + ' 预估时长超过 15 秒。');
                 }
                 if (shotIndex === 0) return;
-                var tm = String(shot.time || '').match(/^(?:(\d+):)?(\d{1,2})(?:\.(\d{1,3}))?$/);
-                var cut = null;
-                if (tm && Number(tm[2]) < 60) {
-                    cut = Number(tm[1] || 0) * 60 + Number(tm[2]) + Number(('0.' + (tm[3] || '0')));
-                }
+                var cut = parseTimecode(shot.time);
                 if (cut == null || cut <= previousCut || cut >= duration) {
                     w.push('[H3-E005] Shot ' + (shotIndex + 1) + ' 切镜时间必须严格递增且小于场景时长。');
-                } else previousCut = cut;
+                } else {
+                    var fps = Math.max(1, Math.round(Number(store.project.fps) || 24));
+                    if (Math.abs(cut * fps - Math.round(cut * fps)) > 0.012) {
+                        w.push('[H3-E005] Shot ' + (shotIndex + 1) + ' 切镜时间未对齐 ' + fps + ' fps 帧边界。');
+                    }
+                    previousCut = cut;
+                }
             });
             return w;
         });
@@ -1090,19 +1559,99 @@ var H3DirectorApp = defineComponent({
             flash('已复制当前场景编译提示词');
         }
         function copyParams() {
-            var p = JSON.stringify({ mode: store.project.mode, aspect: store.project.aspect, resolution: store.project.resolution, fps: store.project.fps, scenes: store.scenes.length }, null, 2);
+            var p = JSON.stringify({
+                mode: store.project.mode,
+                width: store.project.width,
+                height: store.project.height,
+                megapixels: Number((store.project.width * store.project.height / 1000000).toFixed(3)),
+                fps: store.project.fps,
+                scenes: store.scenes.length,
+                editorial_seconds: totalDuration.value,
+                delivered_frames: generationInfo.value.deliveredFrames,
+                h3_generated_frames: generationInfo.value.rawFrames,
+                h3_generated_seconds: generationInfo.value.generatedSeconds
+            }, null, 2);
             navigator.clipboard && navigator.clipboard.writeText(p);
             flash('已复制参数');
         }
 
         var totalDuration = computed(function() {
             // defaultSeconds 是场景总时长；镜头只是对这段时长的内部划分。
-            return store.scenes.reduce(function(a, s) { return a + (s.defaultSeconds || 10); }, 0);
+            return store.scenes.reduce(function(a, s) {
+                return a + (Number(s.defaultSeconds) || Number(store.project.globalDuration) || 7);
+            }, 0);
+        });
+        var generationInfo = computed(function() {
+            var fps = Math.max(1, Number(store.project.fps) || 24);
+            var raw = 0;
+            var delivered = 0;
+            (store.scenes || []).forEach(function(scene, index) {
+                var target = Math.max(1, Math.round((Number(scene.defaultSeconds) || Number(store.project.globalDuration) || 7) * fps));
+                var context = index > 0 && store.project.anchorMode === 'head'
+                    ? Math.max(0, Number(scene.contextLength) || Number(store.project.contextLength) || 0)
+                    : 0;
+                delivered += target;
+                raw += h3LegalLength(target + context);
+            });
+            return { rawFrames: raw, deliveredFrames: delivered, generatedSeconds: raw / fps };
         });
 
         // ── 导演 Skill：手动「生成」按钮 ──
         function skillRequestWidget() {
             return (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
+        }
+        function applyPvCard(card) {
+            if (!card || typeof card !== 'object') return;
+            var pv = store.project.pv || (store.project.pv = defaultPv());
+            ['theme','visualStyle','editGrammar','actionProfile','textTreatment','template','rhythm',
+             'cutDensity','bpm','beatOffsetMs','reserveTitleSafeArea','allowVideoReference',
+             'transitions','effects','creativeBrief','actionDirection','titleConcept'].forEach(function(key) {
+                if (card[key] !== undefined) {
+                    pv[key] = Array.isArray(card[key]) ? card[key].slice() : card[key];
+                }
+            });
+            if (card.actionDirection) {
+                var note = '抽卡动作方向：' + card.actionDirection;
+                pv.notes = pv.notes && pv.notes.indexOf(note) < 0 ? (pv.notes + '\n' + note) : (pv.notes || note);
+            }
+            pv.selectedCardId = card.id || '';
+            markDirty(true);
+            flash('已应用 PV 创意卡：' + (card.name || card.theme || '未命名'));
+        }
+        function drawPvCards() {
+            var pv = store.project.pv || (store.project.pv = defaultPv());
+            if (pv.drawing || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
+            var scene = currentScene.value;
+            var widget = skillRequestWidget();
+            if (!scene || !widget) { flash('当前场景或 skill_request 不可用'); return; }
+            pv.drawing = true;
+            pv.lastDrawSummary = '正在组合主题、动作、切镜、转场与特效…';
+            var sk = store.project.skill || {};
+            var request = {
+                run:true, operation:'pv_draw', sceneId:scene.id,
+                requestId:'h3pv-draw-' + Date.now(), tasks:[],
+                temperature:(sk.temperature != null ? sk.temperature : 0.75),
+                modelPref:sk.modelPref || 'local', modelMode:pv.modelMode || 'auto',
+                drawMode:pv.drawMode || 'character_match', cardCount:Number(pv.drawCount) || 3,
+                seed:(Number(store.project.baseSeed) || Date.now()) + (pv.history || []).length,
+                creativeBrief:pv.creativeBrief || '', history:(pv.history || []).slice(),
+                blockDownstream:true, releaseAfter:false
+            };
+            widget.value = JSON.stringify(request);
+            if (typeof widget.callback === 'function') widget.callback(widget.value, widget, props.node);
+            if (props.node.graph) props.node.graph.change();
+            try {
+                var queued = app.queuePrompt();
+                if (queued && typeof queued.catch === 'function') queued.catch(function(error) {
+                    pv.drawing = false;
+                    pv.lastDrawSummary = '抽卡提交失败：' + (error && error.message ? error.message : String(error));
+                    clearSkillRequest();
+                });
+            } catch (error) {
+                pv.drawing = false;
+                pv.lastDrawSummary = '抽卡提交失败：' + (error && error.message ? error.message : String(error));
+                clearSkillRequest();
+            }
         }
         function inferDirectorSkill() {
             var lib = store.directorLibrary;
@@ -1214,6 +1763,8 @@ var H3DirectorApp = defineComponent({
                 promptLanguage: sk.promptLanguage || 'en',
                 dialogueLanguage: sk.dialogueLanguage || 'Chinese',
                 hint: sk.hint || '',
+                interaction: JSON.parse(JSON.stringify(store.project.interaction || defaultInteraction())),
+                pv: JSON.parse(JSON.stringify(store.project.pv || defaultPv())),
                 blockDownstream: !!getEagleSetting(EAGLE_SETTING_IDS.blockSkillDownstream, true),
                 releaseAfter: !!getEagleSetting(EAGLE_SETTING_IDS.unloadAfterSkillBatch, true)
                     && batch.cursor === batch.sceneIds.length - 1
@@ -1238,7 +1789,9 @@ var H3DirectorApp = defineComponent({
         function generateSkill(scope) {
             var sk = store.project.skill || {};
             var tasks = sk.tasks || [];
-            if (!tasks.length) { flash('请先在「导演 Skill」选择要生成的任务（台本 / 分镜 / 台词）'); return; }
+            var automation = (store.project.interaction && store.project.interaction.automationEnabled) ||
+                (store.project.pv && store.project.pv.enabled);
+            if (!tasks.length && !automation) { flash('请先在「导演 Skill」选择要生成的任务（台本 / 分镜 / 台词）'); return; }
             if (store.skillBatch.active) { flash('已有生成任务进行中'); return; }
             var ids = scope === 'all'
                 ? store.scenes.map(function(scene) { return scene.id; })
@@ -1270,6 +1823,22 @@ var H3DirectorApp = defineComponent({
         }
         function applySkillResult(data) {
             if (!data) return;
+            if (data.operation === 'pv_draw') {
+                var pv = store.project.pv || (store.project.pv = defaultPv());
+                pv.drawing = false;
+                clearSkillRequest();
+                if (data.error) {
+                    pv.lastDrawSummary = data.error;
+                    flash('PV 创意抽卡失败');
+                    return;
+                }
+                pv.cards = Array.isArray(data.pvCards) ? data.pvCards : [];
+                pv.history = Array.isArray(data.pvHistory) ? data.pvHistory.slice(-50) : (pv.history || []);
+                pv.lastDrawSummary = data.pvSummary || '抽卡完成';
+                if (data.selectedPv) applyPvCard(data.selectedPv);
+                markDirty(true);
+                return;
+            }
             if (data.operation === 'extract_skill') {
                 store.directorLibrary.inference = false;
                 clearSkillRequest();
@@ -1339,10 +1908,19 @@ var H3DirectorApp = defineComponent({
                     });
                 });
                 scene.shots = baseS;
+                normalizeSceneShotTimes(scene, store.project.fps, false);
             }
             // 若只生成台本，从其 <d> 标签同步台词列表
             if (data.preamble != null && data.dialogues == null) {
                 syncPreambleToDlg(scene);
+            }
+            if (data.memoryRecord && typeof data.memoryRecord === 'object') {
+                var history = store.project.generationHistory || (store.project.generationHistory = []);
+                history = history.filter(function(item) {
+                    return item && String(item.sceneId) !== String(data.memoryRecord.sceneId);
+                });
+                history.push(data.memoryRecord);
+                store.project.generationHistory = history.slice(-40);
             }
             markDirty(true);
             clearSkillRequest();
@@ -1363,6 +1941,7 @@ var H3DirectorApp = defineComponent({
         provide('h3actions', {
             addScene: addScene, cloneScene: cloneScene, removeScene: removeScene, selectScene: selectScene, prevScene: prevScene, nextScene: nextScene,
             addShot: addShot, removeShot: removeShot, autoAssignTimes: autoAssignTimes,
+            shotTiming: function(scene, index) { return buildShotTimings(scene, store.project.fps, false)[index] || {label:'—'}; },
             addDialogue: addDialogue, removeDialogue: removeDialogue,
             onDialogueInput: onDialogueInput, onPreambleInput: onPreambleInput,
             triggerUpload: triggerUpload, clearRef: clearRef, addRef: addRef,
@@ -1375,10 +1954,21 @@ var H3DirectorApp = defineComponent({
             saveDirectorLibrarySkill: saveDirectorLibrarySkill,
             deleteDirectorLibrarySkill: deleteDirectorLibrarySkill,
             inferDirectorSkill: inferDirectorSkill,
+            drawPvCards: drawPvCards,
+            applyPvCard: applyPvCard,
+            onAdultToggle: onAdultToggle,
+            onAdultSettingsChange: onAdultSettingsChange,
             markDirty: markDirty, flash: flash, copyCompiled: copyCompiled, copyParams: copyParams
         });
 
-        return { store: store, flashMsg: flashMsg, currentScene: currentScene, totalDuration: totalDuration, fileInput: fileInput, onFileChange: onFileChange, copyCompiled: copyCompiled, copyParams: copyParams, onSizePreset: onSizePreset };
+        return {
+            store: store, flashMsg: flashMsg, currentScene: currentScene,
+            totalDuration: totalDuration, generationInfo: generationInfo,
+            fileInput: fileInput, onFileChange: onFileChange,
+            copyCompiled: copyCompiled, copyParams: copyParams,
+            onSizePreset: onSizePreset, onCustomDimension: onCustomDimension,
+            toggleSizeLock: toggleSizeLock, onWorkflowType: onWorkflowType
+        };
     },
     template: `
 <div class="h3d-root">
@@ -1400,6 +1990,12 @@ var H3DirectorApp = defineComponent({
   </div>
   <div class="h3d-topbar">
     <h1>🦅 H3 Director <span class="h3d-badge">v1</span></h1>
+    <div class="h3d-field"><label>项目类型</label>
+      <select class="h3d-sel" v-model="store.project.workflowType" @change="onWorkflowType">
+        <option value="ai_drama">AI 短剧</option><option value="character_interaction">动态角色交互</option>
+        <option value="character_pv">角色 PV · 快闪特效</option>
+      </select>
+    </div>
     <div class="h3d-field"><label>任务</label>
       <select class="h3d-sel" v-model="store.project.mode">
         <option value="t2v">T2VA · 文生视频</option><option value="i2v">I2VA · 首帧图生视频</option>
@@ -1411,28 +2007,53 @@ var H3DirectorApp = defineComponent({
     <div class="h3d-field"><label>尺寸</label>
       <select class="h3d-sel" v-model="store.project.sizePreset" @change="onSizePreset">
         <optgroup label="9:16 竖屏">
-          <option value="9:16|mp0.2|608|1080">9:16 · 0.2MP (608×1080)</option>
-          <option value="9:16|mp0.3|736|1312">9:16 · 0.3MP (736×1312)</option>
-          <option value="9:16|mp0.5|960|1704">9:16 · 0.5MP (960×1704)</option>
-          <option value="9:16|mp0.7|1152|2048">9:16 · 0.7MP (1152×2048)</option>
-          <option value="9:16|mp1.0|1080|1920">9:16 · 1.0MP (1080×1920)</option>
-          <option value="9:16|mp1.5|1184|2112">9:16 · 1.5MP (1184×2112)</option>
+          <option value="9:16|mp0.2|352|608">9:16 · 0.2MP (352×608)</option>
+          <option value="9:16|mp0.3|416|736">9:16 · 0.3MP (416×736)</option>
+          <option value="9:16|mp0.4|480|864">9:16 · 0.4MP (480×864)</option>
+          <option value="9:16|mp0.5|544|960">9:16 · 0.5MP (544×960)</option>
+          <option value="9:16|mp0.6|608|1056">9:16 · 0.6MP (608×1056)</option>
+          <option value="9:16|mp0.7|640|1152">9:16 · 0.7MP (640×1152)</option>
+          <option value="9:16|mp0.8|672|1216">9:16 · 0.8MP (672×1216)</option>
+          <option value="9:16|mp0.9|736|1280">9:16 · 0.9MP (736×1280)</option>
+          <option value="9:16|mp0.98|768|1344">9:16 · 0.98MP (768×1344)</option>
+          <option value="9:16|mp1.0|768|1376">9:16 · 1.0MP (768×1376)</option>
+          <option value="9:16|mp1.2|832|1504">9:16 · 1.2MP (832×1504)</option>
+          <option value="9:16|mp1.5|928|1664">9:16 · 1.5MP (928×1664)</option>
+          <option value="9:16|mp1.8|1024|1824">9:16 · 1.8MP (1024×1824)</option>
+          <option value="9:16|mp2.0|1088|1920">9:16 · 2.0MP (1088×1920)</option>
         </optgroup>
         <optgroup label="16:9 横屏">
           <option value="16:9|mp0.2|608|352">16:9 · 0.2MP (608×352)</option>
+          <option value="16:9|mp0.3|736|416">16:9 · 0.3MP (736×416)</option>
+          <option value="16:9|mp0.4|864|480">16:9 · 0.4MP (864×480)</option>
           <option value="16:9|mp0.5|960|544">16:9 · 0.5MP (960×544)</option>
+          <option value="16:9|mp0.6|1056|608">16:9 · 0.6MP (1056×608)</option>
+          <option value="16:9|mp0.7|1152|640">16:9 · 0.7MP (1152×640)</option>
           <option value="16:9|mp0.8|1216|672">16:9 · 0.8MP (1216×672)</option>
+          <option value="16:9|mp0.9|1280|736">16:9 · 0.9MP (1280×736)</option>
+          <option value="16:9|mp0.98|1344|768">16:9 · 0.98MP (1344×768)</option>
           <option value="16:9|mp1.0|1376|768">16:9 · 1.0MP (1376×768)</option>
+          <option value="16:9|mp1.2|1504|832">16:9 · 1.2MP (1504×832)</option>
+          <option value="16:9|mp1.5|1664|928">16:9 · 1.5MP (1664×928)</option>
+          <option value="16:9|mp1.8|1824|1024">16:9 · 1.8MP (1824×1024)</option>
           <option value="16:9|mp2.0|1920|1088">16:9 · 2.0MP (1920×1088)</option>
         </optgroup>
         <optgroup label="1:1 方形">
-          <option value="1:1|mp0.5|720|720">1:1 · 0.5MP (720×720)</option>
+          <option value="1:1|mp0.5|704|704">1:1 · 0.5MP (704×704)</option>
           <option value="1:1|mp1.0|1024|1024">1:1 · 1.0MP (1024×1024)</option>
         </optgroup>
+        <option value="custom">自定义宽高</option>
       </select>
     </div>
+    <div v-if="store.project.sizePreset==='custom'" class="h3d-field" style="gap:4px">
+      <label>宽×高</label>
+      <input class="h3d-inp sm" type="number" min="32" max="4096" step="32" v-model.number="store.project.width" @change="onCustomDimension('width')" style="width:64px">
+      <span style="color:var(--h3d-muted)">×</span>
+      <input class="h3d-inp sm" type="number" min="32" max="4096" step="32" v-model.number="store.project.height" @change="onCustomDimension('height')" style="width:64px">
+      <button class="h3d-btn sm" :title="store.project.sizeLocked?'锁定比例：改一边自动缩放另一边':'解锁：宽高独立'" @click="toggleSizeLock">{{ store.project.sizeLocked ? '🔗' : '🔓' }}</button>
+    </div>
     <div class="h3d-field"><label>fps</label><input class="h3d-inp sm" type="number" min="8" max="60" v-model.number="store.project.fps" style="width:46px"></div>
-    <span class="h3d-pill">{{ store.scenes.length }} scenes · {{ totalDuration.toFixed(1) }}s</span>
+    <span class="h3d-pill">剪辑 {{ totalDuration.toFixed(3) }}s/{{ generationInfo.deliveredFrames }}f · H3 {{ generationInfo.generatedSeconds.toFixed(3) }}s/{{ generationInfo.rawFrames }}f</span>
     <div class="h3d-spacer"></div>
     <span class="h3d-sync" :class="store.dirty?'dirty':''">{{ store.dirty ? '⚠ 待同步' : '✓ 已保存' }}</span>
     <button class="h3d-btn" @click="copyParams">📤 参数</button>
@@ -1446,7 +2067,7 @@ var H3DirectorApp = defineComponent({
   <div class="h3d-statusbar">
     <span v-if="flashMsg" style="color:var(--h3d-primary)">{{ flashMsg }}</span>
     <span>Scene {{ store.scenes.findIndex(s=>s.id===store.currentSceneId)+1 }}/{{ store.scenes.length }}</span>
-    <span>{{ store.project.aspect }} {{ store.project.resolution }}</span>
+    <span>{{ store.project.fps }}fps · 场景队列 {{ store.scenes.length }} 段</span>
   </div>
   <input type="file" ref="fileInput" style="display:none" accept="image/*" @change="onFileChange">
 </div>`
@@ -1659,7 +2280,12 @@ var PlanPanel = defineComponent({
         var totalDuration = computed(function() {
             return (store.scenes || []).reduce(function(a, s) { return a + sceneDuration(s); }, 0);
         });
-        return { store: store, actions: actions, planOpen: planOpen, sceneDuration: sceneDuration, timeBarPct: timeBarPct, estTokens: estTokens, totalDuration: totalDuration };
+        return {
+            store: store, actions: actions, planOpen: planOpen,
+            sceneDuration: sceneDuration, timeBarPct: timeBarPct, estTokens: estTokens,
+            totalDuration: totalDuration, pvTransitionOptions: PV_TRANSITION_OPTIONS,
+            pvEffectOptions: PV_EFFECT_OPTIONS
+        };
     },
     template: `
 <div class="h3d-col" style="display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--h3d-bd)">
@@ -1669,6 +2295,183 @@ var PlanPanel = defineComponent({
       <div class="h3d-card-title" style="margin-bottom:6px">🌐 Shared prompt · 世界构建 & 风格基础</div>
       <div class="h3d-hint" style="margin-bottom:6px">自动 prepend 到每个场景的 integrated_multimodal_description，作为全局共享提示。</div>
       <textarea class="h3d-textarea" style="min-height:80px" v-model="store.project.foundation" placeholder="integrated_multimodal_description:\nHigh quality original 2D anime...\nWorldview: ...&#10;Visual style: ...&#10;Character base: ..."></textarea>
+    </div>
+    <div v-if="store.project.workflowType==='character_interaction'" class="h3d-card">
+      <div class="h3d-card-title"><span>✨ 动态角色交互</span><span class="h3d-mini">素材驱动</span></div>
+      <label class="h3d-row" style="gap:6px;cursor:pointer;margin-bottom:7px">
+        <input type="checkbox" v-model="store.project.interaction.enabled" @change="actions.markDirty"> 启用角色交互编排
+      </label>
+      <div v-if="store.project.interaction.enabled" style="display:flex;flex-direction:column;gap:7px">
+        <div class="h3d-grid2">
+          <div class="h3d-row col"><label class="h3d-label">制作强度</label>
+            <select class="h3d-sel" v-model="store.project.interaction.productionLevel" @change="actions.markDirty">
+              <option value="S">S · 轻量微动</option><option value="SR">SR · 标准互动</option>
+              <option value="SSR">SSR · 高级演出</option><option value="UR">UR · 展示级</option>
+            </select>
+          </div>
+          <div class="h3d-row col"><label class="h3d-label">动态类型</label>
+            <select class="h3d-sel" v-model="store.project.interaction.dynamicType" @change="actions.markDirty">
+              <option value="auto">AI 自动匹配</option><option value="idle_loop">待机循环</option>
+              <option value="expression_reaction">表情反应</option><option value="gesture">手势互动</option>
+              <option value="dialogue_lipsync">对话口型</option><option value="action">角色动作</option>
+              <option value="dance_performance">舞蹈表演</option><option value="transformation">变身</option>
+              <option value="vfx_showcase">特效展示</option><option value="environment_interaction">环境互动</option>
+              <option value="meme_loop">表情包循环</option>
+            </select>
+          </div>
+        </div>
+        <div class="h3d-row col"><label class="h3d-label">角色表现风格</label>
+          <select class="h3d-sel" v-model="store.project.interaction.visualStyle" @change="actions.markDirty">
+            <option value="auto">AI 自动匹配参考素材</option>
+            <option value="live_action">真人 / 写实表演</option>
+            <option value="anime">动漫 / 2D 表演</option>
+          </select>
+        </div>
+        <div class="h3d-row col"><label class="h3d-label">输出方式</label>
+          <select class="h3d-sel" v-model="store.project.interaction.outputMode" @change="actions.markDirty">
+            <option value="single_clip">单段直出 · 不循环</option><option value="single_loop">单段无缝循环</option>
+            <option value="optional_chain">可独立使用 + 可选拼接</option><option value="continuous_chain">连续拼接</option>
+          </select>
+        </div>
+        <label class="h3d-row" style="gap:6px;cursor:pointer"><input type="checkbox" v-model="store.project.interaction.aiMotionAutofill" @change="actions.markDirty"> AI 自动补全动作、呼吸、眨眼与跟随运动</label>
+        <label class="h3d-row" style="gap:6px;cursor:pointer"><input type="checkbox" v-model="store.project.interaction.allowVideoReference" @change="actions.markDirty"> 启用参考视频（高级功能，默认关闭）</label>
+        <label class="h3d-row" style="gap:6px;cursor:pointer"><input type="checkbox" v-model="store.project.interaction.automationEnabled" @change="actions.markDirty"> 智能规划场景、特效、镜头与质检</label>
+        <div v-if="store.project.interaction.automationEnabled" style="display:flex;flex-wrap:wrap;gap:5px 9px;padding-left:18px">
+          <label class="h3d-mini"><input type="checkbox" v-model="store.project.interaction.autoScene" @change="actions.markDirty"> 场景</label>
+          <label class="h3d-mini"><input type="checkbox" v-model="store.project.interaction.autoEffects" @change="actions.markDirty"> 特效</label>
+          <label class="h3d-mini"><input type="checkbox" v-model="store.project.interaction.autoCamera" @change="actions.markDirty"> 镜头</label>
+          <label class="h3d-mini"><input type="checkbox" v-model="store.project.interaction.autoQualityCheck" @change="actions.markDirty"> 连续性/循环质检</label>
+        </div>
+        <textarea class="h3d-textarea" style="min-height:48px" v-model="store.project.interaction.interactionIntent" @input="actions.markDirty" placeholder="互动意图：例如向观众挥手后害羞地移开视线，保持角色服装与配饰不变"></textarea>
+        <div style="border-top:1px solid var(--h3d-bd);padding-top:7px">
+          <label class="h3d-row" style="gap:6px;cursor:pointer"><input type="checkbox" v-model="store.project.interaction.adultEnabled" @change="actions.onAdultToggle"> 成人向技能（默认关闭）</label>
+          <div v-if="store.project.interaction.adultEnabled" style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
+            <select class="h3d-sel" v-model="store.project.interaction.adultTier" @change="actions.onAdultSettingsChange">
+              <option value="off">请选择尺度</option><option value="S">S · 成年氛围</option>
+              <option value="SR">SR · 成人时尚</option><option value="SSR">SSR · 含蓄写真</option><option value="UR">UR · 最高安全边界</option>
+            </select>
+            <label class="h3d-mini"><input type="checkbox" v-model="store.project.interaction.adultSubjectsVerified" @change="actions.onAdultSettingsChange"> 所有人物已明确核验为 18 岁以上</label>
+            <label class="h3d-mini"><input type="checkbox" v-model="store.project.interaction.consentConfirmed" @change="actions.onAdultSettingsChange"> 所有亲密互动均自愿、清醒且可撤回</label>
+          </div>
+          <div class="h3d-hint" style="margin-top:5px">制作强度与成人尺度相互独立；关闭时强制全年龄输出。</div>
+        </div>
+      </div>
+    </div>
+    <div v-if="store.project.workflowType==='character_pv'" class="h3d-card">
+      <div class="h3d-card-title"><span>⚡ 角色 PV · 类 AE 动效规划</span><span class="h3d-mini">生成底片 + 后期元数据</span></div>
+      <label class="h3d-row" style="gap:6px;cursor:pointer;margin-bottom:7px">
+        <input type="checkbox" v-model="store.project.pv.enabled" @change="actions.markDirty"> 启用角色 PV 编排
+      </label>
+      <div v-if="store.project.pv.enabled" style="display:flex;flex-direction:column;gap:8px">
+        <div style="border:1px solid var(--h3d-bd);border-radius:8px;padding:8px;background:var(--h3d-bg2)">
+          <div class="h3d-card-title" style="margin-bottom:6px"><span>🎴 AI 创意抽卡</span><span class="h3d-mini">主题 × 动作 × 切镜 × 后期</span></div>
+          <textarea class="h3d-textarea" style="min-height:44px" v-model="store.project.pv.creativeBrief" @input="actions.markDirty" placeholder="创意简述：角色性格、主题、情绪、用途、必须出现或避开的动作"></textarea>
+          <div class="h3d-grid2" style="margin-top:6px">
+            <select class="h3d-sel" v-model="store.project.pv.drawMode" @change="actions.markDirty">
+              <option value="character_match">角色动作匹配</option><option value="balanced">均衡探索</option><option value="surprise">惊喜随机</option>
+            </select>
+            <select class="h3d-sel" v-model="store.project.pv.modelMode" @change="actions.markDirty">
+              <option value="auto">有模型则 AI 择优</option><option value="local_only">仅本地抽卡</option><option value="model_refine">模型精修（无模型回退）</option>
+            </select>
+          </div>
+          <div class="h3d-row" style="gap:6px;margin-top:6px">
+            <input class="h3d-inp sm" type="number" min="1" max="8" v-model.number="store.project.pv.drawCount" style="width:52px">
+            <button class="h3d-btn primary" :disabled="store.project.pv.drawing" @click="actions.drawPvCards">{{ store.project.pv.drawing ? '组合中…' : '抽取创意方案' }}</button>
+            <span class="h3d-mini">已记忆 {{ (store.project.pv.history||[]).length }} 次，自动避开近期重复</span>
+          </div>
+          <div v-if="store.project.pv.lastDrawSummary" class="h3d-hint" style="margin-top:6px">{{ store.project.pv.lastDrawSummary }}</div>
+          <div v-if="(store.project.pv.cards||[]).length" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">
+            <button v-for="card in store.project.pv.cards" :key="card.id" class="h3d-btn sm" :class="{primary:store.project.pv.selectedCardId===card.id}" @click="actions.applyPvCard(card)" :title="card.aiReason || card.actionDirection || ''">{{ card.name }}</button>
+          </div>
+        </div>
+        <div class="h3d-grid2">
+          <div class="h3d-row col"><label class="h3d-label">主题</label>
+            <select class="h3d-sel" v-model="store.project.pv.theme" @change="actions.markDirty">
+              <option value="auto">AI / 自动推断</option><option value="hero_origin">英雄起源</option><option value="neon_idol">霓虹偶像</option>
+              <option value="fantasy_relic">奇幻遗物</option><option value="urban_chase">都市追逐</option><option value="dream_archive">梦境档案</option>
+              <option value="dark_rival">暗黑宿敌</option><option value="festival_stage">庆典舞台</option><option value="tech_interface">科技界面</option>
+              <option value="fashion_editorial">时尚编辑</option><option value="quiet_portrait">静谧肖像</option>
+            </select>
+          </div>
+          <div class="h3d-row col"><label class="h3d-label">视觉风格</label>
+            <select class="h3d-sel" v-model="store.project.pv.visualStyle" @change="actions.markDirty">
+              <option value="auto">跟随参考素材</option><option value="anime_cel">动漫赛璐璐</option><option value="live_action_cinematic">真人电影感</option>
+              <option value="graphic_comic">平面漫画</option><option value="y2k_digital">Y2K 数字</option><option value="retro_film">复古胶片</option>
+              <option value="luxury_editorial">高级时尚</option><option value="minimal_monochrome">极简黑白</option><option value="holographic">全息科技</option><option value="ink_paper">水墨纸张</option>
+            </select>
+          </div>
+        </div>
+        <div class="h3d-grid2">
+          <div class="h3d-row col"><label class="h3d-label">切镜语法</label>
+            <select class="h3d-sel" v-model="store.project.pv.editGrammar" @change="actions.markDirty">
+              <option value="auto">AI 自动匹配</option><option value="detail_to_hero">细节到英雄镜头</option><option value="match_on_action">动作匹配切</option>
+              <option value="shape_match">形状匹配</option><option value="color_match">色彩匹配</option><option value="eyeline_bridge">视线桥接</option>
+              <option value="beat_strobe">节拍插帧</option><option value="time_remap">时间重映射</option><option value="split_screen">分屏并置</option>
+              <option value="freeze_smash">定格冲切</option><option value="foreground_wipe">前景遮挡切</option>
+            </select>
+          </div>
+          <div class="h3d-row col"><label class="h3d-label">动作画像</label>
+            <select class="h3d-sel" v-model="store.project.pv.actionProfile" @change="actions.markDirty">
+              <option value="calm">沉静</option><option value="graceful">优雅</option><option value="energetic">活力</option>
+              <option value="combat">战斗</option><option value="idol">偶像表演</option><option value="mysterious">神秘</option><option value="comedic">喜剧反应</option>
+            </select>
+          </div>
+        </div>
+        <div class="h3d-grid2">
+          <div class="h3d-row col"><label class="h3d-label">PV 模板</label>
+            <select class="h3d-sel" v-model="store.project.pv.template" @change="actions.markDirty">
+              <option value="character_reveal">角色揭示 / Hero Reveal</option>
+              <option value="kinetic_typography">动态排版 / Kinetic Type</option>
+              <option value="image_flash">图像快闪 / Image Flash</option>
+              <option value="mixed_pv">综合角色 PV</option>
+              <option value="action_showcase">动作展示</option><option value="emotional_memory">情绪记忆</option><option value="fashion_editorial">时尚编辑</option>
+            </select>
+          </div>
+          <div class="h3d-row col"><label class="h3d-label">节奏模式</label>
+            <select class="h3d-sel" v-model="store.project.pv.rhythm" @change="actions.markDirty">
+              <option value="beat_sync">卡点同步</option><option value="impact_accents">冲击重拍</option>
+              <option value="smooth_cinematic">平滑电影感</option><option value="glitch_cut">故障快切</option>
+              <option value="syncopated">切分节拍</option><option value="crescendo">渐强推进</option>
+            </select>
+          </div>
+        </div>
+        <div class="h3d-grid2">
+          <div class="h3d-row col"><label class="h3d-label">剪辑密度</label>
+            <select class="h3d-sel" v-model="store.project.pv.cutDensity" @change="actions.markDirty">
+              <option value="sparse">稀疏 · 1–2 次 / 5s</option><option value="medium">均衡 · 3–5 次 / 5s</option>
+              <option value="dense">密集 · 6–9 次 / 5s</option>
+            </select>
+          </div>
+          <div class="h3d-row col"><label class="h3d-label">节拍</label>
+            <div class="h3d-row"><input class="h3d-inp sm" type="number" min="40" max="240" v-model.number="store.project.pv.bpm" @input="actions.markDirty" style="width:74px"><span class="h3d-mini">BPM</span>
+              <input class="h3d-inp sm" type="number" min="-2000" max="2000" v-model.number="store.project.pv.beatOffsetMs" @input="actions.markDirty" style="width:82px"><span class="h3d-mini">ms</span></div>
+          </div>
+        </div>
+        <div class="h3d-row col"><label class="h3d-label">转场（可多选）</label>
+          <div style="display:flex;flex-wrap:wrap;gap:5px 10px">
+            <label v-for="item in pvTransitionOptions" :key="item[0]" class="h3d-mini"><input type="checkbox" :value="item[0]" v-model="store.project.pv.transitions" @change="actions.markDirty"> {{ item[1] }}</label>
+          </div>
+        </div>
+        <div class="h3d-row col"><label class="h3d-label">特效层（可多选）</label>
+          <div style="display:flex;flex-wrap:wrap;gap:5px 10px">
+            <label v-for="item in pvEffectOptions" :key="item[0]" class="h3d-mini"><input type="checkbox" :value="item[0]" v-model="store.project.pv.effects" @change="actions.markDirty"> {{ item[1] }}</label>
+          </div>
+        </div>
+        <div class="h3d-row col"><label class="h3d-label">文字后期方案</label>
+          <select class="h3d-sel" v-model="store.project.pv.textTreatment" @change="actions.markDirty">
+            <option value="safe_title">安全区单标题</option><option value="hero_nameplate">角色名牌</option>
+            <option value="kinetic_words">节拍动效字</option><option value="subtitle_card">标题 + 副标题</option><option value="no_text">无文字</option>
+          </select>
+        </div>
+        <div class="h3d-grid2">
+          <input class="h3d-inp" v-model="store.project.pv.title" @input="actions.markDirty" placeholder="精确主标题（后期合成，不由 H3 绘制）">
+          <input class="h3d-inp" v-model="store.project.pv.subtitle" @input="actions.markDirty" placeholder="副标题 / 角色名 / 标语">
+        </div>
+        <label class="h3d-row" style="gap:6px;cursor:pointer"><input type="checkbox" v-model="store.project.pv.reserveTitleSafeArea" @change="actions.markDirty"> 为文字预留安全区</label>
+        <label class="h3d-row" style="gap:6px;cursor:pointer"><input type="checkbox" v-model="store.project.pv.allowVideoReference" @change="actions.markDirty"> 允许参考视频提供节奏、运镜与转场时序</label>
+        <textarea class="h3d-textarea" style="min-height:48px" v-model="store.project.pv.notes" @input="actions.markDirty" placeholder="PV 方向：例如 5 秒角色立绘揭示，0.5 秒局部快闪，结尾定格角色名"></textarea>
+        <div class="h3d-hint">H3 只生成干净且身份稳定的镜头底片；精确文字、闪白、故障、描边和转场写入 post_production 元数据，交给剪辑/特效节点执行。</div>
+      </div>
     </div>
     <div class="h3d-card">
       <div class="h3d-collapse-hd" :class="{open:planOpen}" @click="planOpen=!planOpen">
@@ -1707,6 +2510,9 @@ var PlanPanel = defineComponent({
           <div class="h3d-row" style="margin-top:4px;gap:6px">
             <span class="h3d-mini">默认</span><input class="h3d-inp sm" type="number" v-model.number="s.defaultSeconds" min="1" max="30" style="width:44px" @click.stop>
             <span class="h3d-mini">s</span>
+          </div>
+          <div class="h3d-row" style="margin-top:4px;gap:3px" @click.stop>
+            <button v-for="seconds in [5,7,10,15]" :key="seconds" class="h3d-btn sm" :class="{primary:Number(s.defaultSeconds)===seconds}" @click="s.defaultSeconds=seconds;actions.markDirty()">{{ seconds }}s</button>
           </div>
           <div class="h3d-bar" :class="{over: sceneDuration(s) > (store.project.globalDuration||7)*(s.shots||[]).length}">
             <i :style="{width:timeBarPct(s)+'%'}"></i>
@@ -1767,6 +2573,11 @@ var EditorPanel = defineComponent({
             return marks;
         });
         var mediaItems = computed(function() { return store.project.mediaRefs || []; });
+        var mediaInputAccept = computed(function() {
+            return projectAllowsVideoReferences(store.project)
+                ? 'image/*,video/*,audio/*'
+                : 'image/*,audio/*';
+        });
         var mediaErrors = reactive({});
         var inputPickerOpen = ref(false);
         var inputImages = ref([]);
@@ -1907,6 +2718,10 @@ var EditorPanel = defineComponent({
         function uploadOne(file) {
             var type = inferFileType(file);
             if (!type) { actions.flash('不支持的素材格式: ' + file.name); return Promise.resolve(false); }
+            if (type === 'video' && !projectAllowsVideoReferences(store.project)) {
+                actions.flash('参考视频当前已关闭；请在“动态角色交互”或“角色 PV”项目设置中启用');
+                return Promise.resolve(false);
+            }
             if (!withinLimit(type)) { actions.flash(type === 'image' ? '图片最多 9 张' : (type === 'video' ? '视频最多 3 个' : '音频最多 3 个')); return Promise.resolve(false); }
             return postMediaFile('/h3_director/upload_media', file)
                 .catch(function(error) {
@@ -2135,6 +2950,8 @@ var EditorPanel = defineComponent({
 
         return {
             store:store, actions:actions, scene:scene, tabs:tabs, mediaItems:mediaItems,
+            mediaInputAccept:mediaInputAccept,
+            projectAllowsVideoReferences:projectAllowsVideoReferences,
             scriptEditor:scriptEditor, mediaFileInput:mediaFileInput, trimPlayer:trimPlayer,
             dragIndex:dragIndex, trimOpen:trimOpen, trimDraft:trimDraft,
             trimFrames:trimFrames, trimFramesLoading:trimFramesLoading, trimFps:trimFps,
@@ -2201,7 +3018,7 @@ var EditorPanel = defineComponent({
             <button class="h3d-media-add" @click="openMediaPicker" @drop.stop.prevent="onExternalDrop">＋ 添加素材</button>
             <button class="h3d-media-add" @click="openInputPicker">▾ input 图片</button>
           </div>
-          <input ref="mediaFileInput" type="file" accept="image/*,video/*,audio/*" multiple style="display:none" @change="onMediaFiles">
+          <input ref="mediaFileInput" type="file" :accept="mediaInputAccept" multiple style="display:none" @change="onMediaFiles">
           <highlight-textarea ref="scriptEditor" v-model="scene.preamble" :media-items="mediaItems"
                               :disabled-tokens="scene.disabledTokens || []" :flex="true" min-height="120px"
                               @input="actions.onPreambleInput" @toggle-token="toggleAtomicToken"
@@ -2231,8 +3048,8 @@ var EditorPanel = defineComponent({
               <button class="h3d-btn sm primary" @click.stop="openMediaPicker">＋ 添加素材</button>
             </div>
             <div class="drop-icon">⇩</div>
-            <div class="drop-title">将图片、视频或音频拖入这里</div>
-            <div class="drop-sub">点击此区域选择文件 · 支持多选<br>物理类型决定端口，主要用途决定控制内容，保留策略决定复制强度；一个素材只设一个主要职责。图片最多9张，视频/音频各3个，混合最多12个；音频不能单独使用。</div>
+            <div class="drop-title">将图片或音频拖入这里<span v-if="projectAllowsVideoReferences(store.project)">，也可添加参考视频</span></div>
+            <div class="drop-sub">AI 默认依据角色立绘、互动意图和场景自动补全动作，不要求参考视频。<br>物理类型决定端口，主要用途决定控制内容，保留策略决定复制强度；图片最多9张，视频/音频各3个，混合最多12个；音频不能单独使用。</div>
           </div>
           <div v-if="mediaItems.length" class="h3d-media-grid" @dragover.prevent @drop.prevent="onExternalDrop">
             <div v-for="(item,i) in mediaItems" :key="item.id" class="h3d-media-detail" draggable="true"
@@ -2301,7 +3118,7 @@ var EditorPanel = defineComponent({
             <div class="hd">
               <span class="st">Shot {{ i+1 }}</span>
               <input class="h3d-inp sm" v-model="sh.title" placeholder="标题" style="flex:1;margin:0 6px">
-              <span class="tm">@ {{ sh.time }}</span>
+              <span class="tm">{{ actions.shotTiming(scene,i).label }}</span>
               <button class="h3d-btn sm danger" @click="actions.removeShot(sh.id)">×</button>
             </div>
             <div class="h3d-grid2" style="margin-bottom:6px">
@@ -2552,7 +3369,7 @@ var RightPanel = defineComponent({
         <div v-for="(sh,i) in scene.shots" :key="sh.id" class="h3d-shot-card" @click="jumpToShot">
           <div class="hd">
             <span class="st">Shot {{ i+1 }}</span>
-            <span class="tm">{{ sh.time }}</span>
+            <span class="tm">{{ actions.shotTiming(scene,i).label }}</span>
             <span v-if="sh.framing" style="font-size:10px;color:var(--h3d-muted);background:var(--h3d-bg4);padding:1px 5px;border-radius:4px">{{ sh.framing }}</span>
           </div>
           <div class="ct">{{ sh.content || '（无内容）' }}</div>
@@ -2591,6 +3408,15 @@ H3DirectorApp.components = { PlanPanel: PlanPanel, EditorPanel: EditorPanel, Rig
 
 app.registerExtension({
     name: 'EagleSuite.H3Director',
+    async beforePromptQueued() {
+        // Flush the 300 ms UI debounce before ComfyUI serializes widget values.
+        // Without this, pressing Queue immediately after changing resolution or
+        // duration can execute the previous state while the UI shows the new one.
+        var nodes = (app.graph && (app.graph.nodes || app.graph._nodes)) || [];
+        nodes.forEach(function(node) {
+            if (node && typeof node._h3FlushState === 'function') node._h3FlushState();
+        });
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         console.log('[EagleH3Director] beforeRegisterNodeDef:', nodeData && nodeData.name);
         if (nodeData.name !== 'EagleH3DirectorNode') return;
@@ -2734,6 +3560,7 @@ app.registerExtension({
             this._h3ReloadState = null;
             this._h3ApplyNodeSize = null;
             this._h3ContextLoopPlanJson = null;
+            this._h3FlushState = null;
             this._eagleSyncContextLoopBridges = null;
             if (onRemoved) onRemoved.apply(this, arguments);
         };

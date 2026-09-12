@@ -6,6 +6,7 @@ H3 导演台下游循环链路节点。
 分段检查点、审阅门、循环推进、视频拼接、PNG 序列导出、接缝探测。
 """
 
+import asyncio
 import json
 import os
 import re
@@ -20,6 +21,11 @@ import torch
 from PIL import Image
 
 import folder_paths
+
+try:
+    from server import PromptServer
+except Exception:
+    PromptServer = None
 
 try:
     from comfy_execution.graph_utils import GraphBuilder, is_link
@@ -37,7 +43,7 @@ except Exception:  # 兼容不带动态图 API 的旧版 ComfyUI
 from ..h3_director_node import H3_MEDIA_BUNDLE_TYPE, H3_PLAN_TYPE
 from ..eagle_client import eagle_client
 from ..logger import logger
-from ..utils import ensure_dir, generate_unique_filename, get_cached_ffmpeg
+from ..utils import ensure_dir, get_cached_ffmpeg
 
 from .constants import (
     H3_LOOP_FLOW,
@@ -59,12 +65,15 @@ from .media_utils import (
     seam_analysis,
     trim_video,
 )
+from .review_runtime import close_review, open_review
 from .state import (
     advance,
+    apply_shot_overrides,
     build_summary,
     init_state,
     load_state,
     record_shot_result,
+    restore_from_scene,
     save_state,
     shot_params,
 )
@@ -75,10 +84,49 @@ from .state import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _clone_state(state):
-    """深拷贝运行状态，避免 ComfyUI 缓存复用导致串扰。"""
-    if state is None:
-        return None
-    return json.loads(json.dumps(state, ensure_ascii=False))
+    """复制状态容器，同时保留仅在本次循环中传递的张量引用。
+
+    ``previous_frames`` / ``previous_latent`` 是 ComfyUI 动态循环的运行期
+    数据，不能经过 JSON 往返。这里复制 dict/list 以隔离状态修改，但不复制
+    张量本体；循环结束节点会在写入状态前把真正需要承接的尾部张量压到 CPU。
+    """
+    if isinstance(state, dict):
+        return {key: _clone_state(value) for key, value in state.items()}
+    if isinstance(state, list):
+        return [_clone_state(value) for value in state]
+    if isinstance(state, tuple):
+        return tuple(_clone_state(value) for value in state)
+    return state
+
+
+def _portable_state(state):
+    """生成不含运行期张量的 manifest/JSON 边界快照。"""
+    if not isinstance(state, dict):
+        return state
+    return _clone_state({
+        key: value for key, value in state.items()
+        if key not in ("previous_frames", "previous_latent")
+    })
+
+
+def _reserve_numbered_video_path(directory, prefix, extension, start=1, padding=4):
+    """Atomically reserve ``prefix_0001.ext`` style paths without overwriting."""
+    target_dir = Path(directory)
+    ensure_dir(str(target_dir))
+    safe_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(prefix or "video"))
+    safe_prefix = safe_prefix.strip(" .") or "video"
+    safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "mp4").lower()) or "mp4"
+    counter = max(1, int(start or 1))
+    while counter <= 99999999:
+        candidate = target_dir / f"{safe_prefix}_{counter:0{padding}d}.{safe_extension}"
+        try:
+            descriptor = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            counter += 1
+            continue
+        os.close(descriptor)
+        return str(candidate)
+    raise RuntimeError(f"无法为 {safe_prefix} 分配可用的视频编号")
 
 
 def _json_snapshot(value):
@@ -174,6 +222,93 @@ def _prev_clip_from_state(state, idx):
     return ""
 
 
+def _latent_streams(latent):
+    """按 H3 的 NestedTensor/列表契约解包视频与音频 latent。"""
+    if not isinstance(latent, dict) or "samples" not in latent:
+        raise ValueError("H3 latent 必须是包含 samples 的对象")
+    samples = latent["samples"]
+    if hasattr(samples, "unbind"):
+        parts = list(samples.unbind())
+    elif isinstance(samples, (tuple, list)):
+        parts = list(samples)
+    else:
+        raise ValueError(
+            "采样结果不是 MiniMax H3 AV latent（需要视频/音频双流）"
+        )
+    if len(parts) < 2:
+        raise ValueError("MiniMax H3 循环需要采样后的双流 AV latent")
+    return parts
+
+
+def _compact_h3_latent(latent):
+    """只承接 H3 的视频/音频两路 latent，并释放其余采样附加数据。"""
+    parts = _latent_streams(latent)
+    compact = []
+    for value in parts[:2]:
+        if not torch.is_tensor(value):
+            raise ValueError("MiniMax H3 AV latent 的视频/音频流必须是张量")
+        compact.append(value.detach().cpu().contiguous().clone())
+    return {"samples": compact}
+
+
+def _previous_latent_from_state(state, current_index):
+    """取本次递归携带的 latent，或从上一镜版本检查点恢复。"""
+    runtime = state.get("previous_latent") if isinstance(state, dict) else None
+    if runtime is not None:
+        try:
+            return _compact_h3_latent(runtime), "runtime"
+        except (TypeError, ValueError) as error:
+            logger.warning(f"[H3Chain] 运行期上一镜 latent 无效: {error}")
+
+    previous_index = int(current_index) - 1
+    previous = next(
+        (
+            item for item in (state.get("shots") or [])
+            if int(item.get("index", -1)) == previous_index
+        ),
+        None,
+    )
+    latent_path = str((previous or {}).get("latent") or "")
+    if not latent_path or not os.path.isfile(latent_path):
+        return None, "missing"
+    try:
+        try:
+            loaded = torch.load(latent_path, map_location="cpu", weights_only=True)
+        except TypeError:  # PyTorch < 2.0
+            loaded = torch.load(latent_path, map_location="cpu")
+        return _compact_h3_latent(loaded), "checkpoint"
+    except Exception as error:
+        logger.warning(f"[H3Chain] 无法恢复上一镜 AV latent {latent_path}: {error}")
+        return None, "invalid_checkpoint"
+
+
+def _context_storage_length(state):
+    """计算后续任意场景可能需要的最大视觉上下文帧数。"""
+    plan = (state or {}).get("plan") or {}
+    compatibility = plan.get("compatibility") or {}
+    values = [
+        int(compatibility.get(
+            "context_storage_length", compatibility.get("context_length", 0)
+        ) or 0)
+    ]
+    for shot in plan.get("shots") or []:
+        value = shot.get("context_length") if isinstance(shot, dict) else None
+        if value not in (None, ""):
+            try:
+                values.append(int(value))
+            except (TypeError, ValueError):
+                pass
+    return max([value for value in values if value > 0] or [1])
+
+
+def _context_tail(state, images):
+    """克隆交付画面的最短必要尾段，避免视图持有整段 GPU 帧。"""
+    if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 1:
+        raise ValueError("H3 循环结束需要连接裁剪后的 images")
+    count = min(_context_storage_length(state), int(images.shape[0]))
+    return images[-count:].detach().cpu().contiguous().clone()
+
+
 def _tensor_to_np(frames):
     """torch (N,H,W,3) -> np.uint8 (N,H,W,3)。"""
     if isinstance(frames, torch.Tensor):
@@ -187,6 +322,17 @@ def _tensor_to_np(frames):
 
 def _shot_dir(base_dir, index):
     return Path(base_dir) / "shots" / f"shot_{index + 1:02d}"
+
+
+def _next_revision(state, index):
+    for item in state.get("shots", []):
+        if int(item.get("index", -1)) == int(index):
+            revisions = item.get("revisions") or []
+            return max(
+                [int(value.get("revision", 0) or 0) for value in revisions] +
+                [int(item.get("active_revision", 0) or 0)]
+            ) + 1
+    return 1
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -209,8 +355,8 @@ class EagleH3PlanNode:
             }
         }
 
-    RETURN_TYPES = (H3_RUN_STATE, "STRING")
-    RETURN_NAMES = ("run_state", "summary")
+    RETURN_TYPES = (H3_RUN_STATE, H3_MANIFEST, "STRING", "STRING")
+    RETURN_NAMES = ("state", "manifest", "manifest_path", "summary")
     FUNCTION = "execute"
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle Suite/H3 核心"
@@ -259,7 +405,7 @@ class EagleH3PreflightNode:
     def INPUT_TYPES(cls):
         return {"required": {"plan": (H3_PLAN_TYPE,)}}
 
-    RETURN_TYPES = (H3_PLAN_TYPE, "BOOL", "STRING", "STRING")
+    RETURN_TYPES = (H3_PLAN_TYPE, "BOOLEAN", "STRING", "STRING")
     RETURN_NAMES = ("plan", "ok", "report_json", "summary")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 制片流水线"
@@ -382,7 +528,7 @@ class EagleH3StateInteropNode:
 
     RETURN_TYPES = (
         H3_RUN_STATE, "STRING", H3_PLAN_TYPE, "VIDEO", "STRING",
-        "INT", "INT", "BOOL", "STRING",
+        "INT", "INT", "BOOLEAN", "STRING",
     )
     RETURN_NAMES = (
         "state", "state_json", "plan", "prev_clip", "manifest_path",
@@ -445,7 +591,7 @@ class EagleH3StateInteropNode:
         done = bool(state.get("stop") or index >= total)
         return (
             state,
-            _json_snapshot(state),
+            _json_snapshot(_portable_state(state)),
             plan,
             previous_video,
             manifest_path,
@@ -535,8 +681,8 @@ class EagleH3NativeLoopStartNode:
             "hidden": {"initial_state": (H3_RUN_STATE,)},
         }
 
-    RETURN_TYPES = (H3_LOOP_FLOW, H3_RUN_STATE, "INT", "INT", "INT", "STRING")
-    RETURN_NAMES = ("flow", "state", "width", "height", "fps", "status")
+    RETURN_TYPES = (H3_LOOP_FLOW, H3_RUN_STATE, "INT", "INT", "INT", "STRING", "INT")
+    RETURN_NAMES = ("flow", "state", "width", "height", "fps", "status", "clip_count")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 核心"
 
@@ -581,10 +727,15 @@ class EagleH3NativeLoopStartNode:
                 "mode": state.get("mode"),
                 "current_index": state.get("current_index", 0),
                 "total_shots": state.get("total_shots"),
+                "completed_shots": len(state.get("shots") or []),
+                "queue_contract": "single_prompt_dynamic",
                 "summary": status,
                 "native_loop": True,
             }},
-            "result": ("eagle_h3_native_loop", state, width, height, fps, status),
+            "result": (
+                "eagle_h3_native_loop", state, width, height, fps, status,
+                int(state.get("total_shots", 0) or 0),
+            ),
         }
 
 
@@ -597,7 +748,7 @@ class EagleH3CurrentShotNode:
             "required": {"run_state": (H3_RUN_STATE,)}
         }
 
-    RETURN_TYPES = ("STRING", "INT", "INT", "INT", "INT", "INT", "STRING", "STRING", "BOOL", "STRING")
+    RETURN_TYPES = ("STRING", "INT", "INT", "INT", "INT", "INT", "STRING", "STRING", "BOOLEAN", "STRING")
     RETURN_NAMES = (
         "prompt", "seed", "steps", "raw_frames", "delivered_frames",
         "blend_frames", "continuation_mode", "shot_id", "is_first", "summary",
@@ -613,7 +764,7 @@ class EagleH3CurrentShotNode:
         shot = params["shot"]
         return (
             str(shot.get("prompt", "")),
-            int(shot.get("seed", 0)),
+            int(params.get("effective_seed", shot.get("seed", 0)) or 0),
             int(shot.get("steps", 8)),
             int(shot.get("raw_frames", 0)),
             int(shot.get("delivered_frames", 0)),
@@ -645,7 +796,7 @@ class EagleH3ContextNode:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "BOOL", "STRING")
+    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING")
     RETURN_NAMES = ("context_image", "context_frames", "has_context", "note")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
@@ -664,6 +815,19 @@ class EagleH3ContextNode:
             if seed_image is not None:
                 return (_normalize_seed(seed_image), 1, True, "首镜使用 seed_image 作为起始帧")
             return (_empty_image_tensor(), 0, False, "首镜且无 seed_image")
+
+        # auto 模式的下一次递归直接继承上一镜的无损尾帧；交互模式重新
+        # Queue 后状态从 manifest 恢复，再走下面的磁盘视频抽帧兜底。
+        previous_frames = state.get("previous_frames")
+        if torch.is_tensor(previous_frames) and previous_frames.ndim == 4:
+            available = int(previous_frames.shape[0])
+            if available > 0 and ctx > 0:
+                count = min(int(ctx), available)
+                frames = previous_frames[-count:].detach().cpu().contiguous().clone()
+                return (
+                    frames, count, True,
+                    f"已承接 {count} 帧运行期上下文（{params['continuation_mode']} 模式）",
+                )
 
         # 续镜：解析上一镜 clip 路径（显式 prev_clip 优先，否则从 run_state 取）
         clip_path = _resolve_video_path(prev_clip) or _prev_clip_from_state(state, idx)
@@ -701,10 +865,10 @@ class EagleH3ShotContextNode:
 
     RETURN_TYPES = (
         H3_RUN_STATE, "STRING", "INT", "INT", "INT", "INT", "INT", "STRING",
-        "STRING", "BOOL", "IMAGE", "INT", "BOOL", "STRING",
+        "STRING", "BOOLEAN", "IMAGE", "INT", "BOOLEAN", "STRING",
     )
     RETURN_NAMES = (
-        "state", "prompt", "seed", "steps", "raw_frames", "delivered_frames",
+        "state", "prompt", "seed", "steps", "length", "delivered_frames",
         "blend_frames", "continuation_mode", "shot_id", "is_first", "context_image",
         "context_frames", "has_context", "summary",
     )
@@ -892,7 +1056,17 @@ def _prepare_reference_condition(run_state, media_bundle, prompt, reference_scop
     state = run_state if isinstance(run_state, dict) else {}
     plan = state.get("plan") or {}
     shots = plan.get("shots") or []
-    index = int(state.get("current_index", 0) or 0)
+    if "current_index" in state:
+        # Eagle 的运行索引从 0 开始。
+        index = int(state.get("current_index", 0) or 0)
+        state_contract = "eagle"
+    elif "index" in state:
+        # MiniMaxH3-Context-Loop 的 Current Shot state 从 1 开始。
+        index = max(0, int(state.get("index", 1) or 1) - 1)
+        state_contract = "context_loop"
+    else:
+        index = 0
+        state_contract = "plan_only"
     shot = shots[index] if 0 <= index < len(shots) and isinstance(shots[index], dict) else {}
     entries = _reference_media_entries(media_bundle if isinstance(media_bundle, dict) else {})
     all_tags = {entry["source_tag"] for entry in entries}
@@ -980,6 +1154,7 @@ def _prepare_reference_condition(run_state, media_bundle, prompt, reference_scop
     ]
     report = {
         "scene_index": index + 1,
+        "state_contract": state_contract,
         "scope": "all" if use_all else "scene_tags",
         "active": public_active,
         "skipped": skipped,
@@ -999,11 +1174,36 @@ class EagleH3ReferenceConditionNode:
                 "vae": ("VAE",),
                 "audio_vae": ("VAE",),
                 "media_bundle": (H3_MEDIA_BUNDLE_TYPE,),
-                "state": (H3_RUN_STATE,),
-                "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
-                "width": ("INT", {"default": 960, "min": 32, "max": 4096, "step": 32}),
-                "height": ("INT", {"default": 544, "min": 32, "max": 4096, "step": 32}),
-                "length": ("INT", {"default": 124, "min": 5, "max": 3600, "step": 17}),
+                "state": (f"{H3_RUN_STATE},H3_CHAIN_STATE", {
+                    "tooltip": (
+                        "接受 Eagle 循环的 EAGLE_H3_STATE，或第三方 Context Loop Current Shot "
+                        "的 H3_CHAIN_STATE；这里只读取 plan 与当前镜头索引，不转换递归状态。"
+                    ),
+                }),
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": True,
+                    "forceInput": True,
+                    "tooltip": "必须连接“镜头与上下文.prompt”，逐镜读取当前场景提示词。",
+                }),
+                "width": ("INT", {
+                    "default": 960, "min": 32, "max": 4096, "step": 32,
+                    "forceInput": True,
+                    "tooltip": "必须连接“循环开始.width”，保持整条 H3 链的画布一致。",
+                }),
+                "height": ("INT", {
+                    "default": 544, "min": 32, "max": 4096, "step": 32,
+                    "forceInput": True,
+                    "tooltip": "必须连接“循环开始.height”，保持整条 H3 链的画布一致。",
+                }),
+                "length": ("INT", {
+                    "default": 124, "min": 5, "max": 3600, "step": 17,
+                    "forceInput": True,
+                    "tooltip": (
+                        "必须连接“镜头与上下文.length”。这是当前镜头的实际生成帧数，"
+                        "不能固定为 124。"
+                    ),
+                }),
                 "reference_scope": (["scene_tags", "all"], {"default": "scene_tags"}),
                 "ref_image_size": (list(REF_IMAGE_SIZE_CHOICES), {
                     "default": "match",
@@ -1061,13 +1261,59 @@ class EagleH3ReferenceConditionNode:
 
         positive = ref2va.out(0)
         latent = ref2va.out(1)
-        context_used = bool(
-            use_context_guide and has_context
+        # The first shot may expose its seed image through context_image, but
+        # that single still is not previous-clip motion context.  Treating it
+        # as such instantiated MiniMaxH3MotionContext before sampling and also
+        # collided with attention packs that patch H3's PackedLayout.
+        is_first_shot = int(report.get("scene_index", 1) or 1) <= 1
+        seed_context = bool(
+            is_first_shot and has_context
             and _is_usable_reference("image", context_image)
+        )
+        current_index = int(report.get("scene_index", 1) or 1) - 1
+        previous_latent, latent_source = _previous_latent_from_state(
+            state, current_index
+        ) if not is_first_shot else (None, "first_shot")
+        compatibility = (state.get("plan") or {}).get("compatibility") or {}
+        plan_shots = (state.get("plan") or {}).get("shots") or []
+        current_shot = (
+            plan_shots[current_index]
+            if 0 <= current_index < len(plan_shots)
+            and isinstance(plan_shots[current_index], dict)
+            else {}
+        )
+        audio_mode = str(compatibility.get("audio_mode", "generated_audio"))
+        generated_audio_context = audio_mode in (
+            "generated_audio", "source_plus_timeline"
+        )
+        audio_context = current_shot.get("audio_context_length")
+        if audio_context in (None, ""):
+            audio_context = compatibility.get(
+                "audio_context_length",
+                current_shot.get("context_length", compatibility.get("context_length", 22)),
+            )
+        audio_context = int(audio_context or 0) if generated_audio_context else 0
+        if (
+            not is_first_shot and use_context_guide
+            and generated_audio_context and audio_context > 0
+            and previous_latent is None
+        ):
+            raise ValueError(
+                "H3 续镜缺少上一镜 sampled AV latent；请确认采样器 output 同时连接"
+                "分段保存与审片和循环结束节点。旧的无 latent 检查点需要从上一镜重生成。"
+            )
+        visual_context = bool(
+            has_context and _is_usable_reference("image", context_image)
+        )
+        context_used = bool(
+            not is_first_shot and use_context_guide
+            and (
+                visual_context
+                or (generated_audio_context and previous_latent is not None)
+            )
         )
         trim_frames = 0
         if context_used:
-            compatibility = (state.get("plan") or {}).get("compatibility") or {}
             try:
                 import nodes as comfy_nodes
                 motion_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3MotionContext")
@@ -1087,8 +1333,14 @@ class EagleH3ReferenceConditionNode:
             motion.set_input("conditioning", positive)
             motion.set_input("vae", vae)
             motion.set_input("latent", latent)
-            motion.set_input("context_frames", context_image)
-            requested_context = int(context_image.shape[0])
+            if visual_context and "context_frames" in declared:
+                motion.set_input("context_frames", context_image)
+            requested_context = int(
+                current_shot.get("context_length", compatibility.get("context_length", 22))
+                or compatibility.get("context_length", 22) or 22
+            )
+            if previous_latent is None and visual_context:
+                requested_context = min(requested_context, int(context_image.shape[0]))
             context_spec = declared.get("context_length", ())
             context_choices = context_spec[0] if context_spec else None
             if isinstance(context_choices, (list, tuple)):
@@ -1114,14 +1366,26 @@ class EagleH3ReferenceConditionNode:
             ):
                 if name in declared:
                     motion.set_input(name, value)
-            # Eagle 的磁盘状态只承接视觉上下文；同步音频在帧裁剪节点处理。
+            # 对 generated_audio 链，sampled latent 同时承接原生视频块与
+            # 音频块；source_track 不注入上一段音频，继续使用像素尾帧。
+            use_latent_context = bool(
+                generated_audio_context and previous_latent is not None
+                and "context_latent" in declared
+            )
+            if use_latent_context:
+                motion.set_input("context_latent", previous_latent)
             if "audio_context_length" in declared:
-                motion.set_input("audio_context_length", 0)
+                motion.set_input("audio_context_length", audio_context)
             if "audio_mode" in declared:
                 motion.set_input("audio_mode", "timeline")
             positive = motion.out(0)
             trim_frames = motion.out(1)
+        else:
+            use_latent_context = False
         report["context_guide"] = context_used
+        report["seed_context"] = seed_context
+        report["latent_handoff"] = use_latent_context
+        report["latent_source"] = latent_source
         report["ref_image_size"] = ref_image_size
         report["ref_short_edge"] = target_short_edge
         active_json = json.dumps(report, ensure_ascii=False, indent=2)
@@ -1130,6 +1394,11 @@ class EagleH3ReferenceConditionNode:
             f"{len(grouped['image'])}图/{len(grouped['video'])}视频/"
             f"{len(grouped['audio'])}音频 · "
             f"上下文 Guide={'开' if context_used else '关'}"
+            + (
+                f" · AV Latent={'运行期' if latent_source == 'runtime' else '检查点'}"
+                if use_latent_context else ""
+            )
+            + (" · 首镜种子图" if seed_context else "")
         )
         return {
             "result": (positive, latent, compiled, active_json, summary, trim_frames),
@@ -1160,6 +1429,9 @@ class EagleH3FrameTrimNode:
                 "retain_overlap_frames": (
                     "INT", {"default": 0, "min": 0, "max": 4096, "step": 1}
                 ),
+                "target_frames": (
+                    "INT", {"default": 0, "min": 0, "max": 3592, "step": 1}
+                ),
             },
         }
 
@@ -1169,11 +1441,12 @@ class EagleH3FrameTrimNode:
     CATEGORY = "🦅 Eagle Suite/H3 核心"
     DESCRIPTION = (
         "连接“镜头与上下文.context_frames”到 trim_frames；连接当前 VAE 解码帧和音频。"
-        "输出交付帧、同步音频及可选的重叠拼接帧。"
+        "输出交付帧、同步音频及可选的重叠拼接帧；"
+        "target_frames 用于去除 17k+5 网格造成的尾部多余帧。"
     )
 
     def execute(self, images, trim_frames=0, audio=None, fps=24.0,
-                match_tail=True, retain_overlap_frames=0):
+                match_tail=True, retain_overlap_frames=0, target_frames=0):
         if not torch.is_tensor(images) or images.ndim != 4:
             raise ValueError("[H3FrameTrim] images 必须是 NHWC IMAGE 批次")
         total = int(images.shape[0])
@@ -1184,8 +1457,19 @@ class EagleH3FrameTrimNode:
             )
 
         delivered = images[trim:] if trim else images
+        target = max(0, int(target_frames or 0))
+        if target:
+            if int(delivered.shape[0]) < target:
+                raise ValueError(
+                    f"[H3FrameTrim] 去除 {trim} 帧上下文后仅剩 "
+                    f"{int(delivered.shape[0])} 帧，不足以交付目标 {target} 帧"
+                )
+            delivered = delivered[:target]
         retained = min(trim, max(0, int(retain_overlap_frames or 0)))
-        overlap = images[trim - retained:] if retained else delivered
+        overlap = (
+            images[trim - retained:trim + int(delivered.shape[0])]
+            if retained else delivered
+        )
         synced_audio = self._trim_audio(
             audio, trim, int(delivered.shape[0]), float(fps or 24.0), bool(match_tail)
         )
@@ -1270,6 +1554,7 @@ class EagleH3SegmentCheckpointNode:
                 "video": ("VIDEO",),
                 "images": ("IMAGE",),
                 "images_with_overlap": ("IMAGE",),
+                "sampled_latent": ("LATENT",),
                 "trim_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "trim_end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "audio": ("AUDIO",),
@@ -1288,7 +1573,7 @@ class EagleH3SegmentCheckpointNode:
 
     def execute(self, run_state, video=None, trim_start=0.0, trim_end=0.0,
                 audio=None, images=None, images_with_overlap=None,
-                prompt=None, extra_pnginfo=None):
+                sampled_latent=None, prompt=None, extra_pnginfo=None):
         state = _clone_state(run_state)
         params = shot_params(state)
         if params is None:
@@ -1302,7 +1587,9 @@ class EagleH3SegmentCheckpointNode:
         idx = params["index"]
         shot_dir = _shot_dir(state["base_dir"], idx)
         ensure_dir(str(shot_dir))
-        clip_path = str(shot_dir / "clip.mp4")
+        revision = _next_revision(state, idx)
+        stem = f"clip_r{revision:04d}"
+        clip_path = str(shot_dir / f"{stem}.mp4")
 
         fps = params["fps"]
         delivered = params["shot"].get("delivered_frames", 0)
@@ -1323,7 +1610,7 @@ class EagleH3SegmentCheckpointNode:
                     and images_with_overlap.ndim == 4
                     and int(images_with_overlap.shape[0]) > int(images.shape[0])
                 ):
-                    overlap_path = str(shot_dir / "clip_with_overlap.mp4")
+                    overlap_path = str(shot_dir / f"{stem}_with_overlap.mp4")
                     frames_to_video(_tensor_to_np(images_with_overlap), overlap_path, fps=fps, crf=crf)
             # 显式首尾裁剪优先；否则按计划 delivered_frames 限长。
             elif trim_end and trim_end > trim_start:
@@ -1346,16 +1633,51 @@ class EagleH3SegmentCheckpointNode:
 
             # 合并音频
             if audio is not None:
-                audio_path = str(shot_dir / "audio.wav")
+                audio_path = str(shot_dir / f"{stem}.wav")
                 try:
                     self._save_audio(audio, audio_path)
-                    merged_path = str(shot_dir / "clip_with_audio.mp4")
+                    merged_path = str(shot_dir / f"{stem}_with_audio.mp4")
                     merge_audio_video(clip_path, audio_path, merged_path)
                     os.replace(merged_path, clip_path)
                 except Exception as e:
                     logger.warning(f"[H3Chain] 合并音频失败: {e}")
 
-            record_shot_result(
+            latent_path = ""
+            if sampled_latent is not None:
+                latent_path = str(shot_dir / f"{stem}.pt")
+                # 检查点只保存采样器输出中的 H3 视频/音频双流；这是下一镜
+                # 无损承接的输入，不保存噪声、mask 等可能滞留显存的附加项。
+                torch.save(_compact_h3_latent(sampled_latent), latent_path)
+
+            effective_shot = params.get("shot") or {}
+            prompt_text = str(effective_shot.get("prompt") or "")
+            prompt_path = str(shot_dir / f"{stem}.prompt.txt")
+            Path(prompt_path).write_text(prompt_text, encoding="utf-8")
+            checkpoint_path = str(shot_dir / f"{stem}.json")
+            checkpoint_meta = {
+                "version": MANIFEST_VERSION,
+                "run_name": state.get("run_name"),
+                "index": idx,
+                "scene_number": idx + 1,
+                "revision": revision,
+                "clip": clip_path,
+                "overlap_clip": overlap_path,
+                "latent": latent_path,
+                "prompt": prompt_text,
+                "prompt_path": prompt_path,
+                "prompt_hash": effective_shot.get("prompt_hash", ""),
+                "seed": int(params.get("effective_seed", effective_shot.get("seed", 0)) or 0),
+                "raw_frames": int(effective_shot.get("raw_frames", effective_shot.get("length", 0)) or 0),
+                "delivered_frames": int(delivered or 0),
+                "fps": fps,
+                "plan_hash": (state.get("plan") or {}).get("plan_hash", ""),
+                "created_at": datetime.now().isoformat(),
+            }
+            Path(checkpoint_path).write_text(
+                json.dumps(checkpoint_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+            entry = record_shot_result(
                 state,
                 clip_path=clip_path,
                 delivered_frames=delivered,
@@ -1364,10 +1686,18 @@ class EagleH3SegmentCheckpointNode:
                     "fps": fps,
                     "audio": audio is not None,
                     "overlap_clip": overlap_path,
+                    "latent": latent_path,
+                    "prompt_path": prompt_path,
+                    "checkpoint": checkpoint_path,
+                    "revision": revision,
+                    "seed": int(params.get("effective_seed", params["shot"].get("seed", 0)) or 0),
                 },
             )
             save_state(state)
-            return (native_video(clip_path), state, f"✅ 已保存 clip_{idx + 1:02d}: {clip_path}")
+            return (
+                native_video(clip_path), state,
+                f"✅ 已保存场景 {idx + 1} 版本 r{entry.get('active_revision', revision):04d}: {clip_path}",
+            )
         except Exception as e:
             logger.error(f"[H3Chain] 分段保存失败: {e}")
             return ("", state, f"❌ 分段保存失败: {e}")
@@ -1412,18 +1742,91 @@ class EagleH3ReviewGateNode:
             },
             "optional": {
                 "review_decision": ("STRING", {"default": "", "multiline": False}),
+                "retry_prompt": ("STRING", {"default": "", "multiline": True}),
+                "retry_seed": ("INT", {"default": -1, "min": -1, "max": 9223372036854775807}),
+                "retry_length": ("INT", {"default": 0, "min": 0, "max": 3592, "step": 1}),
+                "resume_scene": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1}),
+                "assemble_partial_on_stop": ("BOOLEAN", {"default": True}),
+                "auto_continue_timeout_minutes": (
+                    "FLOAT", {"default": 0.0, "min": 0.0, "max": 1440.0, "step": 0.5}
+                ),
+                "unload_models_while_waiting": ("BOOLEAN", {"default": False}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"}
         }
 
-    RETURN_TYPES = (H3_RUN_STATE, "STRING", "BOOL", "BOOL", "STRING")
+    RETURN_TYPES = (H3_RUN_STATE, "STRING", "BOOLEAN", "BOOLEAN", "STRING")
     RETURN_NAMES = ("run_state", "decision", "awaiting_review", "approved", "summary")
     FUNCTION = "execute"
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
     DEPRECATED = True
 
-    def execute(self, run_state, preview_clip, review_decision="", unique_id=None):
+    @staticmethod
+    def _history(state):
+        """Expose persisted takes without sending the whole runtime state to the UI."""
+        rows = []
+        for item in sorted(
+            state.get("shots") or [], key=lambda value: int(value.get("index", 0))
+        ):
+            clip_path = str(item.get("clip") or "")
+            if not clip_path:
+                continue
+            revisions = item.get("revisions") or []
+            if not revisions:
+                revisions = [item]
+            for revision in revisions:
+                revision_clip = str(revision.get("clip") or clip_path)
+                if not revision_clip:
+                    continue
+                rows.append({
+                    "index": int(item.get("index", 0)),
+                    "shot_id": str(item.get("shot_id") or ""),
+                    "revision": int(revision.get("revision", item.get("active_revision", 1)) or 1),
+                    "active": int(revision.get("revision", 1) or 1) == int(item.get("active_revision", 1) or 1),
+                    "clip_path": revision_clip,
+                    "decision": str(revision.get("decision") or item.get("decision") or ""),
+                    "seed": str(revision.get("seed", item.get("seed", "")) or ""),
+                    "delivered_frames": int(revision.get("delivered_frames", item.get("delivered_frames", 0)) or 0),
+                })
+        return rows
+
+    @staticmethod
+    def _set_active_decision(state, decision):
+        if not state.get("shots"):
+            return
+        item = state["shots"][-1]
+        item["decision"] = decision
+        active_revision = int(item.get("active_revision", 0) or 0)
+        for revision in item.get("revisions") or []:
+            if int(revision.get("revision", 0) or 0) == active_revision:
+                revision["decision"] = decision
+
+    def _ui_payload(self, state, preview_path, awaiting, approved, decision, summary, mode):
+        params = shot_params(state)
+        shot = (params or {}).get("shot") or {}
+        return {
+            "awaiting_review": bool(awaiting),
+            "approved": bool(approved),
+            "decision": str(decision or ""),
+            "summary": summary,
+            "mode": mode,
+            "run_name": state.get("run_name"),
+            "current_index": state.get("current_index", 0),
+            "clip_count": int(state.get("total_shots", 0) or 0),
+            "preview_clip": preview_path,
+            "history": self._history(state),
+            "prompt": str(shot.get("prompt") or ""),
+            "seed": int((params or {}).get("effective_seed", shot.get("seed", 0)) or 0),
+            "length": int(shot.get("raw_frames", shot.get("length", 0)) or 0),
+            "can_resume": bool(state.get("shots")),
+            "reset_decision": bool(decision),
+        }
+
+    async def execute(self, run_state, preview_clip, review_decision="", retry_prompt="",
+                      retry_seed=-1, retry_length=0, resume_scene=0,
+                      assemble_partial_on_stop=True, auto_continue_timeout_minutes=0.0,
+                      unload_models_while_waiting=False, unique_id=None):
         state = _clone_state(run_state)
         preview_path = _resolve_video_path(preview_clip) or ""
         params = shot_params(state)
@@ -1438,55 +1841,81 @@ class EagleH3ReviewGateNode:
             decision = decision or "approve"
 
         if not decision:
-            # interactive 模式下，没有决策则暂停等待前端
+            # interactive 模式在本次执行内暂停，避免审批时重跑采样链。
             if state.get("shots"):
-                state["shots"][-1]["decision"] = "reviewing"
-                save_state(state)
-            return {
-                "ui": {
-                    "h3_review": {
-                        "awaiting_review": True,
-                        "approved": False,
-                        "decision": "",
-                        "summary": build_summary(state),
-                        "mode": mode,
-                        "run_name": state.get("run_name"),
-                        "current_index": state.get("current_index", 0),
-                        "preview_clip": preview_path,
-                    }
-                },
-                "result": (state, "", True, False, build_summary(state)),
-            }
+                self._set_active_decision(state, "reviewing")
+            state["awaiting_review"] = True
+            save_state(state)
+            token, future = open_review(unique_id)
+            pending_payload = self._ui_payload(
+                state, preview_path, True, False, "", build_summary(state), mode
+            )
+            pending_payload["token"] = token
+            pending_payload["node_id"] = str(unique_id or "")
+            if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
+                PromptServer.instance.send_sync("eagle_h3_review_pending", pending_payload)
+            if unload_models_while_waiting:
+                try:
+                    import comfy.model_management as model_management
+                    model_management.unload_all_models()
+                    model_management.soft_empty_cache()
+                except Exception as error:
+                    logger.warning(f"[H3Chain] 审片等待时卸载模型失败: {error}")
+            try:
+                timeout = max(0.0, float(auto_continue_timeout_minutes or 0.0)) * 60.0
+                body = await asyncio.wait_for(future, timeout) if timeout else await future
+            except asyncio.TimeoutError:
+                body = {"decision": "approve"}
+            finally:
+                close_review(token)
+            decision = str(body.get("decision") or "approve").strip().lower()
+            retry_prompt = body.get("retry_prompt", retry_prompt)
+            retry_seed = body.get("retry_seed", retry_seed)
+            retry_length = body.get("retry_length", retry_length)
+            resume_scene = body.get("resume_scene", resume_scene)
+            assemble_partial_on_stop = body.get(
+                "assemble_partial_on_stop", assemble_partial_on_stop
+            )
 
-        if decision not in ("approve", "retry", "reroll", "stop", "auto"):
+        if decision not in ("approve", "retry", "reroll", "stop", "approve_stop", "resume", "auto"):
             decision = "approve"
 
         if decision == "auto":
             decision = "approve"
 
-        # 记录决策到最新 segment
-        if state.get("shots"):
-            state["shots"][-1]["decision"] = decision
+        ui_decision = decision
+        if decision == "resume":
+            restore_from_scene(state, resume_scene)
+            decision = "retry"
+        elif decision == "retry":
+            apply_shot_overrides(
+                state,
+                prompt=retry_prompt,
+                seed=retry_seed if int(retry_seed) >= 0 else None,
+                length=retry_length,
+            )
+            self._set_active_decision(state, "retry")
+        elif decision == "reroll":
+            self._set_active_decision(state, "reroll")
+        elif decision == "approve_stop":
+            self._set_active_decision(state, "approved")
+            state["assemble_partial_on_stop"] = bool(assemble_partial_on_stop)
+            decision = "stop"
+        else:
+            self._set_active_decision(state, "approved" if decision == "approve" else decision)
 
         # 把 decision 写入 state.pending_decision，供 End 读取
         state["pending_decision"] = decision
         state["awaiting_review"] = False
         save_state(state)
 
-        approved = decision == "approve"
+        approved = ui_decision in ("approve", "approve_stop")
         summary = build_summary(state)
         return {
             "ui": {
-                "h3_review": {
-                    "awaiting_review": False,
-                    "approved": approved,
-                    "decision": decision,
-                    "summary": summary,
-                    "mode": mode,
-                    "run_name": state.get("run_name"),
-                    "current_index": state.get("current_index", 0),
-                    "preview_clip": preview_path,
-                }
+                "h3_review": self._ui_payload(
+                    state, preview_path, False, approved, ui_decision, summary, mode
+                )
             },
             "result": (state, decision, False, approved, summary),
         }
@@ -1510,7 +1939,7 @@ class EagleH3EndNode:
             }
         }
 
-    RETURN_TYPES = (H3_RUN_STATE, "BOOL", "INT", "BOOL", "STRING")
+    RETURN_TYPES = (H3_RUN_STATE, "BOOLEAN", "INT", "BOOLEAN", "STRING")
     RETURN_NAMES = ("run_state", "done", "next_index", "loop_again", "summary")
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
@@ -1566,19 +1995,38 @@ class EagleH3NativeLoopEndNode:
             "required": {
                 "flow": (H3_LOOP_FLOW, {"rawLink": True}),
                 "state": (H3_RUN_STATE,),
+                "images": ("IMAGE", {
+                    "tooltip": (
+                        "连接 H3 重叠帧裁剪的 images；接受当前镜头后，尾帧会作为"
+                        "下一镜视觉上下文。"
+                    ),
+                }),
+                "sampled_latent": ("LATENT", {
+                    "tooltip": (
+                        "连接当前 H3 采样器的原始 output_ad / output。视频与音频"
+                        "双流 latent 会无损承接到下一镜。"
+                    ),
+                }),
             },
             "optional": {
                 "decision": ("STRING", {"default": ""}),
-                "filename": ("STRING", {"default": ""}),
+                "filename": ("STRING", {
+                    "default": "",
+                    "tooltip": "文件名前缀；自动按 前缀_0001、前缀_0002… 保存，留空使用运行名称。",
+                }),
                 "format": (["mp4", "mov", "mkv"], {"default": "mp4"}),
                 "fps_override": ("INT", {"default": 0, "min": 0, "max": 120, "step": 1}),
                 "local_save_path": ("STRING", {
                     "default": "",
-                    "tooltip": "最终整片额外复制到此目录；留空则只保存在 ComfyUI/output/h3_chains。",
+                    "tooltip": "最终整片额外复制到此目录；留空则只保存在 ComfyUI/output/h3_eagle_chains。",
                 }),
                 "eagle_folder": ("STRING", {
                     "default": "",
                     "tooltip": "最终整片导入的 Eagle 文件夹名称、层级路径、ID 或 eagle://folder/ 地址；留空不导入。",
+                }),
+                "auto_assemble": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "开启时在循环结束后直接合成；关闭时仅输出 manifest，可接独立最终装配节点。",
                 }),
             },
             "hidden": {
@@ -1587,8 +2035,14 @@ class EagleH3NativeLoopEndNode:
             },
         }
 
-    RETURN_TYPES = (H3_RUN_STATE, "VIDEO", "BOOL", "INT", "STRING")
-    RETURN_NAMES = ("state", "video", "done", "next_index", "summary")
+    RETURN_TYPES = (
+        H3_RUN_STATE, "VIDEO", "BOOLEAN", "INT", "STRING", H3_MANIFEST,
+        "BOOLEAN", "IMAGE", "LATENT",
+    )
+    RETURN_NAMES = (
+        "state", "video", "done", "next_index", "summary", "manifest",
+        "partial", "last_context_frames", "last_context_latent",
+    )
     FUNCTION = "execute"
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle Suite/H3 核心"
@@ -1715,11 +2169,26 @@ class EagleH3NativeLoopEndNode:
                 return source_path, f"✅ 本地整片: {destination}"
         except OSError:
             pass
-        if destination.exists():
-            destination = target_dir / generate_unique_filename(
-                Path(source_path).stem, Path(source_path).suffix.lstrip(".")
-            )
-        shutil.copy2(source_path, destination)
+        reserved = False
+        try:
+            descriptor = os.open(str(destination), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(descriptor)
+            reserved = True
+        except FileExistsError:
+            source_stem = Path(source_path).stem
+            numbered = re.match(r"^(.*)_(\d{4})$", source_stem)
+            prefix = numbered.group(1) if numbered else source_stem
+            start = int(numbered.group(2)) + 1 if numbered else 1
+            destination = Path(_reserve_numbered_video_path(
+                target_dir, prefix, Path(source_path).suffix.lstrip("."), start=start
+            ))
+            reserved = True
+        try:
+            shutil.copy2(source_path, destination)
+        except Exception:
+            if reserved:
+                destination.unlink(missing_ok=True)
+            raise
         return str(destination), f"✅ 本地整片: {destination}"
 
     @staticmethod
@@ -1747,9 +2216,22 @@ class EagleH3NativeLoopEndNode:
             return f"✅ 已导入 Eagle: {value}"
         return "⚠️ Eagle 导入失败: " + str(response.get("message") or response)
 
-    def execute(self, flow, state, decision="", filename="", format="mp4",
-                fps_override=0, local_save_path="", eagle_folder="",
+    def execute(self, flow, state, images, sampled_latent, decision="", filename="", format="mp4",
+                fps_override=0, local_save_path="", eagle_folder="", auto_assemble=True,
                 dynprompt=None, unique_id=None):
+        effective_decision = str(
+            decision or state.get("pending_decision") or (
+                "approve" if state.get("mode") == "auto" else ""
+            )
+        ).strip().lower()
+        accepted_current = effective_decision not in ("", "retry", "reroll")
+        if accepted_current:
+            # 这两项只活在当前动态递归状态中。save_state 会从 manifest 副本
+            # 剔除张量；交互模式下一次 Queue 则从镜头 .pt 检查点恢复 latent。
+            state = _clone_state(state)
+            state["previous_frames"] = _context_tail(state, images)
+            state["previous_latent"] = _compact_h3_latent(sampled_latent)
+
         advanced = EagleH3EndNode().execute(state, decision=decision)
         if isinstance(advanced, dict):
             state, done, next_index, loop_again, summary = advanced["result"]
@@ -1759,13 +2241,24 @@ class EagleH3NativeLoopEndNode:
         # 审片模式每镜一次执行；下一次 Queue 从 manifest 继续。
         if loop_again and state.get("mode") != "auto":
             summary += "\n交互审片模式：已保存当前镜头，请再次执行生成下一镜。"
-            return (state, None, False, next_index, summary)
+            return (
+                state, None, False, next_index, summary, _portable_state(state), False,
+                state.get("previous_frames", _empty_image_tensor()),
+                state.get("previous_latent", {"samples": []}),
+            )
 
         if loop_again:
             return self._recurse(flow, state, dynprompt, unique_id)
 
+        partial = bool(state.get("stop") or int(state.get("current_index", 0) or 0) < int(state.get("total_shots", 0) or 0))
+        state["manifest_status"] = "partial" if partial else ("complete" if done else "running")
+        save_state(state)
+
         final_video = None
-        if done and state.get("shots"):
+        should_assemble = bool(auto_assemble) and (
+            not partial or bool(state.get("assemble_partial_on_stop", True))
+        )
+        if done and state.get("shots") and should_assemble:
             final_video, assemble_status = EagleH3AssembleNode().execute(
                 state, filename=filename, format=format, fps_override=fps_override
             )
@@ -1790,7 +2283,15 @@ class EagleH3NativeLoopEndNode:
                     logger.exception("H3 最终整片 Eagle 导入失败")
                     summary += f"\n⚠️ 最终整片 Eagle 导入失败: {error}"
                 final_video = native_video(export_path)
-        result = (state, final_video, done, next_index, summary)
+        elif done and partial and auto_assemble:
+            summary += "\n已停止；按当前设置保留检查点，未自动合成部分成片。"
+        elif done and not auto_assemble:
+            summary += "\n已输出 manifest，等待独立最终装配节点。"
+        result = (
+            state, final_video, done, next_index, summary, _portable_state(state), partial,
+            state.get("previous_frames", _empty_image_tensor()),
+            state.get("previous_latent", {"samples": []}),
+        )
         return {
             "ui": {"h3_native_loop": {
                 "done": done,
@@ -1833,6 +2334,9 @@ class EagleH3AssembleNode:
 
         clip_paths = []
         for shot in sorted(shots, key=lambda s: s.get("index", 0)):
+            decision = str(shot.get("decision") or "approved").lower()
+            if decision not in {"approved", "approve", "auto", "approve_stop"}:
+                continue
             clip = shot.get("clip")
             if clip and os.path.isfile(clip):
                 clip_paths.append(clip)
@@ -1841,17 +2345,70 @@ class EagleH3AssembleNode:
             return ("", "❌ 没有有效的分段视频")
 
         run_name = state.get("run_name", "h3_pipeline")
-        out_name = filename.strip() or run_name
-        out_path = safe_output_path(
-            state["base_dir"], "final", f"{out_name}.{format}", create_dirs=True
-        )
+        out_name = Path(filename.strip() or run_name).stem or "h3_pipeline"
+        final_dir = Path(safe_output_path(
+            state["base_dir"], "final", ".", create_dirs=True
+        ))
+        out_path = _reserve_numbered_video_path(final_dir, out_name, format)
 
         try:
             fps = fps_override or int(state["plan"]["compatibility"].get("fps", 24) or 24)
             concat_videos(clip_paths, out_path, fps=fps)
             return (native_video(out_path), f"✅ 已合成: {out_path} ({len(clip_paths)} 段)")
         except Exception as e:
+            Path(out_path).unlink(missing_ok=True)
             return ("", f"❌ 合成失败: {e}")
+
+
+class EagleH3ManifestAssembleNode:
+    """从循环 manifest 独立装配完整或部分成片。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"manifest": (H3_MANIFEST,)},
+            "optional": {
+                "filename": ("STRING", {"default": ""}),
+                "format": (["mp4", "mov", "mkv"], {"default": "mp4"}),
+                "fps_override": ("INT", {"default": 0, "min": 0, "max": 120, "step": 1}),
+                "local_save_path": ("STRING", {"default": ""}),
+                "eagle_folder": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("VIDEO", "STRING", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("video", "file_path", "partial", "summary")
+    FUNCTION = "execute"
+    OUTPUT_NODE = True
+    CATEGORY = "🦅 Eagle Suite/H3 核心"
+
+    def execute(self, manifest, filename="", format="mp4", fps_override=0,
+                local_save_path="", eagle_folder=""):
+        state = _clone_state(manifest)
+        if not isinstance(state, dict) or not state.get("base_dir"):
+            return (None, "", False, "❌ manifest 结构无效")
+        partial = str(state.get("manifest_status") or "").lower() == "partial"
+        video, summary = EagleH3AssembleNode().execute(
+            state, filename=filename, format=format, fps_override=fps_override
+        )
+        output_path = _resolve_video_path(video) or ""
+        if output_path and os.path.isfile(output_path):
+            export_path = output_path
+            if local_save_path:
+                export_path, local_status = EagleH3NativeLoopEndNode._copy_final_to_local(
+                    output_path, local_save_path
+                )
+                if local_status:
+                    summary += "\n" + local_status
+            if eagle_folder:
+                eagle_status = EagleH3NativeLoopEndNode._import_final_to_eagle(
+                    export_path, eagle_folder
+                )
+                if eagle_status:
+                    summary += "\n" + eagle_status
+            video = native_video(export_path)
+            output_path = export_path
+        return (video, output_path, partial, summary)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1872,9 +2429,19 @@ class EagleH3CheckpointReviewNode:
                 "images": ("IMAGE",),
                 "audio": ("AUDIO",),
                 "images_with_overlap": ("IMAGE",),
+                "sampled_latent": ("LATENT",),
                 "trim_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "trim_end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 999999.0, "step": 0.01}),
                 "review_decision": ("STRING", {"default": "", "multiline": False}),
+                "retry_prompt": ("STRING", {"default": "", "multiline": True}),
+                "retry_seed": ("INT", {"default": -1, "min": -1, "max": 9223372036854775807}),
+                "retry_length": ("INT", {"default": 0, "min": 0, "max": 3592, "step": 1}),
+                "resume_scene": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1}),
+                "assemble_partial_on_stop": ("BOOLEAN", {"default": True}),
+                "auto_continue_timeout_minutes": (
+                    "FLOAT", {"default": 0.0, "min": 0.0, "max": 1440.0, "step": 0.5}
+                ),
+                "unload_models_while_waiting": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1883,44 +2450,94 @@ class EagleH3CheckpointReviewNode:
             },
         }
 
-    RETURN_TYPES = ("VIDEO", H3_RUN_STATE, "STRING", "BOOL", "BOOL", "STRING", "STRING")
+    RETURN_TYPES = (
+        "VIDEO", H3_RUN_STATE, "STRING", "BOOLEAN", "BOOLEAN", "STRING", "STRING",
+        H3_SEGMENT, H3_MANIFEST,
+    )
     RETURN_NAMES = (
         "clip", "state", "decision", "awaiting_review", "approved",
-        "clip_path", "summary",
+        "clip_path", "summary", "segment", "manifest",
     )
     FUNCTION = "execute"
     OUTPUT_NODE = True
     CATEGORY = "🦅 Eagle Suite/H3 核心"
 
-    def execute(self, state, video=None, images=None, audio=None,
-                images_with_overlap=None, trim_start=0.0, trim_end=0.0,
-                review_decision="", unique_id=None, prompt=None, extra_pnginfo=None):
-        clip, checkpoint_state, checkpoint_status = EagleH3SegmentCheckpointNode().execute(
-            state,
-            video=video,
-            images=images,
-            images_with_overlap=images_with_overlap,
-            trim_start=trim_start,
-            trim_end=trim_end,
-            audio=audio,
-            prompt=prompt,
-            extra_pnginfo=extra_pnginfo,
+    async def execute(self, state, video=None, images=None, audio=None,
+                      images_with_overlap=None, sampled_latent=None,
+                      trim_start=0.0, trim_end=0.0, review_decision="",
+                      retry_prompt="", retry_seed=-1, retry_length=0, resume_scene=0,
+                      assemble_partial_on_stop=True, auto_continue_timeout_minutes=0.0,
+                      unload_models_while_waiting=False,
+                      unique_id=None, prompt=None, extra_pnginfo=None):
+        checkpoint_state = _clone_state(state)
+        current_index = int(checkpoint_state.get("current_index", 0) or 0)
+        existing = next(
+            (
+                item for item in checkpoint_state.get("shots", [])
+                if int(item.get("index", -1)) == current_index
+                and item.get("clip") and os.path.isfile(str(item.get("clip")))
+                and str(item.get("decision") or "") in {"pending", "reviewing"}
+            ),
+            None,
         )
+        # A review-button click queues the graph again. Reuse the already saved take;
+        # otherwise merely approving it would create a duplicate revision.
+        if review_decision and existing is not None:
+            clip = native_video(existing["clip"])
+            checkpoint_status = f"✅ 复用待审版本 r{int(existing.get('active_revision', 1) or 1):04d}"
+        else:
+            clip, checkpoint_state, checkpoint_status = EagleH3SegmentCheckpointNode().execute(
+                checkpoint_state,
+                video=video,
+                images=images,
+                images_with_overlap=images_with_overlap,
+                sampled_latent=sampled_latent,
+                trim_start=trim_start,
+                trim_end=trim_end,
+                audio=audio,
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
+            )
         clip_path = _resolve_video_path(clip) or ""
         if not clip_path:
-            return (None, checkpoint_state, "error", False, False, "", checkpoint_status)
+            return (
+                None, checkpoint_state, "error", False, False, "", checkpoint_status,
+                {}, _portable_state(checkpoint_state),
+            )
 
-        review = EagleH3ReviewGateNode().execute(
-            checkpoint_state, clip, review_decision=review_decision, unique_id=unique_id
+        review = await EagleH3ReviewGateNode().execute(
+            checkpoint_state,
+            clip,
+            review_decision=review_decision,
+            retry_prompt=retry_prompt,
+            retry_seed=retry_seed,
+            retry_length=retry_length,
+            resume_scene=resume_scene,
+            assemble_partial_on_stop=assemble_partial_on_stop,
+            auto_continue_timeout_minutes=auto_continue_timeout_minutes,
+            unload_models_while_waiting=unload_models_while_waiting,
+            unique_id=unique_id,
         )
         if isinstance(review, dict):
             result = review.get("result", ())
             state, decision, awaiting, approved, summary = result
             payload = dict(review)
-            payload["result"] = (clip, state, decision, awaiting, approved, clip_path, summary)
+            active_segment = next(
+                (item for item in state.get("shots", []) if item.get("clip") == clip_path), {}
+            )
+            payload["result"] = (
+                clip, state, decision, awaiting, approved, clip_path, summary,
+                _clone_state(active_segment), _portable_state(state),
+            )
             return payload
         state, decision, awaiting, approved, summary = review
-        return (clip, state, decision, awaiting, approved, clip_path, summary)
+        active_segment = next(
+            (item for item in state.get("shots", []) if item.get("clip") == clip_path), {}
+        )
+        return (
+            clip, state, decision, awaiting, approved, clip_path, summary,
+            _clone_state(active_segment), _portable_state(state),
+        )
 
 
 class EagleH3FinalizeNode:
@@ -1938,7 +2555,7 @@ class EagleH3FinalizeNode:
             },
         }
 
-    RETURN_TYPES = (H3_RUN_STATE, "VIDEO", "BOOL", "INT", "BOOL", "STRING")
+    RETURN_TYPES = (H3_RUN_STATE, "VIDEO", "BOOLEAN", "INT", "BOOLEAN", "STRING")
     RETURN_NAMES = ("run_state", "video", "done", "next_index", "loop_again", "summary")
     FUNCTION = "execute"
     OUTPUT_NODE = True
@@ -2224,12 +2841,14 @@ class EagleH3SmartSplitNode:
 NODE_CLASS_MAPPINGS_H3PIPELINE = {
     "EagleH3PlanInteropNode": EagleH3PlanInteropNode,
     "EagleH3StateInteropNode": EagleH3StateInteropNode,
+    "EagleH3LoadManifestNode": EagleH3LoadManifestNode,
     "EagleH3NativeLoopStartNode": EagleH3NativeLoopStartNode,
     "EagleH3ShotContextNode": EagleH3ShotContextNode,
     "EagleH3ReferenceConditionNode": EagleH3ReferenceConditionNode,
     "EagleH3FrameTrimNode": EagleH3FrameTrimNode,
     "EagleH3CheckpointReviewNode": EagleH3CheckpointReviewNode,
     "EagleH3NativeLoopEndNode": EagleH3NativeLoopEndNode,
+    "EagleH3ManifestAssembleNode": EagleH3ManifestAssembleNode,
     "EagleH3ExportPNGSequenceNode": EagleH3ExportPNGSequenceNode,
     "EagleH3SeamProbeNode": EagleH3SeamProbeNode,
     "EagleH3SmartSplitNode": EagleH3SmartSplitNode,
@@ -2238,12 +2857,14 @@ NODE_CLASS_MAPPINGS_H3PIPELINE = {
 NODE_DISPLAY_NAME_MAPPINGS_H3PIPELINE = {
     "EagleH3PlanInteropNode": "🦅 H3 互操作 · 计划 JSON 桥",
     "EagleH3StateInteropNode": "🦅 H3 互操作 · 状态与上一片段",
+    "EagleH3LoadManifestNode": "🦅 H3 · 恢复运行清单",
     "EagleH3NativeLoopStartNode": "🦅 H3 · 循环开始",
     "EagleH3ShotContextNode": "🦅 H3 · 镜头与上下文",
     "EagleH3ReferenceConditionNode": "🦅 H3 · 参考条件路由",
     "EagleH3FrameTrimNode": "🦅 H3 · 重叠帧与音频裁剪",
     "EagleH3CheckpointReviewNode": "🦅 H3 · 分段保存与审片",
     "EagleH3NativeLoopEndNode": "🦅 H3 · 循环结束与合成",
+    "EagleH3ManifestAssembleNode": "🦅 H3 · 最终装配（Manifest）",
     "EagleH3ExportPNGSequenceNode": "🦅 H3 工具 · 导出 PNG 序列",
     "EagleH3SeamProbeNode": "🦅 H3 工具 · 接缝分析",
     "EagleH3SmartSplitNode": "🦅 H3 工具 · 智能分镜",
@@ -2267,6 +2888,7 @@ __all__ = [
     "EagleH3ReviewGateNode",
     "EagleH3EndNode",
     "EagleH3NativeLoopEndNode",
+    "EagleH3ManifestAssembleNode",
     "EagleH3AssembleNode",
     "EagleH3ExportPNGSequenceNode",
     "EagleH3SeamProbeNode",

@@ -20,6 +20,7 @@ import time
 import math
 import hashlib
 import uuid
+import random
 from pathlib import Path
 
 from aiohttp import web
@@ -183,10 +184,16 @@ def _h3_frame_length(seconds):
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("H3 shot duration must be a finite positive number.")
     requested = max(5, int(math.ceil(seconds * H3_FPS - 1e-9)))
+    return _h3_frame_length_for_frames(requested)
+
+
+def _h3_frame_length_for_frames(requested):
+    """Round a requested frame count up to H3's legal ``17k+5`` grid."""
+    requested = max(5, int(requested or 5))
     length = requested + (5 - requested % 17) % 17
     if length > H3_MAX_FRAMES:
         raise ValueError(
-            f"H3 shot duration {seconds:.6f}s rounds to {length} frames; "
+            f"H3 requested frame count {requested} rounds to {length} frames; "
             f"the largest valid 17k+5 length is {H3_MAX_FRAMES} frames."
         )
     return length
@@ -227,10 +234,33 @@ def _snap_context_length(value):
 
 
 def _snap_multiple_of_32(value):
-    value = int(value or 1080)
+    value = int(value or 32)
     if value < 32:
         value = 32
-    return (value // 32) * 32
+    return max(32, min(4096, int(round(value / 32.0)) * 32))
+
+
+def _resolve_project_dimensions(project):
+    """Resolve dimensions from explicit fields or the legacy preset value.
+
+    Older Director states persisted only ``sizePreset``.  Falling through to a
+    portrait default made a visible 960x544 preset execute at 1056x1920, so the
+    preset is now an authoritative compatibility fallback.
+    """
+    raw_width = _safe_get(project, "width", None)
+    raw_height = _safe_get(project, "height", None)
+    if raw_width in (None, "") or raw_height in (None, ""):
+        parts = str(_safe_get(project, "sizePreset", "") or "").split("|")
+        if len(parts) >= 4:
+            try:
+                raw_width = int(parts[2]) if raw_width in (None, "") else raw_width
+                raw_height = int(parts[3]) if raw_height in (None, "") else raw_height
+            except (TypeError, ValueError):
+                pass
+    return (
+        _snap_multiple_of_32(raw_width if raw_width not in (None, "") else 960),
+        _snap_multiple_of_32(raw_height if raw_height not in (None, "") else 544),
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -249,11 +279,24 @@ def _project_media(project):
     """Return normalized multimodal references, migrating legacy image slots in memory."""
     media = _safe_get(project, "mediaRefs", []) or []
     if isinstance(media, list) and any(isinstance(item, dict) and item.get("filename") for item in media):
-        return [
+        normalized = [
             _normalize_media_item(item, index)
             for index, item in enumerate(media)
             if isinstance(item, dict) and item.get("filename")
         ]
+        workflow_type = str(_safe_get(project, "workflowType", "ai_drama") or "ai_drama")
+        allow_video = True
+        if workflow_type == "character_interaction":
+            interaction = _safe_get(project, "interaction", {}) or {}
+            allow_video = bool(isinstance(interaction, dict) and interaction.get("allowVideoReference", False))
+        elif workflow_type == "character_pv":
+            pv = _safe_get(project, "pv", {}) or {}
+            allow_video = bool(isinstance(pv, dict) and pv.get("enabled", True) and pv.get("allowVideoReference", True))
+        elif workflow_type == "ai_drama":
+            allow_video = str(_safe_get(project, "mode", "t2v") or "t2v").lower() in ("r2v", "rv2v", "v2v")
+        if not allow_video:
+            normalized = [item for item in normalized if item.get("type") != "video"]
+        return normalized
 
     legacy = _safe_get(project, "refs", []) or []
     migrated = []
@@ -297,15 +340,93 @@ _FIELD_HEADER_RE = re.compile(
 
 def _parse_h3_timecode(value):
     text = str(value or "").strip()
-    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2})(?:\.(\d{1,3}))?", text)
+    match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?", text)
     if not match:
-        return None
-    minutes = int(match.group(1) or 0)
-    seconds = int(match.group(2))
+        # Backward-compatible MM:SS.mmm parser. The first expression above also
+        # accepts HH:MM:SS.mmm for long editorial timelines.
+        match = re.fullmatch(r"(\d+):(\d{2})(?:\.(\d{1,3}))?", text)
+        if not match:
+            return None
+        hours = 0
+        minutes = int(match.group(1))
+        seconds = int(match.group(2))
+        millis_raw = match.group(3)
+    else:
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2))
+        seconds = int(match.group(3))
+        millis_raw = match.group(4)
+        if minutes >= 60:
+            return None
     if seconds >= 60:
         return None
-    millis = (match.group(3) or "0").ljust(3, "0")[:3]
-    return minutes * 60.0 + seconds + int(millis) / 1000.0
+    millis = (millis_raw or "0").ljust(3, "0")[:3]
+    return hours * 3600.0 + minutes * 60.0 + seconds + int(millis) / 1000.0
+
+
+def _format_h3_timecode(seconds):
+    """Format a stable editorial timecode without millisecond carry bugs."""
+    value = float(seconds or 0.0)
+    if not math.isfinite(value):
+        value = 0.0
+    total_ms = max(0, int(round(value * 1000.0)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+    return f"{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _scene_shot_timeline(scene, fps=H3_FPS):
+    """Build an exact, frame-addressable editorial timeline for one scene.
+
+    ``end_frame_exclusive`` follows normal media-tool conventions, so a range
+    [0, 120) contains exactly 120 frames. H3's rounded 17k+5 generation length
+    is deliberately not used here; it is separate model execution metadata.
+    """
+    shots = list(_safe_get(scene, "shots", []) or [])
+    if not shots:
+        return []
+    try:
+        duration = max(0.0, float(_safe_get(scene, "defaultSeconds", 10) or 10))
+    except (TypeError, ValueError):
+        duration = 10.0
+    fps = max(1, int(fps or H3_FPS))
+    total_frames = max(len(shots), int(round(duration * fps)))
+    starts = []
+    for index, shot in enumerate(shots):
+        parsed = _parse_h3_timecode(_safe_get(shot, "time", "")) if isinstance(shot, dict) else None
+        if index == 0:
+            parsed = 0.0
+        if parsed is None:
+            parsed = duration * index / max(1, len(shots))
+        frame = int(round(parsed * fps))
+        minimum = starts[index - 1] + 1 if index else 0
+        maximum = total_frames - (len(shots) - index)
+        starts.append(max(minimum, min(maximum, frame)))
+    starts[0] = 0
+
+    result = []
+    for index, shot in enumerate(shots):
+        start_frame = starts[index]
+        end_frame = starts[index + 1] if index + 1 < len(starts) else total_frames
+        end_frame = max(start_frame + 1, min(total_frames, end_frame))
+        start_seconds = start_frame / float(fps)
+        end_seconds = end_frame / float(fps)
+        result.append({
+            "index": index + 1,
+            "id": str(_safe_get(shot, "id", index + 1)) if isinstance(shot, dict) else str(index + 1),
+            "start_timecode": _format_h3_timecode(start_seconds),
+            "end_timecode": _format_h3_timecode(end_seconds),
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "duration_seconds": (end_frame - start_frame) / float(fps),
+            "start_frame": start_frame,
+            "end_frame_exclusive": end_frame,
+            "frame_count": end_frame - start_frame,
+        })
+    return result
 
 
 def _build_plan_preflight(project, plan, source_scenes=None):
@@ -403,6 +524,28 @@ def _build_plan_preflight(project, plan, source_scenes=None):
         if start < previous_start:
             errors.append(f"镜头 {offset} 的时间线起点逆序")
         previous_start = start
+
+    compatibility = plan.get("compatibility") or {}
+    width = int(compatibility.get("width", 0) or 0)
+    height = int(compatibility.get("height", 0) or 0)
+    max_raw_frames = max(
+        [int(shot.get("raw_frames", 0) or 0) for shot in plan.get("shots") or []]
+        or [0]
+    )
+    # 960x544 x 124f is the conservative 0.5MP/roughly-five-second baseline
+    # used by the bundled 16GB workflow.  This is a warning rather than a hard
+    # gate because quantization, offload and patch nodes change the real limit.
+    baseline_volume = 960 * 544 * 124
+    workload_ratio = (
+        (width * height * max_raw_frames) / float(baseline_volume)
+        if width and height and max_raw_frames else 0.0
+    )
+    if workload_ratio > 1.5:
+        warnings.append(
+            f"[H3-W201] 单段峰值工作量约为 0.5MP/124帧基线的 {workload_ratio:.1f}× "
+            f"({width}×{height}, {max_raw_frames}帧)。16GB 显存建议使用 "
+            "MiniMax Chunk FeedForward，必要时缩短单场景时长。"
+        )
 
     # Knowledge-backed prompt contract checks. These run before any sampler or
     # loop node so an invalid plan cannot consume the expensive generation path.
@@ -694,6 +837,311 @@ def _build_body(project, scene):
     return "\n\n".join(sections)
 
 
+def _build_interaction_directive(project, scene):
+    """Compile the character-interaction UI contract into the executable prompt."""
+    if str(_safe_get(project, "workflowType", "") or "") != "character_interaction":
+        return ""
+    cfg = _safe_get(project, "interaction", {}) or {}
+    if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+        return ""
+    duration = max(4.0, min(15.0, float(_safe_get(scene, "defaultSeconds", _safe_get(project, "globalDuration", 7)) or 7)))
+    production = {
+        "S": "restrained: one readable interaction beat, stable camera, subtle secondary motion, zero or one lightweight effect layer",
+        "SR": "standard: anticipation, main action and reaction, one motivated camera move, one or two effect layers",
+        "SSR": "advanced: two or three readable performance beats, layered foreground/background motion, motivated camera and effects",
+        "UR": "showcase: a polished hero performance with at most three clear beats, coordinated camera, environment response and layered effects",
+    }.get(str(cfg.get("productionLevel") or "SR"), "standard")
+    visual_style = {
+        "auto": "Infer live-action versus anime motion language from the authoritative references and preserve that medium.",
+        "live_action": (
+            "LIVE-ACTION PERFORMANCE: use physically weighted motion, realistic inertia and joint limits, "
+            "subtle facial micro-expression, natural blinking and cinematic camera response; avoid anime "
+            "smear frames, cel-shaded motion shorthand and exaggerated holds."
+        ),
+        "anime": (
+            "ANIME PERFORMANCE: preserve 2D linework and cel shading, favor readable key poses, controlled "
+            "anticipation/holds and selective stylized follow-through; avoid photoreal skin, live-action "
+            "motion blur and 3D-render drift."
+        ),
+    }.get(str(cfg.get("visualStyle") or "auto"), "")
+    dynamics = {
+        "auto": "Infer a character-appropriate interaction from visible design, scene intent and supplied text.",
+        "idle_loop": "Use subtle breathing, blink, gaze shift, small head motion, hair and garment follow-through.",
+        "expression_reaction": "Use a clear facial reaction supported by restrained head, shoulder and hand motion.",
+        "gesture": "Use one readable communicative gesture with anticipation, action, reaction and recovery.",
+        "dialogue_lipsync": "Use conversational acting with natural lip motion, blink, gaze and restrained gesture.",
+        "action": "Use a readable action with stable anatomy, center-of-frame staging and controlled follow-through.",
+        "dance_performance": "Use a short rhythmic performance with a limited move vocabulary and clear recovery pose.",
+        "transformation": "Stage a transformation while preserving identity and costume continuity across effects.",
+        "vfx_showcase": "Make effects respond to the character action and never obscure the face.",
+        "environment_interaction": "Let the character touch or react to one clearly defined environmental element.",
+        "meme_loop": "Use a concise, exaggerated reaction suitable for a looping reaction clip.",
+    }.get(str(cfg.get("dynamicType") or "auto"), "")
+    output = {
+        "single_clip": "Deliver one self-contained clip with a natural ending; no stitching handoff is required.",
+        "single_loop": "Deliver a seamless loop; match first/last pose, framing, velocity, hair/cloth direction, lighting and effect phase without freezing the seam.",
+        "optional_chain": "Keep the clip independent and additionally expose compatible handoff_in/handoff_out states.",
+        "continuous_chain": "Plan explicit pose, gaze, position, camera, lighting, effect and sound continuity handoffs.",
+    }.get(str(cfg.get("outputMode") or "single_loop"), "")
+    lines = [
+        "CHARACTER INTERACTION CONTRACT:",
+        f"- Duration budget: {duration:.3f} seconds.",
+        f"- Production strength: {production}.",
+        f"- Visual performance system: {visual_style}",
+        f"- Dynamic type: {dynamics}",
+        f"- Output strategy: {output}",
+        "- Preserve identity, facial structure, hairstyle, costume construction, signature accessories, body proportions, palette and visual style.",
+        "- Keep the primary action readable in the central 70% of frame and describe timing, amplitude, direction, reaction and recovery.",
+    ]
+    if cfg.get("aiMotionAutofill", True):
+        lines.append("- Invent physically coherent micro-motion and secondary motion without requiring a reference video.")
+    if not cfg.get("allowVideoReference", False):
+        lines.append("- Reference-video transfer is disabled; build motion from still-image anchors and stated intent only.")
+    intent = str(cfg.get("interactionIntent") or "").strip()
+    if intent:
+        lines.append("- User interaction intent: " + intent)
+    adult_ready = bool(
+        cfg.get("adultEnabled") and str(cfg.get("adultTier") or "off") != "off"
+        and cfg.get("adultSubjectsVerified") and cfg.get("consentConfirmed")
+    )
+    if adult_ready:
+        lines.append(
+            "- Adult profile: %s; all depicted people are verified adults and all intimacy is consensual. "
+            "Remain within the separately enabled safety skill." % str(cfg.get("adultTier"))
+        )
+    else:
+        lines.append("- Adult-content profile: OFF; keep the result general-audience.")
+    return "\n".join(lines)
+
+
+_PV_TEMPLATES = {
+    "character_reveal": "hero character reveal: detail inserts, identity reveal, signature action, then a clean hero hold",
+    "kinetic_typography": "motion-graphics plates with graphic masks and title-safe negative space; exact typography is added in post",
+    "image_flash": "rhythmic image-flash montage with short readable poses, detail inserts and strong graphic contrast",
+    "mixed_pv": "character reveal, action inserts, graphic title plates and a decisive end card without overcrowding any beat",
+    "action_showcase": "match-on-action character showcase with anticipation, peak pose, impact insert and controlled recovery",
+    "emotional_memory": "lyrical memory fragments, expressive close-ups and visual echoes that build to an emotional hero frame",
+    "fashion_editorial": "fashion-editorial posing, material detail inserts, graphic negative space and precise visual punctuation",
+}
+_PV_RHYTHMS = {
+    "beat_sync": "cut and accent on the declared beat grid",
+    "impact_accents": "hold between a few strong impact accents and reserve flash frames for real emphasis",
+    "smooth_cinematic": "use longer phrases, motivated match cuts and restrained glow transitions",
+    "glitch_cut": "use concise glitch interruptions while keeping the character readable",
+    "syncopated": "alternate on-beat anchors with restrained off-beat inserts to avoid a mechanical edit pattern",
+    "crescendo": "begin with spacious holds, increase cut frequency gradually, then resolve on one clean hero frame",
+}
+_PV_THEMES = {
+    "auto": "infer a coherent theme from the character, references and brief",
+    "hero_origin": "hero origin and identity reveal",
+    "neon_idol": "neon idol stage and fan-energy spectacle",
+    "fantasy_relic": "fantasy relic awakening and magical lore",
+    "urban_chase": "urban pursuit and kinetic street energy",
+    "dream_archive": "dream archive, memory fragments and emotional symbolism",
+    "dark_rival": "dark rival confrontation and controlled menace",
+    "festival_stage": "festival stage, celebratory color and rhythmic performance",
+    "tech_interface": "future interface, scanning graphics and holographic systems",
+    "fashion_editorial": "fashion editorial, material detail and confident posing",
+    "quiet_portrait": "quiet portrait, intimate expression and restrained atmosphere",
+}
+_PV_VISUAL_STYLES = {
+    "auto": "preserve and infer the reference medium",
+    "anime_cel": "clean 2D anime linework, cel-shaded color and readable key poses",
+    "live_action_cinematic": "physically weighted live-action movement and cinematic optics",
+    "graphic_comic": "graphic comic panels, bold shapes and controlled halftone accents",
+    "y2k_digital": "Y2K digital graphics, chrome accents and playful interface motifs",
+    "retro_film": "analog film texture, optical light and restrained period color",
+    "luxury_editorial": "luxury editorial lighting, material detail and minimal typography",
+    "minimal_monochrome": "high-contrast monochrome forms with deliberate negative space",
+    "holographic": "holographic color separation, scanning light and translucent layers",
+    "ink_paper": "ink-and-paper texture, brush transitions and graphic silhouettes",
+}
+_PV_EDIT_GRAMMARS = {
+    "auto": "choose cuts from action, gaze, shape, color and story continuity",
+    "detail_to_hero": "move from costume/prop details to a full identity reveal",
+    "match_on_action": "cut across views on the same readable character action",
+    "shape_match": "bridge shots through matched silhouettes and graphic shapes",
+    "color_match": "use one palette accent to motivate each cut",
+    "eyeline_bridge": "follow gaze and reaction to reveal the next visual beat",
+    "beat_strobe": "use very short beat inserts around longer readable anchor shots",
+    "time_remap": "use speed ramps only around clear action peaks and recovery poses",
+    "split_screen": "build parallel character details or before/after states in graphic panels",
+    "freeze_smash": "freeze a peak pose, add post graphics, then smash-cut into motion",
+    "foreground_wipe": "hide cuts behind a foreground object, cloth, hair or light sweep",
+}
+_PV_TRANSITIONS = {
+    "hard_cut", "cut_on_action", "flash_cut", "match_cut", "graphic_match",
+    "whip_pan", "whip_zoom", "foreground_wipe", "luma_wipe", "mask_wipe",
+    "split_screen_push", "parallax_push", "speed_ramp", "freeze_smash",
+    "film_burn", "glitch_slice", "zoom_blur", "light_sweep", "dip_to_color",
+}
+_PV_EFFECTS = {
+    "deep_glow", "bokeh", "rgb_split", "pixel_sort", "jpeg_glitch",
+    "frame_echo", "light_leak", "thick_stroke", "halftone", "chromatic_trails",
+    "particle_burst", "scanline", "film_grain", "lens_distortion", "bloom_pulse",
+    "silhouette", "posterize", "ink_spread", "hologram", "graphic_shapes",
+}
+_PV_TEXT_TREATMENTS = {
+    "safe_title": "single title in reserved negative space",
+    "hero_nameplate": "character nameplate after the identity reveal",
+    "kinetic_words": "short kinetic words animated in post on beat accents",
+    "subtitle_card": "title plus one restrained subtitle line",
+    "no_text": "no typography, only image and motion",
+}
+_PV_ACTION_PROFILES = {
+    "calm": "restrained breathing, gaze, hair/cloth follow-through and a confident hero hold",
+    "graceful": "elegant turn, hand or costume gesture with smooth recovery",
+    "energetic": "clear anticipation, fast readable action accents and stable recovery poses",
+    "combat": "guard, wind-up, one decisive technique and a readable impact silhouette",
+    "idol": "performance gesture, audience-facing eyeline and rhythmic pose changes",
+    "mysterious": "partial reveal, controlled gaze, prop interaction and restrained movement",
+    "comedic": "concise reaction, readable exaggeration and a clean loopable reset",
+}
+
+
+def _pv_settings(project):
+    cfg = _safe_get(project, "pv", {}) or {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    template = str(cfg.get("template") or "character_reveal")
+    if template not in _PV_TEMPLATES:
+        template = "character_reveal"
+    rhythm = str(cfg.get("rhythm") or "beat_sync")
+    if rhythm not in _PV_RHYTHMS:
+        rhythm = "beat_sync"
+    density = str(cfg.get("cutDensity") or "medium")
+    if density not in {"sparse", "medium", "dense"}:
+        density = "medium"
+    try:
+        bpm = max(40.0, min(240.0, float(cfg.get("bpm") or 120)))
+    except (TypeError, ValueError):
+        bpm = 120.0
+    try:
+        offset_ms = max(-2000, min(2000, int(float(cfg.get("beatOffsetMs") or 0))))
+    except (TypeError, ValueError):
+        offset_ms = 0
+    transitions = [str(x) for x in (cfg.get("transitions") or []) if str(x) in _PV_TRANSITIONS]
+    effects = [str(x) for x in (cfg.get("effects") or []) if str(x) in _PV_EFFECTS]
+    theme = str(cfg.get("theme") or "auto")
+    if theme not in _PV_THEMES:
+        theme = "auto"
+    visual_style = str(cfg.get("visualStyle") or "auto")
+    if visual_style not in _PV_VISUAL_STYLES:
+        visual_style = "auto"
+    edit_grammar = str(cfg.get("editGrammar") or "auto")
+    if edit_grammar not in _PV_EDIT_GRAMMARS:
+        edit_grammar = "auto"
+    action_profile = str(cfg.get("actionProfile") or "calm")
+    if action_profile not in _PV_ACTION_PROFILES:
+        action_profile = "calm"
+    text_treatment = str(cfg.get("textTreatment") or "safe_title")
+    if text_treatment not in _PV_TEXT_TREATMENTS:
+        text_treatment = "safe_title"
+    return {
+        "enabled": bool(cfg.get("enabled", True)),
+        "template": template,
+        "rhythm": rhythm,
+        "cut_density": density,
+        "bpm": bpm,
+        "beat_offset_ms": offset_ms,
+        "theme": theme,
+        "visual_style": visual_style,
+        "edit_grammar": edit_grammar,
+        "action_profile": action_profile,
+        "text_treatment": text_treatment,
+        "title": str(cfg.get("title") or "").strip(),
+        "subtitle": str(cfg.get("subtitle") or "").strip(),
+        "reserve_title_safe_area": bool(cfg.get("reserveTitleSafeArea", True)),
+        "allow_video_reference": bool(cfg.get("allowVideoReference", True)),
+        "transitions": transitions,
+        "effects": effects,
+        "creative_brief": str(cfg.get("creativeBrief") or "").strip(),
+        "action_direction": str(cfg.get("actionDirection") or "").strip(),
+        "title_concept": str(cfg.get("titleConcept") or "").strip(),
+        "selected_card_id": str(cfg.get("selectedCardId") or "").strip(),
+        "notes": str(cfg.get("notes") or "").strip(),
+    }
+
+
+def _build_pv_directive(project, scene):
+    """Keep H3 plate generation stable while exporting exact post-production intent."""
+    if str(_safe_get(project, "workflowType", "") or "") != "character_pv":
+        return ""
+    cfg = _pv_settings(project)
+    if not cfg["enabled"]:
+        return ""
+    duration = max(1.0, float(_safe_get(scene, "defaultSeconds", _safe_get(project, "globalDuration", 7)) or 7))
+    lines = [
+        "CHARACTER PV / MOTION-GRAPHICS CONTRACT:",
+        f"- Duration budget: {duration:.3f} seconds.",
+        "- Theme: " + _PV_THEMES[cfg["theme"]] + ".",
+        "- Visual style: " + _PV_VISUAL_STYLES[cfg["visual_style"]] + ".",
+        "- Template: " + _PV_TEMPLATES[cfg["template"]] + ".",
+        "- Rhythm: " + _PV_RHYTHMS[cfg["rhythm"]] + ".",
+        "- Editing grammar: " + _PV_EDIT_GRAMMARS[cfg["edit_grammar"]] + ".",
+        "- Character action profile: " + _PV_ACTION_PROFILES[cfg["action_profile"]] + ".",
+        f"- Beat grid: {cfg['bpm']:g} BPM with {cfg['beat_offset_ms']} ms offset.",
+        f"- Edit density: {cfg['cut_density']}.",
+        "- Planned transitions for post: " + (", ".join(cfg["transitions"]) or "clean_cut") + ".",
+        "- Planned effects for post: " + (", ".join(cfg["effects"]) or "none") + ".",
+        "- Generate clean, temporally stable character plates; preserve identity, face, hairstyle, costume, proportions, signature props and palette across every cut.",
+        "- Treat flashes, RGB split, pixel sorting, JPEG glitches, film burns, exact masks and final typography as post-production cues; never deform the character to imitate them.",
+        "- Do not draw readable titles, logos, UI or watermarks inside generated footage.",
+        "- Typography treatment for post: " + _PV_TEXT_TREATMENTS[cfg["text_treatment"]] + ".",
+    ]
+    if cfg["reserve_title_safe_area"]:
+        lines.append("- Reserve uncluttered title-safe negative space without covering the face, hands or signature costume details.")
+    if cfg["title"]:
+        lines.append("- Exact post title (metadata only; do not render in generation): " + cfg["title"])
+    if cfg["subtitle"]:
+        lines.append("- Exact post subtitle (metadata only; do not render in generation): " + cfg["subtitle"])
+    if cfg["creative_brief"]:
+        lines.append("- Creative brief: " + cfg["creative_brief"])
+    if cfg["action_direction"]:
+        lines.append("- Selected action direction: " + cfg["action_direction"])
+    if cfg["notes"]:
+        lines.append("- User PV direction: " + cfg["notes"])
+    return "\n".join(lines)
+
+
+def _pv_post_production(project, duration_seconds=None):
+    """Return editor-facing metadata; this is intentionally separate from H3 pixels."""
+    if str(_safe_get(project, "workflowType", "") or "") != "character_pv":
+        return None
+    cfg = _pv_settings(project)
+    if not cfg["enabled"]:
+        return None
+    payload = dict(cfg)
+    payload["schema"] = "eagle-character-pv-post@1.0"
+    payload["render_stage"] = "post_production"
+    payload["generation_stage"] = "clean_character_plates"
+    payload["generation_can_render_exact_text"] = False
+    payload["text_overlays"] = []
+    if cfg["title"]:
+        payload["text_overlays"].append({
+            "role": "title", "text": cfg["title"], "treatment": cfg["text_treatment"],
+            "stage": "post_production",
+        })
+    if cfg["subtitle"]:
+        payload["text_overlays"].append({
+            "role": "subtitle", "text": cfg["subtitle"], "treatment": cfg["text_treatment"],
+            "stage": "post_production",
+        })
+    payload["beat_interval_seconds"] = round(60.0 / cfg["bpm"], 6)
+    if duration_seconds is not None:
+        duration = max(0.0, float(duration_seconds or 0.0))
+        offset = cfg["beat_offset_ms"] / 1000.0
+        beat = offset
+        while beat < 0:
+            beat += payload["beat_interval_seconds"]
+        beat_times = []
+        while beat < duration - 1e-9 and len(beat_times) < 1000:
+            beat_times.append(round(beat, 6))
+            beat += payload["beat_interval_seconds"]
+        payload["duration_seconds"] = duration
+        payload["beat_times_seconds"] = beat_times
+    return payload
+
+
 def _build_alignment(project, duration_seconds=0.0, shot_count=1):
     """Return the exact leading keyframe instruction used by H3 base modes."""
     mode = _safe_get(project, "mode", "t2v")
@@ -796,7 +1244,19 @@ def _build_scene_prompt(project, scene):
 
     # preamble（去除已有的 <d> 台词标签，避免重复）
     preamble = _strip_dialogue_tags(_active_scene_text(scene, _safe_get(scene, "preamble", "")))
-    timeline_parts = [item for item in (preamble, detailed_body, dialogue) if item]
+    # The script task can return a complete [Shot N] screenplay and the shots
+    # task subsequently creates structured shot rows from it.  Once structured
+    # rows exist, keep only setup text before the first shot header or the same
+    # shot descriptions are sent to H3 twice.
+    if shots:
+        preamble = re.split(r"(?im)^\s*\[Shot\s+\d+\]", preamble, maxsplit=1)[0].strip()
+    interaction_directive = _build_interaction_directive(project, scene)
+    pv_directive = _build_pv_directive(project, scene)
+    timeline_parts = [
+        item for item in (
+            interaction_directive, pv_directive, preamble, detailed_body, dialogue
+        ) if item
+    ]
     timeline = "\n\n".join(timeline_parts) or "N/A"
 
     if reference_mode:
@@ -846,13 +1306,17 @@ def _slugify(text, max_len=40):
 
 def compile_h3_params(project, scenes, llm_hint=""):
     """编译 ethanfel-compatible H3_CHAIN_PLAN dict，可直接接入 Loop Start / Scene Prompt Editor。"""
+    if not isinstance(project, dict):
+        project = {}
+    workflow_type = str(_safe_get(project, "workflowType", "ai_drama") or "ai_drama")
+    if workflow_type not in ("ai_drama", "character_interaction", "character_pv"):
+        workflow_type = "ai_drama"
     # 基础参数提取与合法性修正
     fps = int(_safe_get(project, "fps", H3_FPS) or H3_FPS)
     if fps <= 0:
         fps = H3_FPS
 
-    width = _snap_multiple_of_32(_safe_get(project, "width", 1080))
-    height = _snap_multiple_of_32(_safe_get(project, "height", 1920))
+    width, height = _resolve_project_dimensions(project)
     context_length = _snap_context_length(_safe_get(project, "contextLength", 22))
     audio_context_length = _snap_context_length(_safe_get(project, "audioContextLength", 22))
     video_blend_frames = int(_safe_get(project, "videoBlendFrames", 0) or 0)
@@ -949,22 +1413,22 @@ def compile_h3_params(project, scenes, llm_hint=""):
             full_prompt_parts.append(scene_prompt)
         full_prompt = "\n\n".join(full_prompt_parts)
 
-        # 计算 H3 合法帧长
-        raw_frames = _h3_frame_length(secs)
-
-        if index == 1:
-            generation_start_frame = 0
-            delivered_frames = raw_frames
-        else:
-            if shot_context_length and raw_frames <= shot_context_length:
-                # 帧数不足以做 overlap，自动降级为 0 context
-                shot_context_length = 0
-            if anchor_mode == "head" and shot_context_length:
-                generation_start_frame = stitched_frames - shot_context_length
-                delivered_frames = raw_frames - shot_context_length
-            else:
-                generation_start_frame = stitched_frames
-                delivered_frames = raw_frames
+        # 剪辑时长与 H3 生成帧长是两个独立合同。前者精确按 fps
+        # 交付；后者为了满足 17k+5 且在续镜时包含头部上下文，可以更长。
+        timeline_frames = max(1, int(round(secs * fps)))
+        generation_context_frames = (
+            shot_context_length
+            if index > 1 and anchor_mode == "head" and shot_context_length
+            else 0
+        )
+        raw_frames = _h3_frame_length_for_frames(
+            timeline_frames + generation_context_frames
+        )
+        delivered_frames = timeline_frames
+        generation_start_frame = max(0, stitched_frames - generation_context_frames)
+        tail_trim_frames = max(
+            0, raw_frames - generation_context_frames - delivered_frames
+        )
 
         # seed
         seed = _derived_seed(base_seed, index, scene_id)
@@ -980,10 +1444,21 @@ def compile_h3_params(project, scenes, llm_hint=""):
             "steps": shot_steps,
             # Native Context Loop aliases make the plan directly inspectable
             # by its Plan/Review tooling while Eagle keeps resolved fields.
+            # Editorial time and model execution time are separate contracts.
+            # duration_seconds remains the requested scene budget for Context
+            # Loop compatibility; generated_duration_seconds reflects 17k+5.
             "duration_seconds": secs,
+            "timeline_duration_seconds": secs,
+            "timeline_frames": timeline_frames,
+            "timeline_start_timecode": "00:00.000",
+            "timeline_end_timecode": _format_h3_timecode(secs),
+            "shot_timeline": _scene_shot_timeline(s, fps),
             "length": raw_frames,
             "raw_frames": raw_frames,
+            "generated_duration_seconds": raw_frames / float(fps),
             "delivered_frames": delivered_frames,
+            "context_trim_frames": generation_context_frames,
+            "tail_trim_frames": tail_trim_frames,
             "generation_start_frame": generation_start_frame,
             "audio_start_seconds": generation_start_frame / float(fps),
             "audio_duration_seconds": raw_frames / float(fps),
@@ -1001,6 +1476,9 @@ def compile_h3_params(project, scenes, llm_hint=""):
                 for match in _MEDIA_TAG_RE.finditer(token)
             )),
         }
+        post_production_cues = _pv_post_production(project, secs)
+        if post_production_cues:
+            shot["post_production_cues"] = post_production_cues
 
         # 仅当与全局默认值不同才写入覆盖字段
         if shot_context_length != context_length:
@@ -1013,36 +1491,12 @@ def compile_h3_params(project, scenes, llm_hint=""):
         shots_list.append(shot)
         stitched_frames += delivered_frames
 
-    # 校验每个 shot 的 delivered_frames 能否满足下一个 shot 的 context
-    for offset, shot in enumerate(shots_list[:-1]):
-        next_context = resolved_context_lengths[offset + 1]
-        if next_context and shot["delivered_frames"] < next_context:
-            # 自动延长当前 shot 的 raw_frames 到至少能交付 next_context 帧
-            needed_raw = next_context + (shot["context_length"] if "context_length" in shot
-                                          else context_length)
-            if needed_raw <= H3_MAX_FRAMES:
-                old_raw = shot["raw_frames"]
-                # 向上取到 17k+5
-                shot["raw_frames"] = needed_raw + (5 - needed_raw % 17) % 17
-                shot["length"] = shot["raw_frames"]
-                shot["duration_seconds"] = shot["raw_frames"] / float(fps)
-                delta = shot["raw_frames"] - old_raw
-                shot["delivered_frames"] += delta
-                shot["audio_duration_seconds"] = shot["raw_frames"] / float(fps)
-                shot["prompt_hash"] = _fingerprint(shot["prompt"])
-                stitched_frames += delta
-
-    # 下一个 shot 的 generation_start_frame 可能因上一个 shot 延长而需要重新校准
+    # 下一个 shot 以精确交付时间线校准；H3 网格补帧不参与时间线累加。
     for offset, shot in enumerate(shots_list[1:], start=1):
-        prev = shots_list[offset - 1]
-        prev_delivered = prev["delivered_frames"]
-        shot_context = shot.get("context_length", context_length)
-        if anchor_mode == "head" and shot_context:
-            shot["generation_start_frame"] = (
-                sum(s["delivered_frames"] for s in shots_list[:offset]) - shot_context
-            )
-        else:
-            shot["generation_start_frame"] = sum(s["delivered_frames"] for s in shots_list[:offset])
+        shot_context = int(shot.get("context_trim_frames", 0) or 0)
+        shot["generation_start_frame"] = max(
+            0, sum(s["delivered_frames"] for s in shots_list[:offset]) - shot_context
+        )
         shot["audio_start_seconds"] = shot["generation_start_frame"] / float(fps)
 
     reference_media = [
@@ -1094,6 +1548,7 @@ def compile_h3_params(project, scenes, llm_hint=""):
     plan = {
         "spec": "h3-prompt-spec@1.0",
         "version": H3_PLAN_VERSION,
+        "workflow_type": workflow_type,
         "run_name": run_name,
         "prompt_prefix": prompt_prefix,
         "defaults": {"duration_seconds": float(_safe_get(project, "globalDuration", 7) or 7), "steps": steps},
@@ -1103,6 +1558,9 @@ def compile_h3_params(project, scenes, llm_hint=""):
         "total_delivered_frames": stitched_frames,
         "reference_media": reference_media,
     }
+    post_production = _pv_post_production(project)
+    if post_production:
+        plan["post_production"] = post_production
     plan["preflight"] = _build_plan_preflight(project, plan, scenes)
     plan["plan_hash"] = _fingerprint({
         "compatibility": compatibility,
@@ -1357,6 +1815,237 @@ def _extract_json(text):
     return None
 
 
+def _pv_history_records(value):
+    """Normalize workflow/node PV history without trusting its shape."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else []
+        except Exception:
+            value = []
+    if isinstance(value, dict):
+        value = value.get("records") or value.get("history") or []
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value[-50:] if isinstance(item, dict)]
+
+
+def _pv_action_profile(text):
+    value = str(text or "").lower()
+    keyword_groups = (
+        ("combat", ("combat", "battle", "fight", "sword", "weapon", "warrior", "战斗", "武器", "剑", "攻击", "招式")),
+        ("idol", ("idol", "stage", "dance", "sing", "concert", "偶像", "舞台", "跳舞", "唱歌", "演出")),
+        ("energetic", ("run", "jump", "chase", "sport", "energetic", "奔跑", "跳跃", "追逐", "运动", "活力")),
+        ("mysterious", ("mystery", "dark", "shadow", "mask", "secret", "神秘", "暗", "阴影", "面具", "秘密")),
+        ("comedic", ("comic", "funny", "meme", "cute reaction", "搞笑", "喜剧", "表情包", "反应")),
+        ("graceful", ("elegant", "grace", "fashion", "dress", "dance", "优雅", "礼服", "时尚", "舞蹈")),
+    )
+    for profile, keywords in keyword_groups:
+        if any(keyword in value for keyword in keywords):
+            return profile
+    return "calm"
+
+
+def _pv_card_fingerprint(card):
+    keys = ("theme", "visualStyle", "editGrammar", "template", "rhythm", "actionProfile")
+    raw = "|".join(str(card.get(key) or "") for key in keys)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _pv_choice(rng, values, preferred=None):
+    values = list(values)
+    preferred = [item for item in (preferred or []) if item in values]
+    if preferred and rng.random() < 0.72:
+        return rng.choice(preferred)
+    return rng.choice(values)
+
+
+def _pv_director_skill(card):
+    transitions = ", ".join(card.get("transitions") or []) or "hard_cut"
+    effects = ", ".join(card.get("effects") or []) or "none"
+    return (
+        "## H3 Character PV creative card\n\n"
+        f"- Theme: {_PV_THEMES.get(card.get('theme'), card.get('theme', 'auto'))}.\n"
+        f"- Visual style: {_PV_VISUAL_STYLES.get(card.get('visualStyle'), card.get('visualStyle', 'auto'))}.\n"
+        f"- Editing grammar: {_PV_EDIT_GRAMMARS.get(card.get('editGrammar'), card.get('editGrammar', 'auto'))}.\n"
+        f"- Character action: {_PV_ACTION_PROFILES.get(card.get('actionProfile'), card.get('actionProfile', 'calm'))}.\n"
+        f"- Rhythm: {_PV_RHYTHMS.get(card.get('rhythm'), card.get('rhythm', 'beat_sync'))}; "
+        f"{card.get('bpm', 120)} BPM; {card.get('cutDensity', 'medium')} density.\n"
+        f"- Post transitions: {transitions}.\n- Post effects: {effects}.\n"
+        f"- Action direction: {card.get('actionDirection') or 'derive one readable action from the character and brief'}.\n"
+        "- Generate stable, clean plates. Do not paint exact text, logos, glitches or transition artifacts into H3 frames.\n"
+        f"- Typography metadata: {_PV_TEXT_TREATMENTS.get(card.get('textTreatment'), 'post-production title')}.\n"
+        "- Avoid repeating the recent action signature, shot order and transition pair recorded in creative history."
+    )
+
+
+def generate_pv_cards(character_context="", creative_brief="", draw_mode="character_match",
+                      card_count=3, seed=0, history=None, model_mode="auto",
+                      api_config=None, local_model=None, model_pref="local", temperature=0.75):
+    """Create constrained AE/PV cards locally and optionally let an attached LLM select/refine one."""
+    history_records = _pv_history_records(history)
+    recent_fingerprints = {str(item.get("fingerprint") or "") for item in history_records[-24:]}
+    try:
+        count = max(1, min(8, int(card_count or 3)))
+    except (TypeError, ValueError):
+        count = 3
+    try:
+        seed_value = int(seed or 0)
+    except (TypeError, ValueError):
+        seed_value = 0
+    rng = random.Random(seed_value)
+    profile = _pv_action_profile("\n".join((str(character_context or ""), str(creative_brief or ""))))
+    preferences = {
+        "calm": {
+            "theme": ["quiet_portrait", "dream_archive", "fashion_editorial"],
+            "style": ["luxury_editorial", "retro_film", "minimal_monochrome"],
+            "grammar": ["detail_to_hero", "eyeline_bridge", "color_match"],
+            "template": ["character_reveal", "emotional_memory", "fashion_editorial"],
+        },
+        "graceful": {
+            "theme": ["fashion_editorial", "dream_archive", "festival_stage"],
+            "style": ["luxury_editorial", "anime_cel", "ink_paper"],
+            "grammar": ["detail_to_hero", "foreground_wipe", "match_on_action"],
+            "template": ["fashion_editorial", "character_reveal", "emotional_memory"],
+        },
+        "energetic": {
+            "theme": ["urban_chase", "festival_stage", "tech_interface"],
+            "style": ["y2k_digital", "holographic", "live_action_cinematic"],
+            "grammar": ["match_on_action", "time_remap", "beat_strobe"],
+            "template": ["action_showcase", "image_flash", "mixed_pv"],
+        },
+        "combat": {
+            "theme": ["dark_rival", "fantasy_relic", "urban_chase"],
+            "style": ["anime_cel", "graphic_comic", "live_action_cinematic"],
+            "grammar": ["match_on_action", "freeze_smash", "foreground_wipe"],
+            "template": ["action_showcase", "mixed_pv", "character_reveal"],
+        },
+        "idol": {
+            "theme": ["neon_idol", "festival_stage", "tech_interface"],
+            "style": ["anime_cel", "y2k_digital", "holographic"],
+            "grammar": ["beat_strobe", "color_match", "split_screen"],
+            "template": ["image_flash", "mixed_pv", "kinetic_typography"],
+        },
+        "mysterious": {
+            "theme": ["dark_rival", "fantasy_relic", "dream_archive"],
+            "style": ["minimal_monochrome", "retro_film", "ink_paper"],
+            "grammar": ["detail_to_hero", "shape_match", "foreground_wipe"],
+            "template": ["character_reveal", "emotional_memory", "mixed_pv"],
+        },
+        "comedic": {
+            "theme": ["festival_stage", "tech_interface", "hero_origin"],
+            "style": ["graphic_comic", "y2k_digital", "anime_cel"],
+            "grammar": ["freeze_smash", "beat_strobe", "shape_match"],
+            "template": ["image_flash", "mixed_pv", "action_showcase"],
+        },
+    }.get(profile, {})
+    if draw_mode == "surprise":
+        preferences = {}
+    elif draw_mode == "balanced":
+        preferences = {key: value[:1] for key, value in preferences.items()}
+
+    cards = []
+    attempts = 0
+    while len(cards) < count and attempts < count * 80:
+        attempts += 1
+        card = {
+            "schema": "eagle-h3-pv-card@1.0",
+            "theme": _pv_choice(rng, [key for key in _PV_THEMES if key != "auto"], preferences.get("theme")),
+            "visualStyle": _pv_choice(rng, [key for key in _PV_VISUAL_STYLES if key != "auto"], preferences.get("style")),
+            "editGrammar": _pv_choice(rng, [key for key in _PV_EDIT_GRAMMARS if key != "auto"], preferences.get("grammar")),
+            "template": _pv_choice(rng, _PV_TEMPLATES, preferences.get("template")),
+            "rhythm": _pv_choice(rng, _PV_RHYTHMS, ["beat_sync", "syncopated", "crescendo"]),
+            "cutDensity": _pv_choice(rng, ("sparse", "medium", "dense"), ["medium"]),
+            "bpm": rng.randrange(84, 161, 4),
+            "beatOffsetMs": 0,
+            "transitions": rng.sample(sorted(_PV_TRANSITIONS), rng.randint(2, 4)),
+            "effects": rng.sample(sorted(_PV_EFFECTS), rng.randint(2, 4)),
+            "actionProfile": profile,
+            "textTreatment": rng.choice(list(_PV_TEXT_TREATMENTS)),
+            "reserveTitleSafeArea": True,
+            "allowVideoReference": True,
+            "actionDirection": _PV_ACTION_PROFILES[profile],
+            "creativeBrief": str(creative_brief or "").strip(),
+        }
+        card["fingerprint"] = _pv_card_fingerprint(card)
+        if card["fingerprint"] in recent_fingerprints or any(
+                item.get("fingerprint") == card["fingerprint"] for item in cards):
+            continue
+        card["id"] = "pv-card-" + card["fingerprint"]
+        card["name"] = "%s · %s" % (
+            card["theme"].replace("_", " ").title(),
+            card["editGrammar"].replace("_", " ").title(),
+        )
+        card["directorSkill"] = _pv_director_skill(card)
+        cards.append(card)
+
+    if not cards:
+        raise RuntimeError("无法创建不重复的 PV 创意卡。")
+
+    selected_index = 0
+    transport_kind = "local_cards"
+    model_note = "未调用语言模型；使用受控创意库与角色动作匹配。"
+    kind, transport = _select_transport(api_config, local_model, model_pref)
+    should_use_model = str(model_mode or "auto") != "local_only" and bool(kind)
+    if should_use_model:
+        system = (
+            "You are an expert character-PV editor. Select the strongest constrained candidate for "
+            "the supplied character and brief. Do not invent unsupported enum values. Return JSON only. "
+            "Exact readable typography must remain post-production metadata, never generated pixels."
+        )
+        user = (
+            "Character/context:\n" + (str(character_context or "").strip() or "(not supplied)") +
+            "\n\nCreative brief:\n" + (str(creative_brief or "").strip() or "(open brief)") +
+            "\n\nCandidates:\n" + json.dumps(cards, ensure_ascii=False) +
+            "\n\nReturn ONLY: {\"selected_index\":0,\"reason\":\"...\","
+            "\"action_direction\":\"one concrete non-repetitive action arc\","
+            "\"title_concept\":\"post-production typography concept\"}."
+        )
+        try:
+            parsed = _extract_json(_call_llm(kind, transport, system, user, temperature))
+            if isinstance(parsed, dict):
+                selected_index = max(0, min(len(cards) - 1, int(parsed.get("selected_index", 0) or 0)))
+                selected = cards[selected_index]
+                if str(parsed.get("reason") or "").strip():
+                    selected["aiReason"] = str(parsed["reason"]).strip()[:1200]
+                if str(parsed.get("action_direction") or "").strip():
+                    selected["actionDirection"] = str(parsed["action_direction"]).strip()[:1600]
+                if str(parsed.get("title_concept") or "").strip():
+                    selected["titleConcept"] = str(parsed["title_concept"]).strip()[:800]
+                selected["directorSkill"] = _pv_director_skill(selected)
+                transport_kind = kind
+                model_note = "已由%s模型按角色和简述择优并精修动作。" % ("本地" if kind == "local" else "API")
+        except Exception as exc:
+            model_note = "模型精修失败，已安全回退到本地抽卡：" + str(exc)
+    elif str(model_mode or "auto") == "model_refine" and not kind:
+        model_note = "未连接可用模型，已回退到本地抽卡。"
+
+    selected = cards[selected_index]
+    record = {
+        "fingerprint": selected["fingerprint"],
+        "theme": selected["theme"],
+        "visualStyle": selected["visualStyle"],
+        "editGrammar": selected["editGrammar"],
+        "actionProfile": selected["actionProfile"],
+        "actionDirection": selected.get("actionDirection", ""),
+        "createdAt": int(time.time()),
+    }
+    updated_history = (history_records + [record])[-50:]
+    summary = "%s｜%s｜%s｜%s" % (
+        selected["theme"], selected["visualStyle"], selected["editGrammar"], model_note,
+    )
+    return {
+        "schema": "eagle-h3-pv-draw@1.0",
+        "cards": cards,
+        "selected_index": selected_index,
+        "selected": selected,
+        "history": updated_history,
+        "history_schema": "eagle-h3-pv-history@1.0",
+        "transport": transport_kind,
+        "summary": summary,
+        "model_note": model_note,
+    }
+
+
 def _scene_duration_budget(scene):
     """Return a stable scene duration budget for all chained skill tasks."""
     try:
@@ -1433,11 +2122,105 @@ def _adjacent_scene_context(scenes, scene_index):
     return "【相邻场景承接】\n" + "\n\n".join(lines) + "\n" if lines else ""
 
 
+def _generation_memory_context(project, scenes, scene_index):
+    """Summarize already-used creative choices so the next LLM pass can vary them deliberately."""
+    records = project.get("generationHistory") if isinstance(project, dict) else []
+    records = records if isinstance(records, list) else []
+    used_actions, used_cameras, used_transitions = [], [], []
+    for record in records[-24:]:
+        if not isinstance(record, dict):
+            continue
+        used_actions.extend(str(item).strip() for item in (record.get("actions") or []) if str(item).strip())
+        used_cameras.extend(str(item).strip() for item in (record.get("cameras") or []) if str(item).strip())
+        used_transitions.extend(str(item).strip() for item in (record.get("transitions") or []) if str(item).strip())
+    if isinstance(scenes, list):
+        for prior in scenes[:max(0, scene_index)]:
+            if not isinstance(prior, dict):
+                continue
+            for shot in (prior.get("shots") or []):
+                if not isinstance(shot, dict):
+                    continue
+                for target, key in ((used_actions, "action"), (used_cameras, "camera")):
+                    value = str(shot.get(key) or "").strip()
+                    if value:
+                        target.append(value)
+                for key in ("transitionIn", "transitionOut"):
+                    value = str(shot.get(key) or "").strip()
+                    if value:
+                        used_transitions.append(value)
+    pv_cfg = _safe_get(project, "pv", {}) or {}
+    pv_history = _pv_history_records(pv_cfg.get("history", []) if isinstance(pv_cfg, dict) else [])
+    recent_cards = [
+        "%s/%s/%s/%s" % (
+            item.get("theme", ""), item.get("visualStyle", ""),
+            item.get("editGrammar", ""), item.get("actionProfile", ""),
+        ) for item in pv_history[-8:]
+    ]
+    def unique_tail(values, limit=8):
+        out = []
+        for value in values:
+            compact = re.sub(r"\s+", " ", value).strip()
+            if compact and compact not in out:
+                out.append(compact)
+        return out[-limit:]
+    actions = unique_tail(used_actions)
+    cameras = unique_tail(used_cameras)
+    transitions = unique_tail(used_transitions)
+    if not any((actions, cameras, transitions, recent_cards)):
+        return ""
+    lines = [
+        "【创作记忆 / 去重复约束】",
+        "以下是已使用内容，不得逐字复刻动作弧、连续相同景别顺序或相同转场组合；剧情必须承接时可保留主体意图，但应改变动作路径、机位或节奏。",
+    ]
+    if actions:
+        lines.append("- 近期动作：" + " | ".join(actions))
+    if cameras:
+        lines.append("- 近期运镜：" + " | ".join(cameras))
+    if transitions:
+        lines.append("- 近期转场：" + " | ".join(transitions))
+    if recent_cards:
+        lines.append("- 近期 PV 卡：" + " | ".join(recent_cards))
+    lines.append("- 优先匹配角色当前姿态、道具、服装活动范围与情绪，再选择可自然衔接的相似动作；禁止仅替换同义词制造伪变化。")
+    return "\n".join(lines) + "\n"
+
+
+def _scene_memory_record(scene):
+    shots = scene.get("shots") if isinstance(scene, dict) else []
+    shots = shots if isinstance(shots, list) else []
+    actions, cameras, transitions = [], [], []
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        if str(shot.get("action") or "").strip():
+            actions.append(str(shot["action"]).strip()[:300])
+        if str(shot.get("camera") or "").strip():
+            cameras.append(str(shot["camera"]).strip()[:300])
+        for key in ("transitionIn", "transitionOut"):
+            if str(shot.get(key) or "").strip():
+                transitions.append(str(shot[key]).strip()[:160])
+    raw = json.dumps([actions, cameras, transitions], ensure_ascii=False, sort_keys=True)
+    return {
+        "sceneId": scene.get("id"),
+        "fingerprint": hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16],
+        "actions": actions[-8:], "cameras": cameras[-8:], "transitions": transitions[-8:],
+        "createdAt": int(time.time()),
+    }
+
+
 def _build_skill_prompts(task, project, scene, hint, director_skill="", request=None):
     """返回 (system, user) 提示词。"""
     foundation = (project.get("foundation") or "").strip()
     director_skill = (director_skill or project.get("director_skill") or "").strip()
     director_skill = _compose_director_guidance(task, request, director_skill)
+    if str(project.get("workflowType") or "") == "character_pv":
+        director_skill += (
+            "\n\n## Adaptive PV grammar override\n\n"
+            "The Hook/Reveal/Signature/Impact/Hero-Hold pattern is optional vocabulary, not a mandatory "
+            "five-part template. Build the number and order of beats from the selected theme, editing "
+            "grammar, character action, source material, duration and music. Vary action paths, shot order "
+            "and transition pairs against creative memory; preserve intentional story continuity. Keep "
+            "readable text as post-production metadata only."
+        )
     title = (scene.get("title") or "").strip() or "未命名场景"
     preamble = _active_scene_text(scene, scene.get("preamble") or "")
     _duration_seconds, duration_label = _scene_duration_budget(scene)
@@ -1458,10 +2241,26 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
         "- camera 字段使用自然语言运镜：Truck/Pan/Push/Pull/Pedestal/Tilt/Zoom/"
         "Arc Shot/Tracking Shot/Static Shot，必要时补充幅度与速度；不要堆叠方括号命令。\n"
         "- 原生 <Picture N>/<Video N>/<Audio N> 标签必须逐字保留，不能翻译、改号或拆开。\n"
+        "- 剪辑时间统一使用 MM:SS.mmm；区间使用 start --> end，帧区间使用半开区间 [start,end)。"
+        " 剪辑时间不得用 H3 的 17k+5 生成帧长反向改写。\n"
     )
     reference_ctx = _skill_reference_context(project, scene)
     chain_ctx = str(request.get("_chainContext") or "")
+    directive_project = dict(project)
+    if isinstance(request.get("interaction"), dict):
+        directive_project["interaction"] = request["interaction"]
+    if isinstance(request.get("pv"), dict):
+        directive_project["pv"] = request["pv"]
+    project_directives = "\n\n".join(filter(None, (
+        _build_interaction_directive(directive_project, scene),
+        _build_pv_directive(directive_project, scene),
+    )))
+    memory_ctx = str(request.get("_memoryContext") or "")
     common_ctx = reference_ctx + (chain_ctx + "\n" if chain_ctx else "")
+    if memory_ctx:
+        common_ctx += memory_ctx + "\n"
+    if project_directives:
+        common_ctx += "【项目专项合同】\n" + project_directives + "\n"
     if task == "script":
         user = (
             "【Shared prompt / 世界构建】\n" + (foundation or "(无，请自行设定统一风格)") + "\n\n"
@@ -1474,11 +2273,14 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
             f"2. 根据 {duration_label} 秒的场景总预算决定镜头数量和节奏；"
             f"各镜头时长合计约为 {duration_label} 秒，"
             "不要套用固定的 10 秒单镜头假设；\n"
-            f"3. 每个镜头写{visual_language}描述（主体 / 动作 / 运镜 / 氛围）且自包含，"
+            f"3. 每镜单独写一行精确剪辑区间：Time range: MM:SS.mmm --> MM:SS.mmm | "
+            f"frames [start,end) @ {int(project.get('fps') or H3_FPS)} fps | Duration: 0.000 s；"
+            "最后一镜出点必须等于场景总预算；\n"
+            f"4. 每个镜头写{visual_language}描述（主体 / 动作 / 运镜 / 氛围）且自包含，"
             "不得出现“如前所述”“同上”等承接语；\n"
-            f"4. 发声者按首次发声顺序稳定编号，例：角色名 (S1) says: "
+            f"5. 发声者按首次发声顺序稳定编号，例：角色名 (S1) says: "
             f"<d>[{dialogue_language}] 简洁台词</d>；\n"
-            "5. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
+            "6. 输出 ONLY JSON：{\"preamble\":\"...\"}\n"
         )
         return _SKILL_SYSTEM, director_ctx + user
     if task == "shots":
@@ -1492,7 +2294,8 @@ def _build_skill_prompts(task, project, scene, hint, director_skill="", request=
             "\"content\":\"\",\"camera\":\"\",\"lens\":\"\",\"intent\":\"\","
             "\"action\":\"\",\"sound\":\"\",\"transitionIn\":\"\",\"transitionOut\":\"\","
             "\"estSeconds\":2.5}]}\n"
-            "要求：time 从 00:00.000 起按顺序递增；每个 estSeconds 必须大于 0，"
+            f"要求：time 从 00:00.000 起并对齐 {int(project.get('fps') or H3_FPS)} fps 帧边界；"
+            "每个 estSeconds 必须大于 0，"
             f"所有 estSeconds 之和约等于 {duration_label} 秒，且不得超出该场景预算；framing 用 "
             "extreme_close_up / close_up / medium_shot / cowboy_shot / full_body / wide_shot "
             f"之一或空；content、camera、action、sound 均使用 {visual_language}，"
@@ -1569,6 +2372,39 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         pref = request.get("modelPref", "local")
         hint = request.get("hint", "") or ""
 
+        operation = out["operation"]
+        if operation == "pv_draw":
+            scene = next(
+                (item for item in scenes if isinstance(item, dict)
+                 and str(item.get("id")) == str(out.get("scene_id"))),
+                {},
+            )
+            project_pv = project.get("pv") if isinstance(project.get("pv"), dict) else {}
+            character_context = str(request.get("characterContext") or "").strip()
+            if not character_context:
+                character_context = "\n".join(filter(None, (
+                    str(project.get("foundation") or "").strip(),
+                    str(scene.get("title") or "").strip(),
+                    _active_scene_text(scene, scene.get("preamble", ""))[:5000] if scene else "",
+                )))
+            draw = generate_pv_cards(
+                character_context=character_context,
+                creative_brief=request.get("creativeBrief") or project_pv.get("creativeBrief") or hint,
+                draw_mode=request.get("drawMode") or project_pv.get("drawMode") or "character_match",
+                card_count=request.get("cardCount") or project_pv.get("drawCount") or 3,
+                seed=request.get("seed", project.get("baseSeed", 0)),
+                history=request.get("history") or project_pv.get("history") or [],
+                model_mode=request.get("modelMode") or project_pv.get("modelMode") or "auto",
+                api_config=api_config, local_model=local_model, model_pref=pref,
+                temperature=temperature,
+            )
+            out.update({
+                "pvCards": draw["cards"], "selectedPv": draw["selected"],
+                "pvHistory": draw["history"], "pvSummary": draw["summary"],
+                "transport": draw["transport"],
+            })
+            return out
+
         kind, transport = _select_transport(api_config, local_model, pref)
         if not kind:
             out["error"] = ("未连接 API 或本地大模型，无法生成。请在节点上连接 "
@@ -1589,7 +2425,6 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         out["scene_id"] = scene.get("id")
         out["sceneId"] = scene.get("id")
 
-        operation = out["operation"]
         if operation == "extract_skill":
             system_prompt, user_prompt = _build_skill_extraction_prompts(
                 project,
@@ -1626,6 +2461,7 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         }
         request_context = dict(request)
         request_context["_chainContext"] = _adjacent_scene_context(scenes, scene_index)
+        request_context["_memoryContext"] = _generation_memory_context(project, scenes, scene_index)
         for task in tasks:
             if task not in ("script", "shots", "dialogue"):
                 continue
@@ -1647,6 +2483,7 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         out["preamble"] = cur["preamble"]
         out["shots"] = cur["shots"]
         out["dialogues"] = cur["dialogues"]
+        out["memoryRecord"] = _scene_memory_record(cur)
     except Exception as e:
         out["error"] = "生成失败: " + str(e)
     return out
@@ -1814,6 +2651,78 @@ def _load_audio_clip(filename, trim_start=0.0, trim_end=0.0):
 # 节点类
 # ────────────────────────────────────────────────────────────────────────────
 
+class EagleH3PVCreativeCardsNode:
+    """Standalone constrained creative-card generator for character PV planning."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "character_context": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "角色外观、性格、道具、姿态或现有台本。用于匹配动作与主题，不读取图像像素。",
+                }),
+                "creative_brief": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "本轮 PV 方向、情绪、用途或必须避开的内容。",
+                }),
+                "draw_mode": (["角色匹配", "均衡探索", "惊喜随机"], {
+                    "default": "角色匹配",
+                }),
+                "model_mode": (["自动（有模型则精修）", "仅本地抽卡", "必须模型精修（无模型时回退）"], {
+                    "default": "自动（有模型则精修）",
+                }),
+                "card_count": ("INT", {"default": 3, "min": 1, "max": 8, "step": 1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "history_json": ("STRING", {
+                    "default": "[]", "multiline": True, "forceInput": True,
+                    "tooltip": "接回本节点 history_json，可跨队列避免重复创意组合。",
+                }),
+                "api_config": ("API_CONFIG", {"forceInput": True}),
+                "local_model": ("EAGLE_LOCAL_LLM_MODEL", {"forceInput": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("pv_cards_json", "selected_card_json", "director_skill", "history_json", "summary")
+    OUTPUT_TOOLTIPS = (
+        "本轮全部候选卡 JSON。", "模型/规则选中的 PV 卡 JSON。",
+        "可接 H3 导演台 director_skill 的编排指令。",
+        "去重复历史；接回 history_json 输入可在多次执行间延续。", "本轮抽卡摘要。",
+    )
+    DESCRIPTION = (
+        "像抽卡一样组合角色 PV 的主题、风格、切镜语法、转场、特效与动作。"
+        "未接模型时使用本地受控库；接入本地/API 模型后按角色和简述择优精修。"
+    )
+    FUNCTION = "execute"
+    CATEGORY = "🦅 Eagle Suite/H3 导演台"
+
+    def execute(self, character_context="", creative_brief="", draw_mode="角色匹配",
+                model_mode="自动（有模型则精修）", card_count=3, seed=0,
+                history_json="[]", api_config=None, local_model=None):
+        draw_modes = {"角色匹配": "character_match", "均衡探索": "balanced", "惊喜随机": "surprise"}
+        model_modes = {
+            "自动（有模型则精修）": "auto", "仅本地抽卡": "local_only",
+            "必须模型精修（无模型时回退）": "model_refine",
+        }
+        draw = generate_pv_cards(
+            character_context=character_context, creative_brief=creative_brief,
+            draw_mode=draw_modes.get(draw_mode, "character_match"),
+            card_count=card_count, seed=seed, history=history_json,
+            model_mode=model_modes.get(model_mode, "auto"),
+            api_config=api_config, local_model=local_model,
+        )
+        return (
+            json.dumps(draw["cards"], ensure_ascii=False, indent=2),
+            json.dumps(draw["selected"], ensure_ascii=False, indent=2),
+            draw["selected"]["directorSkill"],
+            json.dumps({"schema": draw["history_schema"], "records": draw["history"]}, ensure_ascii=False),
+            draw["summary"],
+        )
+
+
 class EagleH3DirectorNode:
     """Eagle H3 导演台：编剧工作台，输出标准 H3 提示词与参数。"""
 
@@ -1867,8 +2776,9 @@ class EagleH3DirectorNode:
     # 前六个端口与 MiniMax H3 Context Loop Plan 保持相同的后端数据契约。
     # 注意：第三方 Scene Prompt Editor 的前端还会硬编码查找
     # ``MiniMaxH3ChainPlan`` 节点及其 plan_json/run_name 控件，所以它不是
-    # 通用 H3_CHAIN_PLAN 查看器。末尾的 context_loop_plan_json 用于显式
-    # 接入真实的第三方 Plan.plan_json_input，避免把运行对象与编辑源混淆。
+    # 通用 H3_CHAIN_PLAN 查看器。末尾的 context_loop_plan_json 用于无界面的
+    # 外部导入；页面编辑器需要真实第三方 Plan 节点的 plan_json 控件，
+    # Eagle 前端会把导演台当前计划镜像到该控件，保留其可编辑性。
     RETURN_TYPES = (
         H3_PLAN_TYPE, "STRING", "INT", "INT", "INT", "INT",
         H3_MEDIA_BUNDLE_TYPE, "STRING",
@@ -1886,8 +2796,8 @@ class EagleH3DirectorNode:
         "生成高度。",
         "场景边界视频融合帧数。",
         "Eagle 私有 H3_MEDIA_BUNDLE，仅用于参考条件路由或媒体端口展开。",
-        "Context Loop 可编辑 authoring JSON。只接到第三方 MiniMax H3 Context Loop Plan 的 "
-        "plan_json_input，再由该 Plan.plan 输出接 Scene Prompt Editor / Plan Studio。",
+        "Context Loop authoring JSON，用于无界面调用、文本预览或外部存储。"
+        "需使用第三方编辑器时请用右键兼容编辑链，避免外部输入覆盖页面修改。",
     )
     DESCRIPTION = (
         "编辑并编译 MiniMax H3 多场景计划。plan 是运行数据；"
@@ -2295,7 +3205,12 @@ class EagleH3MediaPackNode:
 
 
 class EagleH3MediaBridgeNode:
-    """Single, clearly labelled standard-media boundary for H3 workflows."""
+    """Single, clearly labelled standard-media boundary for H3 workflows.
+
+    ``IMAGE`` batches and ComfyUI list outputs are different contracts.  The
+    bridge therefore exposes one ordinary ``IMAGE`` for first-shot seeding;
+    the complete reference-image collection remains inside ``media_bundle``.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -2310,16 +3225,16 @@ class EagleH3MediaBridgeNode:
                 "media_bundle": (H3_MEDIA_BUNDLE_TYPE, {
                     "tooltip": "接导演台或参考条件链的 H3 媒体包；标准端口可按槽位覆盖它。",
                 }),
-                "reference_images": ("IMAGE", {"tooltip": "普通参考图片或 IMAGE 批次。"}),
-                "video_frames_1": ("IMAGE", {"tooltip": "参考视频 1 的已解码帧批次，不是 VIDEO 对象。"}),
-                "video_frames_2": ("IMAGE", {"tooltip": "参考视频 2 的已解码帧批次，不是 VIDEO 对象。"}),
-                "video_frames_3": ("IMAGE", {"tooltip": "参考视频 3 的已解码帧批次，不是 VIDEO 对象。"}),
-                "video_audio_1": ("AUDIO", {"tooltip": "参考视频 1 的配对原声。"}),
-                "video_audio_2": ("AUDIO", {"tooltip": "参考视频 2 的配对原声。"}),
-                "video_audio_3": ("AUDIO", {"tooltip": "参考视频 3 的配对原声。"}),
-                "reference_audio_1": ("AUDIO",),
-                "reference_audio_2": ("AUDIO",),
-                "reference_audio_3": ("AUDIO",),
+                "ref_images": ("IMAGE", {"tooltip": "普通参考图片或 IMAGE 批次。"}),
+                "ref_video_0": ("IMAGE", {"tooltip": "参考视频 0 的已解码 IMAGE 帧批次，不是 VIDEO 对象。"}),
+                "ref_video_1": ("IMAGE", {"tooltip": "参考视频 1 的已解码 IMAGE 帧批次，不是 VIDEO 对象。"}),
+                "ref_video_2": ("IMAGE", {"tooltip": "参考视频 2 的已解码 IMAGE 帧批次，不是 VIDEO 对象。"}),
+                "ref_video_audio_0": ("AUDIO", {"tooltip": "参考视频 0 的配对原声。"}),
+                "ref_video_audio_1": ("AUDIO", {"tooltip": "参考视频 1 的配对原声。"}),
+                "ref_video_audio_2": ("AUDIO", {"tooltip": "参考视频 2 的配对原声。"}),
+                "ref_audio_0": ("AUDIO",),
+                "ref_audio_1": ("AUDIO",),
+                "ref_audio_2": ("AUDIO",),
             },
         }
 
@@ -2331,14 +3246,14 @@ class EagleH3MediaBridgeNode:
         "STRING", "INT", "INT", "INT",
     )
     RETURN_NAMES = (
-        "media_bundle", "reference_images",
-        "video_frames_1", "video_frames_2", "video_frames_3",
-        "video_audio_1", "video_audio_2", "video_audio_3",
-        "reference_audio_1", "reference_audio_2", "reference_audio_3",
+        "media_bundle", "first_reference_image",
+        "ref_video_0", "ref_video_1", "ref_video_2",
+        "ref_video_audio_0", "ref_video_audio_1", "ref_video_audio_2",
+        "ref_audio_0", "ref_audio_1", "ref_audio_2",
         "media_mapping", "image_count", "video_count", "audio_count",
     )
     OUTPUT_IS_LIST = (
-        False, True,
+        False, False,
         False, False, False,
         False, False, False,
         False, False, False,
@@ -2348,32 +3263,36 @@ class EagleH3MediaBridgeNode:
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
     DESCRIPTION = (
         "H3 唯一推荐的标准媒体边界。既可展开导演台 media_bundle，也可把外部 "
-        "IMAGE/AUDIO 重新打包。video_frames_* 明确表示视频帧 IMAGE 批次，"
-        "避免与 ComfyUI 原生 VIDEO 对象混淆。"
+        "IMAGE/AUDIO 重新打包。ref_video_* 按官方 H3 的 0 基槽位命名，"
+        "明确表示视频帧 IMAGE 批次，"
+        "避免与 ComfyUI 原生 VIDEO 对象混淆。first_reference_image "
+        "是普通单张 IMAGE，可直接接入首镜 seed_image；全部参考图保留在媒体包内。"
     )
 
-    def execute(self, media_mapping="", media_bundle=None, reference_images=None,
-                video_frames_1=None, video_frames_2=None, video_frames_3=None,
-                video_audio_1=None, video_audio_2=None, video_audio_3=None,
-                reference_audio_1=None, reference_audio_2=None, reference_audio_3=None):
+    def execute(self, media_mapping="", media_bundle=None, ref_images=None,
+                ref_video_0=None, ref_video_1=None, ref_video_2=None,
+                ref_video_audio_0=None, ref_video_audio_1=None, ref_video_audio_2=None,
+                ref_audio_0=None, ref_audio_1=None, ref_audio_2=None):
         source = media_bundle if isinstance(media_bundle, dict) else {}
         source_videos = (list(source.get("video_slots") or []) + [None, None, None])[:3]
         source_video_audio = (list(source.get("video_audio_slots") or []) + [None, None, None])[:3]
         source_audio = (list(source.get("audio_slots") or []) + [None, None, None])[:3]
 
-        video_overrides = [video_frames_1, video_frames_2, video_frames_3]
-        video_audio_overrides = [video_audio_1, video_audio_2, video_audio_3]
-        audio_overrides = [reference_audio_1, reference_audio_2, reference_audio_3]
+        video_overrides = [ref_video_0, ref_video_1, ref_video_2]
+        video_audio_overrides = [
+            ref_video_audio_0, ref_video_audio_1, ref_video_audio_2,
+        ]
+        audio_overrides = [ref_audio_0, ref_audio_1, ref_audio_2]
         videos = [value if value is not None else source_videos[index]
                   for index, value in enumerate(video_overrides)]
         video_audios = [value if value is not None else source_video_audio[index]
                         for index, value in enumerate(video_audio_overrides)]
         audios = [value if value is not None else source_audio[index]
                   for index, value in enumerate(audio_overrides)]
-        if reference_images is None:
+        if ref_images is None:
             images = list(source.get("ref_images") or [])
         else:
-            images = EagleH3MediaPackNode._split_images(reference_images)
+            images = EagleH3MediaPackNode._split_images(ref_images)
 
         raw_mapping = str(media_mapping or "").strip() or source.get("media_mapping", "")
         mapping = EagleH3MediaPackNode._normalized_mapping(
@@ -2388,8 +3307,9 @@ class EagleH3MediaBridgeNode:
             "audio_slots": audios,
             "media_mapping": mapping_json,
         }
+        first_reference_image = images[0] if images else None
         return (
-            bundle, images or [None],
+            bundle, first_reference_image,
             videos[0], videos[1], videos[2],
             video_audios[0], video_audios[1], video_audios[2],
             audios[0], audios[1], audios[2], mapping_json,

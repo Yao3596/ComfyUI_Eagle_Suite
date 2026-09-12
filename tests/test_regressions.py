@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -522,6 +523,33 @@ class RegressionTests(unittest.TestCase):
             self.assertTrue(status["fallback_reason"])
             self.assertEqual(str(default_file.resolve()), status["storage_path"])
 
+    def test_director_skill_obsidian_markdown_matches_vault_contract_and_round_trips(self):
+        from eagle_suite_test_package.nodes.prompt_presets import (
+            _director_skills_from_markdown,
+            _director_skills_to_markdown,
+        )
+
+        skills = {"skill-1": {
+            "id": "skill-1",
+            "name": "镜头节奏",
+            "category": "camera",
+            "tasks": ["shots"],
+            "tags": ["timing"],
+            "content": "# 原技能标题\n\n## 方法\n\n正文",
+        }}
+        markdown = _director_skills_to_markdown(skills)
+        self.assertTrue(markdown.startswith("---\ntitle: Eagle Director Skills\n"))
+        for field in ("type:", "tags:", "created:", "updated:"):
+            self.assertIn("\n" + field, markdown)
+        self.assertIn("eagle_schema: eagle-director-skills/v2", markdown)
+        self.assertEqual(1, len(re.findall(r"(?m)^# [^#]", markdown)))
+        self.assertIn("### 镜头节奏", markdown)
+        self.assertIn("#### 原技能标题", markdown)
+        self.assertIn("##### 方法", markdown)
+        parsed = _director_skills_from_markdown(markdown)
+        self.assertEqual("镜头节奏", parsed["skill-1"]["name"])
+        self.assertIn("#### 原技能标题", parsed["skill-1"]["content"])
+
     def test_lora_selection_can_be_ignored_without_loading(self):
         from eagle_suite_test_package.eagle_suite import lora_gallery
 
@@ -573,6 +601,8 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn("EagleH3MediaPortsV2Node", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3PlanInteropNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3StateInteropNode", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertIn("EagleH3LoadManifestNode", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertIn("EagleH3ManifestAssembleNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertNotIn("EagleH3PlanNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3ShotContextNode", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleH3ReferenceConditionNode", PACKAGE.NODE_CLASS_MAPPINGS)
@@ -584,7 +614,7 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("EagleTextStudio", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleLatentSwitchMulti", PACKAGE.NODE_CLASS_MAPPINGS)
         hidden_implementation_nodes = {
-            "EagleH3PreflightNode", "EagleH3LoadManifestNode", "EagleH3StartNode",
+            "EagleH3PreflightNode", "EagleH3StartNode",
             "EagleH3PlanNode",
             "EagleH3CurrentShotNode", "EagleH3ContextNode", "EagleH3TrimNode",
             "EagleH3SegmentCheckpointNode", "EagleH3ReviewGateNode", "EagleH3EndNode",
@@ -596,6 +626,7 @@ class RegressionTests(unittest.TestCase):
             "EagleH3StateInteropNode", "EagleH3NativeLoopStartNode", "EagleH3ShotContextNode",
             "EagleH3ReferenceConditionNode", "EagleH3FrameTrimNode",
             "EagleH3CheckpointReviewNode", "EagleH3NativeLoopEndNode",
+            "EagleH3LoadManifestNode", "EagleH3ManifestAssembleNode",
             "EagleH3ExportPNGSequenceNode", "EagleH3SeamProbeNode", "EagleH3SmartSplitNode",
         )
         for name in h3_nodes:
@@ -912,16 +943,20 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual("context_loop_plan_json", EagleH3DirectorNode.RETURN_NAMES[7])
         self.assertEqual(8, len(EagleH3DirectorNode.RETURN_TYPES))
         self.assertEqual(8, len(EagleH3DirectorNode.OUTPUT_TOOLTIPS))
-        self.assertEqual("reference_images", EagleH3MediaBridgeNode.RETURN_NAMES[1])
-        self.assertEqual("video_frames_1", EagleH3MediaBridgeNode.RETURN_NAMES[2])
-        self.assertTrue(EagleH3MediaBridgeNode.OUTPUT_IS_LIST[1])
+        self.assertEqual("first_reference_image", EagleH3MediaBridgeNode.RETURN_NAMES[1])
+        self.assertEqual("ref_video_0", EagleH3MediaBridgeNode.RETURN_NAMES[2])
+        self.assertFalse(EagleH3MediaBridgeNode.OUTPUT_IS_LIST[1])
+
+        frontend = (REPO / "web" / "js" / "h3_pipeline.js").read_text(encoding="utf-8")
+        self.assertIn("function repairMediaBridgeSeedLink(graph)", frontend)
+        self.assertIn('bridge, "first_reference_image", shot, "seed_image"', frontend)
 
     def test_legacy_media_ports_are_migrated_by_semantic_output_name(self):
         source = (REPO / "web" / "js" / "h3_pipeline.js").read_text(encoding="utf-8")
         self.assertIn('"EagleH3MediaPortsV2Node"', source)
         self.assertIn('"ref_videos.ref_video_0": "ref_video_0"', source)
         self.assertIn('"ref_audios.ref_audio_2": "ref_audio_2"', source)
-        self.assertIn("setTimeout(migrateLegacyMediaPorts, 0)", source)
+        self.assertIn("migrateLegacyMediaPorts();", source)
 
     def test_director_does_not_reject_long_prompt_by_character_count(self):
         from eagle_suite_test_package.eagle_suite.h3_director_node import _build_plan_preflight
@@ -942,10 +977,10 @@ class RegressionTests(unittest.TestCase):
         messages = list(report.get("errors", [])) + list(report.get("warnings", []))
         self.assertFalse(any("H3-E001" in item or "7000" in item for item in messages))
 
-    def test_director_does_not_create_context_loop_jump_nodes(self):
+    def test_director_creates_explicit_context_loop_authoring_source(self):
         source = (REPO / "web" / "js" / "h3_pipeline.js").read_text(encoding="utf-8")
-        self.assertNotIn('createH3Node(graph, "MiniMaxH3ChainPlan"', source)
-        self.assertNotIn("创建 Context Loop 编辑桥", source)
+        self.assertIn('createH3Node(graph, "MiniMaxH3ChainPlan"', source)
+        self.assertIn("创建 Context Loop 兼容编辑链", source)
         self.assertNotIn("migrateDirectorContextLoopLinks", source)
         self.assertNotIn("installContextLoopAutoBridge", source)
         self.assertNotIn("eagleDirectorPlanBridge", source)
@@ -976,6 +1011,47 @@ class RegressionTests(unittest.TestCase):
             output["result"][-1],
             output["ui"]["h3_context_loop_plan_json"][0],
         )
+
+    def test_director_timecodes_and_timeline_are_frame_addressable(self):
+        from eagle_suite_test_package.eagle_suite.h3_director_node import (
+            _format_h3_timecode,
+            _parse_h3_timecode,
+            _scene_shot_timeline,
+        )
+
+        self.assertEqual(3723.456, _parse_h3_timecode("01:02:03.456"))
+        self.assertEqual("01:00.000", _format_h3_timecode(59.9996))
+        timeline = _scene_shot_timeline({
+            "defaultSeconds": 10,
+            "shots": [
+                {"id": 1, "time": "00:00.000"},
+                {"id": 2, "time": "00:05.000"},
+            ],
+        }, 24)
+        self.assertEqual("00:00.000", timeline[0]["start_timecode"])
+        self.assertEqual("00:05.000", timeline[0]["end_timecode"])
+        self.assertEqual(120, timeline[0]["frame_count"])
+        self.assertEqual(120, timeline[0]["end_frame_exclusive"])
+        self.assertEqual("00:10.000", timeline[1]["end_timecode"])
+
+    def test_director_plan_separates_editorial_and_h3_generated_duration(self):
+        from eagle_suite_test_package.eagle_suite.h3_director_node import compile_h3_params
+
+        project = {"fps": 24, "globalDuration": 5, "globalSteps": 8}
+        scenes = [{
+            "id": 1,
+            "title": "timing",
+            "defaultSeconds": 5,
+            "preamble": "scene",
+            "shots": [{"id": 1, "time": "00:00.000", "content": "one"}],
+        }]
+        shot = compile_h3_params(project, scenes)["shots"][0]
+        self.assertEqual(5, shot["duration_seconds"])
+        self.assertEqual(120, shot["timeline_frames"])
+        self.assertEqual("00:05.000", shot["timeline_end_timecode"])
+        self.assertEqual(124, shot["raw_frames"])
+        self.assertAlmostEqual(124 / 24, shot["generated_duration_seconds"])
+        self.assertEqual(120, shot["shot_timeline"][0]["frame_count"])
 
     def test_director_context_loop_plan_json_does_not_duplicate_shared_prompt(self):
         from eagle_suite_test_package.eagle_suite.h3_director_node import export_context_loop_plan_json
@@ -1012,6 +1088,144 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("不要套用固定的 10 秒单镜头假设", script)
         _system, shots = _build_skill_prompts("shots", project, scene, "", request={})
         self.assertIn("estSeconds 之和约等于 18 秒", shots)
+        self.assertIn("MM:SS.mmm --> MM:SS.mmm", script)
+        self.assertIn("帧区间使用半开区间 [start,end)", shots)
+
+    def test_director_frontend_uses_precise_frame_timing_helpers(self):
+        source = (REPO / "web" / "js" / "h3_director.js").read_text(encoding="utf-8")
+        self.assertIn("function parseTimecode(value)", source)
+        self.assertIn("function buildShotTimings(scene, fps, equalDistribution)", source)
+        self.assertIn("endFrameExclusive", source)
+        self.assertNotIn("prev.time.replace(':','.')", source)
+
+    def test_director_frontend_uses_exact_size_table_and_flushes_saved_state(self):
+        source = (REPO / "web" / "js" / "h3_director.js").read_text(encoding="utf-8")
+        for preset in (
+            "16:9|mp0.2|608|352", "16:9|mp0.5|960|544",
+            "16:9|mp0.98|1344|768", "16:9|mp2.0|1920|1088",
+            "9:16|mp0.5|544|960", "9:16|mp2.0|1088|1920",
+        ):
+            self.assertIn(preset, source)
+        self.assertIn('option value="custom"', source)
+        self.assertIn("function onCustomDimension(axis)", source)
+        self.assertIn("async beforePromptQueued()", source)
+        self.assertIn("props.node._h3FlushState", source)
+        self.assertIn("generationInfo.deliveredFrames", source)
+        statusbar = source.split('<div class="h3d-statusbar">', 1)[1].split("</div>", 1)[0]
+        self.assertIn("场景队列", statusbar)
+        self.assertNotIn("store.project.width", statusbar)
+        self.assertNotIn("store.project.height", statusbar)
+
+    def test_character_interaction_skill_distinguishes_live_action_and_anime(self):
+        skills = json.loads(
+            (REPO / "eagle_suite" / "skills" / "director_skills.json").read_text(encoding="utf-8")
+        )
+        content = skills["pro-v2-h3-character-interaction-automation"]["content"]
+        self.assertIn("##### 表现风格", content)
+        self.assertIn("`live_action`", content)
+        self.assertIn("`anime`", content)
+        self.assertIn("严格保留 2D/cel/anime", content)
+
+    def test_director_frontend_exposes_character_pv_motion_graphics_project(self):
+        source = (REPO / "web" / "js" / "h3_director.js").read_text(encoding="utf-8")
+        self.assertIn("function defaultPv()", source)
+        self.assertIn("function buildPvDirective(project, scene)", source)
+        self.assertIn('option value="character_pv"', source)
+        self.assertIn("角色 PV · 类 AE 动效规划", source)
+        self.assertIn("post_production 元数据", source)
+        for effect in ("flash_cut", "mask_wipe", "deep_glow", "pixel_sort", "jpeg_glitch"):
+            self.assertIn(effect, source)
+
+        skills = json.loads(
+            (REPO / "eagle_suite" / "skills" / "director_skills.json").read_text(encoding="utf-8")
+        )
+        skill = skills["pro-v3-h3-character-pv-motion-graphics"]
+        self.assertEqual("character_pv_motion_graphics", skill["category"])
+        self.assertIn("post_production_cues", skill["content"])
+
+    def test_pv_creative_cards_are_deterministic_bounded_and_history_aware(self):
+        from eagle_suite_test_package.eagle_suite import h3_director_node
+
+        first = h3_director_node.generate_pv_cards(
+            "anime sword warrior with a flowing cape", "fast character reveal",
+            card_count=3, seed=81, model_mode="local_only",
+        )
+        repeated = h3_director_node.generate_pv_cards(
+            "anime sword warrior with a flowing cape", "fast character reveal",
+            card_count=3, seed=81, model_mode="local_only",
+        )
+        self.assertEqual(first["cards"], repeated["cards"])
+        self.assertEqual("combat", first["selected"]["actionProfile"])
+        self.assertTrue(set(first["selected"]["transitions"]).issubset(h3_director_node._PV_TRANSITIONS))
+        self.assertTrue(set(first["selected"]["effects"]).issubset(h3_director_node._PV_EFFECTS))
+
+        next_draw = h3_director_node.generate_pv_cards(
+            "anime sword warrior with a flowing cape", "fast character reveal",
+            card_count=3, seed=81, history=first["history"], model_mode="local_only",
+        )
+        self.assertNotEqual(first["selected"]["fingerprint"], next_draw["selected"]["fingerprint"])
+        self.assertEqual(2, len(next_draw["history"]))
+
+    def test_pv_creative_cards_can_use_attached_model_to_select_candidate(self):
+        from eagle_suite_test_package.eagle_suite import h3_director_node
+
+        response = json.dumps({
+            "selected_index": 1, "reason": "matches the costume rhythm",
+            "action_direction": "turn, reveal the prop, then settle into a distinct hero pose",
+            "title_concept": "post-only diagonal nameplate",
+        })
+        with mock.patch.object(h3_director_node, "_call_llm", return_value=response):
+            draw = h3_director_node.generate_pv_cards(
+                "fashion idol", "editorial PV", card_count=3, seed=9,
+                model_mode="model_refine", local_model={"path": "fake.gguf"},
+            )
+        self.assertEqual(1, draw["selected_index"])
+        self.assertEqual("local", draw["transport"])
+        self.assertIn("distinct hero pose", draw["selected"]["actionDirection"])
+        self.assertIn("Do not paint exact text", draw["selected"]["directorSkill"])
+
+    def test_pv_card_node_is_registered_at_h3_level(self):
+        node = PACKAGE.NODE_CLASS_MAPPINGS["EagleH3PVCreativeCardsNode"]
+        self.assertEqual("🦅 Eagle Suite/H3 导演台", node.CATEGORY)
+        self.assertEqual(
+            ("pv_cards_json", "selected_card_json", "director_skill", "history_json", "summary"),
+            node.RETURN_NAMES,
+        )
+        source = (REPO / "web" / "js" / "h3_director.js").read_text(encoding="utf-8")
+        self.assertIn("🎴 AI 创意抽卡", source)
+        self.assertIn("operation:'pv_draw'", source)
+        self.assertIn("generationHistory", source)
+
+    def test_director_generation_memory_reaches_next_scene_prompt(self):
+        from eagle_suite_test_package.eagle_suite.h3_director_node import (
+            _build_skill_prompts, _generation_memory_context,
+        )
+
+        scenes = [
+            {"id": "s1", "title": "first", "shots": [{
+                "action": "raises the sword and turns left", "camera": "fast Arc Shot",
+                "transitionOut": "flash_cut",
+            }]},
+            {"id": "s2", "title": "second", "defaultSeconds": 5, "shots": []},
+        ]
+        project = {
+            "generationHistory": [{
+                "sceneId": "s1", "actions": ["raises the sword and turns left"],
+                "cameras": ["fast Arc Shot"], "transitions": ["flash_cut"],
+            }],
+            "pv": {"history": [{
+                "theme": "dark_rival", "visualStyle": "anime_cel",
+                "editGrammar": "match_on_action", "actionProfile": "combat",
+            }]},
+        }
+        memory = _generation_memory_context(project, scenes, 1)
+        self.assertIn("创作记忆 / 去重复约束", memory)
+        self.assertIn("raises the sword", memory)
+        self.assertIn("dark_rival/anime_cel/match_on_action/combat", memory)
+        _system, user = _build_skill_prompts(
+            "shots", project, scenes[1], "", request={"_memoryContext": memory}
+        )
+        self.assertIn("禁止仅替换同义词制造伪变化", user)
 
     def test_director_skill_extraction_generalizes_video_editing_prompt(self):
         from eagle_suite_test_package.eagle_suite.h3_director_node import _build_skill_extraction_prompts

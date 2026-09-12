@@ -28,6 +28,7 @@ from eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor import 
     EagleMediaTimelineEditor,
     _load_project,
     _probe_media,
+    _timeline_preview_frames,
 )
 from eagle_suite_timeline_test_package.eagle_suite.utils import get_cached_ffmpeg
 
@@ -134,6 +135,12 @@ class MediaTimelineEditorTests(unittest.TestCase):
                     fit_mode="cover", output_fps=12, include_video_audio=True,
                     max_frames=8,
                 )
+                preview_only = EagleMediaTimelineEditor().render(
+                    timeline_json=json.dumps(project), output_mode="video_audio",
+                    size_mode="custom", width=128, height=72, lock_aspect_ratio=False,
+                    fit_mode="cover", output_fps=12, include_video_audio=True,
+                )
+                strip = _timeline_preview_frames(str(red), count=4, width=96)
 
             result = output["result"]
             self.assertIsNotNone(result[0])
@@ -144,16 +151,28 @@ class MediaTimelineEditorTests(unittest.TestCase):
             self.assertEqual((128, 72), tuple(result[0].get_dimensions()))
             self.assertGreater(float(result[0].get_duration()), .8)
             self.assertTrue(output["ui"]["video_url"])
+            self.assertEqual((1, 72, 128, 3), tuple(preview_only["result"][1].shape))
+            self.assertGreater(float(preview_only["result"][1].mean()), 0.01)
+            self.assertIn("图像口首帧预览", preview_only["result"][4])
+            self.assertEqual(4, len(strip["frames"]))
+            self.assertTrue(all(
+                (temp_root / item["subfolder"] / item["filename"]).is_file()
+                for item in strip["frames"]
+            ))
 
     def test_frontend_contains_persistent_drag_timeline_controls(self):
         source = (REPO / "web" / "js" / "media_timeline_editor.js").read_text(encoding="utf-8")
         self.assertIn('/eagle/media_timeline/upload', source)
+        self.assertIn('/eagle/media_timeline/preview_frames', source)
         self.assertIn('setWidget(node, "timeline_json"', source)
         self.assertIn('dropTrack($event,\'video\')', source)
         self.assertIn('function openFilePicker()', source)
         self.assertIn('载入失败', source)
         self.assertIn("splitAtPlayhead", source)
         self.assertIn("toggleFullscreen", source)
+        self.assertIn("beginSeek", source)
+        self.assertIn("positionPlayer", source)
+        self.assertIn("emte-frame-strip", source)
 
 
 if __name__ == "__main__":

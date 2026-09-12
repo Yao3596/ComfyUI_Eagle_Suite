@@ -33,6 +33,10 @@ MANIFEST_TOP_KEYS = frozenset([
     "total_shots",
     "plan",
     "shots",
+    "shot_overrides",
+    "seed_overrides",
+    "checkpoint_history",
+    "manifest_status",
     "created_at",
     "updated_at",
 ])

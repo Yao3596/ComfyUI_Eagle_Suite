@@ -27,6 +27,7 @@ from .media_timeline_editor import EagleMediaTimelineEditor
 from .h3_director_node import (
     EagleH3DirectorNode,
     EagleH3MediaBridgeNode,
+    EagleH3PVCreativeCardsNode,
 )
 from .h3_pipeline import (
     NODE_CLASS_MAPPINGS_H3PIPELINE,
@@ -84,6 +85,7 @@ NODE_CLASS_MAPPINGS = {
     "UnifiedMediaBrowser": UnifiedMediaBrowser,
     "EagleH3DirectorNode": EagleH3DirectorNode,
     "EagleH3MediaBridgeNode": EagleH3MediaBridgeNode,
+    "EagleH3PVCreativeCardsNode": EagleH3PVCreativeCardsNode,
     "EagleDirectorSkillNode": EagleDirectorSkillNode,
     "EagleMemoryReleaseNode": EagleMemoryReleaseNode,
 
@@ -146,6 +148,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnifiedMediaBrowser": "🦅 统一媒体浏览器",
     "EagleH3DirectorNode": "🦅 H3 导演台",
     "EagleH3MediaBridgeNode": "🦅 H3 标准媒体桥",
+    "EagleH3PVCreativeCardsNode": "🦅 H3 · PV 创意抽卡",
     "EagleDirectorSkillNode": "🦅 导演技能库",
     "EagleMemoryReleaseNode": "🦅 模型显存释放",
     # Danbooru
@@ -226,6 +229,7 @@ _CATEGORY_GROUPS = {
     f"{MENU_ROOT}/H3 导演台": (
         EagleH3DirectorNode,
         EagleH3MediaBridgeNode,
+        EagleH3PVCreativeCardsNode,
         EagleDirectorSkillNode,
         *tuple(NODE_CLASS_MAPPINGS_H3PIPELINE.values()),
     ),
