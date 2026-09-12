@@ -87,7 +87,9 @@ ComfyUI 的联合类型只比较类型名集合，不验证 Python 字典字段�
 
 ## 审片、版本与恢复闭环
 
-紧凑主链只合并界面，不再合并或省略数据语义。每次生成的单镜保存为 `shots/shot_NN/clip_r0001.mp4`、`clip_r0002.mp4`…，同时写入提示词侧车和 JSON 检查点；新版本只更新 manifest 的 active revision，不删除旧文件。H3 主工作流必须把同一个采样器 `output` 同时连接到解码器、`分段保存与审片.sampled_latent` 和 `循环结束与合成.sampled_latent`。检查点只保存其中的视频/音频双流并移到 CPU；循环结束只承接必要尾帧和这两路 AV latent，不保留完整解码视频或采样附加数据。
+Each shot is saved as a numbered revision (`clip_r0001.mp4`, `clip_r0002.mp4`, ...). The checkpoint stores the compact video/audio latent plus a lossless CPU copy of the required context-frame tail, so a resumed run does not need to rebuild masked context from a compressed MP4. The same sampler output must feed the decoders, the review/checkpoint node, and the loop-end node.
+
+参考条件路由现在保留两种续接合同：`guide` 将上一镜尾帧与 AV latent 作为 Motion Context，生成完成后裁掉重复片头；`masked_av` 委托已安装的原生 `MiniMaxH3ChainContext`，把上一镜尾部写入当前 AV latent 的受保护前缀，并为视频、音频两路建立 `noise_mask`。节点的 `latent` 始终是应接入采样器的目标 latent，新追加的 `is_continuation` 则明确表示当前镜是否真正继承了上下文。`masked_av` 仅用于同一镜头的精确延续，要求 `video/head`、至少 5 帧上下文及原生 H3 AV mask 支持；39 帧是音画时钟精确对齐的推荐边界。切镜和重新构图继续使用 `guide`。
 
 `interactive` 审片支持：
 

@@ -1393,7 +1393,6 @@ def compile_h3_params(project, scenes, llm_hint=""):
         shot_continuation_mode = _safe_get(s, "continuationMode", continuation_mode)
         if shot_continuation_mode not in H3_CONTINUATION_MODES:
             shot_continuation_mode = continuation_mode
-        resolved_continuation_modes.append(shot_continuation_mode)
 
         # masked_av 校验
         if shot_context_length and shot_continuation_mode == "masked_av":
@@ -1401,6 +1400,7 @@ def compile_h3_params(project, scenes, llm_hint=""):
                 shot_continuation_mode = "guide"
             elif encode_mode != "video" or anchor_mode != "head":
                 shot_continuation_mode = "guide"
+        resolved_continuation_modes.append(shot_continuation_mode)
 
         # scene_prompt：不含 prefix
         scene_prompt = _build_scene_prompt(project, s)

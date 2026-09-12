@@ -242,6 +242,16 @@ def _ensure_native_start_clip_count(start):
     start["outputs"] = outputs
 
 
+def _ensure_reference_context_contract(reference):
+    """Append the explicit continuation flag without shifting existing slots."""
+    _append_output(
+        reference,
+        "is_continuation",
+        "BOOLEAN",
+        "已应用上下文接力",
+    )
+
+
 def _primary_h3_sampler(workflow):
     """Find the full-pass sampler directly conditioned by Eagle Ref2VA."""
     nodes = workflow.get("nodes") or []
@@ -371,6 +381,41 @@ def _ensure_safe_core_sampling(workflow, shot_context, frame_trim):
 
     _remove_nodes(workflow, remove_ids)
     return sorted(remove_ids)
+
+
+def _ensure_preview_frame_budget(workflow, shot_context):
+    """Keep model-step previews independent from the full H3 clip length.
+
+    ``preview_frames`` controls how many frames are decoded during every
+    sampling preview. Wiring the per-shot ``length`` output here makes a
+    124/243/... frame preview run at each step and can exhaust a 16 GB GPU
+    before the final VAE decode. Preserve the preview node, but restore its
+    local one-frame budget when that semantic mismatch is present.
+    """
+    disconnected = []
+    outputs = shot_context.get("outputs") or []
+    for node in workflow.get("nodes") or []:
+        if node.get("type") != "ModelPreviewOverrideKJ":
+            continue
+        preview = next(
+            (item for item in node.get("inputs") or []
+             if item.get("name") == "preview_frames"),
+            None,
+        )
+        if preview is None:
+            continue
+        row = _link_by_id(workflow, preview.get("link"))
+        source_name = ""
+        if row and row[1] == shot_context.get("id"):
+            slot = int(row[2])
+            if 0 <= slot < len(outputs):
+                source_name = str(outputs[slot].get("name") or "")
+        if source_name in ("length", "raw_frames"):
+            link_id = preview.get("link")
+            _disconnect_input(workflow, node, "preview_frames")
+            disconnected.append(link_id)
+        _set_widget(node, "preview_frames", 1)
+    return disconnected
 
 
 def _upgrade_director_state(node):
@@ -613,13 +658,15 @@ def upgrade(path: Path, backup=False, safe_core_sampling=False):
     nodes = workflow.get("nodes") or []
     director = _find(nodes, "EagleH3DirectorNode")
     shot_context = _find(nodes, "EagleH3ShotContextNode")
+    reference = _find(nodes, "EagleH3ReferenceConditionNode")
     frame_trim = _find(nodes, "EagleH3FrameTrimNode")
     sigma = _find(nodes, "MiniMaxH3SigmaShift")
-    if not all((director, shot_context, frame_trim, sigma)):
+    if not all((director, shot_context, reference, frame_trim, sigma)):
         raise RuntimeError("workflow is missing an Eagle H3 core node")
 
     _upgrade_director_state(director)
     _ensure_shot_length_contract(shot_context)
+    _ensure_reference_context_contract(reference)
     native_start = _find(nodes, "EagleH3NativeLoopStartNode")
     if native_start is not None:
         _ensure_native_start_clip_count(native_start)
@@ -633,6 +680,7 @@ def upgrade(path: Path, backup=False, safe_core_sampling=False):
     if bridge is not None:
         _ensure_media_bridge_seed_contract(workflow, bridge, shot_context)
     _ensure_sol_attn_motion_context_compatibility(_find(nodes, "SolAttnPatch"))
+    preview_links_removed = _ensure_preview_frame_budget(workflow, shot_context)
     removed = []
     if safe_core_sampling:
         removed = _ensure_safe_core_sampling(workflow, shot_context, frame_trim)
@@ -668,7 +716,7 @@ def upgrade(path: Path, backup=False, safe_core_sampling=False):
     print(
         f"updated={path} nodes={len(workflow['nodes'])} "
         f"links={len(workflow['links'])} last={workflow['last_node_id']}/{workflow['last_link_id']} "
-        f"removed_unsafe={removed}"
+        f"removed_unsafe={removed} preview_links_removed={preview_links_removed}"
     )
 
 

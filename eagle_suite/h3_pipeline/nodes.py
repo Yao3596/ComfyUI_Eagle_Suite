@@ -180,6 +180,37 @@ def _validate_plan(plan):
     errors = preflight.get("errors") or []
     if errors:
         raise ValueError("[H3Chain] 计划预检失败: " + "; ".join(str(x) for x in errors))
+
+    # masked_av 会把上一镜的视听 latent 前缀实际写入当前
+    # target latent。上一镜交付帧不足时，原生实现会把前缀向下
+    # 吸附到另一个 17k+5 长度，这会使 Eagle 预先编译的时间线与
+    # 实际 trim 错位。必须在采样前拒绝这类计划。
+    compatibility = plan.get("compatibility") or {}
+    default_context = int(compatibility.get("context_length", 0) or 0)
+    default_mode = str(compatibility.get("continuation_mode", "guide") or "guide")
+    for offset, shot in enumerate(shots):
+        shot = shot if isinstance(shot, dict) else {}
+        mode = str(shot.get("continuation_mode", default_mode) or default_mode)
+        context = int(shot.get("context_length", default_context) or 0)
+        if mode != "masked_av" or context <= 0:
+            continue
+        if context < 5 or context % 17 != 5:
+            raise ValueError(
+                f"[H3Chain] 镜头 {offset + 1} masked_av 上下文 {context} 帧无效；"
+                "必须为 5、22、39…（17k+5）"
+            )
+        if compatibility.get("encode_mode", "video") != "video":
+            raise ValueError("[H3Chain] masked_av 要求 encode_mode=video")
+        if compatibility.get("anchor_mode", "head") != "head":
+            raise ValueError("[H3Chain] masked_av 要求 anchor_mode=head")
+        if offset > 0:
+            previous = shots[offset - 1] if isinstance(shots[offset - 1], dict) else {}
+            available = int(previous.get("delivered_frames", 0) or 0)
+            if available < context:
+                raise ValueError(
+                    f"[H3Chain] 镜头 {offset + 1} masked_av 需要 {context} 帧上下文，"
+                    f"但上一镜仅交付 {available} 帧；请降低上下文长度或延长上一镜"
+                )
     return plan
 
 
@@ -251,6 +282,32 @@ def _compact_h3_latent(latent):
     return {"samples": compact}
 
 
+def _previous_checkpoint_payload(state, current_index):
+    """读取上一镜当前活动版本的张量检查点。"""
+    previous_index = int(current_index) - 1
+    previous = next(
+        (
+            item for item in ((state or {}).get("shots") or [])
+            if int(item.get("index", -1)) == previous_index
+        ),
+        None,
+    )
+    latent_path = str((previous or {}).get("latent") or "")
+    if not latent_path or not os.path.isfile(latent_path):
+        return None, latent_path, "missing"
+    try:
+        try:
+            loaded = torch.load(latent_path, map_location="cpu", weights_only=True)
+        except TypeError:  # PyTorch < 2.0
+            loaded = torch.load(latent_path, map_location="cpu")
+        if not isinstance(loaded, dict):
+            raise ValueError("检查点顶层必须是对象")
+        return loaded, latent_path, "checkpoint"
+    except Exception as error:
+        logger.warning(f"[H3Chain] 无法恢复上一镜张量检查点 {latent_path}: {error}")
+        return None, latent_path, "invalid_checkpoint"
+
+
 def _previous_latent_from_state(state, current_index):
     """取本次递归携带的 latent，或从上一镜版本检查点恢复。"""
     runtime = state.get("previous_latent") if isinstance(state, dict) else None
@@ -260,26 +317,48 @@ def _previous_latent_from_state(state, current_index):
         except (TypeError, ValueError) as error:
             logger.warning(f"[H3Chain] 运行期上一镜 latent 无效: {error}")
 
-    previous_index = int(current_index) - 1
-    previous = next(
-        (
-            item for item in (state.get("shots") or [])
-            if int(item.get("index", -1)) == previous_index
-        ),
-        None,
+    loaded, latent_path, source = _previous_checkpoint_payload(
+        state, current_index
     )
-    latent_path = str((previous or {}).get("latent") or "")
-    if not latent_path or not os.path.isfile(latent_path):
-        return None, "missing"
+    if loaded is None:
+        return None, source
     try:
-        try:
-            loaded = torch.load(latent_path, map_location="cpu", weights_only=True)
-        except TypeError:  # PyTorch < 2.0
-            loaded = torch.load(latent_path, map_location="cpu")
         return _compact_h3_latent(loaded), "checkpoint"
     except Exception as error:
         logger.warning(f"[H3Chain] 无法恢复上一镜 AV latent {latent_path}: {error}")
         return None, "invalid_checkpoint"
+
+
+def _previous_frames_from_state(state, current_index, requested):
+    """优先读取运行期无损尾帧，其次读取新版张量检查点。"""
+    requested = max(0, int(requested or 0))
+    if requested <= 0:
+        return None, 0, "disabled"
+
+    runtime = (state or {}).get("previous_frames")
+    if torch.is_tensor(runtime) and runtime.ndim == 4 and int(runtime.shape[0]) > 0:
+        count = min(requested, int(runtime.shape[0]))
+        return (
+            runtime[-count:].detach().cpu().contiguous().clone(),
+            count,
+            "runtime",
+        )
+
+    loaded, latent_path, source = _previous_checkpoint_payload(
+        state, current_index
+    )
+    if loaded is None:
+        return None, 0, source
+    frames = loaded.get("context_frames")
+    if not torch.is_tensor(frames) or frames.ndim != 4 or int(frames.shape[0]) < 1:
+        # 旧版 .pt 只含 AV latent，由 ContextNode 继续回退到 MP4。
+        return None, 0, "legacy_checkpoint"
+    count = min(requested, int(frames.shape[0]))
+    return (
+        frames[-count:].detach().cpu().contiguous().clone(),
+        count,
+        f"checkpoint:{latent_path}",
+    )
 
 
 def _context_storage_length(state):
@@ -307,6 +386,54 @@ def _context_tail(state, images):
         raise ValueError("H3 循环结束需要连接裁剪后的 images")
     count = min(_context_storage_length(state), int(images.shape[0]))
     return images[-count:].detach().cpu().contiguous().clone()
+
+
+def _validate_native_chain_context_contract(node_class):
+    """兼容 ComfyUI V1/V3 节点定义，校验原生 Context 的四输出顺序。"""
+    expected_types = ("CONDITIONING", "INT", "BOOLEAN", "LATENT")
+    expected_names = (
+        "conditioning", "trim_frames", "is_continuation", "latent"
+    )
+    actual_types = tuple(getattr(node_class, "RETURN_TYPES", ()) or ())
+    actual_names = tuple(getattr(node_class, "RETURN_NAMES", ()) or ())
+    if actual_types[:4] == expected_types and actual_names[:4] == expected_names:
+        return
+
+    # V3 节点通过 define_schema().outputs 声明端口；这类节点可能没有
+    # V1 的 RETURN_TYPES / RETURN_NAMES 静态字段。
+    schema_factory = getattr(node_class, "define_schema", None)
+    if callable(schema_factory):
+        try:
+            schema = schema_factory()
+            outputs = list(getattr(schema, "outputs", ()) or ())
+            schema_types = []
+            schema_names = []
+            for output in outputs[:4]:
+                get_io_type = getattr(output, "get_io_type", None)
+                io_type = get_io_type() if callable(get_io_type) else getattr(
+                    output, "io_type", ""
+                )
+                schema_types.append(str(io_type or ""))
+                schema_names.append(str(
+                    getattr(output, "id", None)
+                    or getattr(output, "display_name", None)
+                    or ""
+                ))
+            if (
+                tuple(schema_types) == expected_types
+                and tuple(schema_names) == expected_names
+            ):
+                return
+        except Exception as error:
+            logger.warning(
+                f"[H3Chain] 读取 MiniMaxH3ChainContext V3 合同失败: {error}"
+            )
+
+    raise RuntimeError(
+        "MiniMaxH3ChainContext 端口合同过旧；需要输出 "
+        "conditioning / trim_frames / is_continuation / latent。"
+        "请更新 ComfyUI-MiniMaxH3-Contex-Loop。"
+    )
 
 
 def _tensor_to_np(frames):
@@ -816,18 +943,19 @@ class EagleH3ContextNode:
                 return (_normalize_seed(seed_image), 1, True, "首镜使用 seed_image 作为起始帧")
             return (_empty_image_tensor(), 0, False, "首镜且无 seed_image")
 
-        # auto 模式的下一次递归直接继承上一镜的无损尾帧；交互模式重新
-        # Queue 后状态从 manifest 恢复，再走下面的磁盘视频抽帧兜底。
-        previous_frames = state.get("previous_frames")
-        if torch.is_tensor(previous_frames) and previous_frames.ndim == 4:
-            available = int(previous_frames.shape[0])
-            if available > 0 and ctx > 0:
-                count = min(int(ctx), available)
-                frames = previous_frames[-count:].detach().cpu().contiguous().clone()
-                return (
-                    frames, count, True,
-                    f"已承接 {count} 帧运行期上下文（{params['continuation_mode']} 模式）",
-                )
+        # auto 模式优先继承运行期无损尾帧；交互模式/重启后则
+        # 从上一镜张量检查点恢复同一批尾帧。只有旧检查点不含
+        # context_frames 时才退回下面的 MP4 抽帧路径。
+        previous_frames, count, frame_source = _previous_frames_from_state(
+            state, idx, ctx
+        )
+        if previous_frames is not None:
+            source_label = "运行期" if frame_source == "runtime" else "检查点"
+            return (
+                previous_frames, count, True,
+                f"已承接 {count} 帧{source_label}无损上下文"
+                f"（{params['continuation_mode']} 模式）",
+            )
 
         # 续镜：解析上一镜 clip 路径（显式 prev_clip 优先，否则从 run_state 取）
         clip_path = _resolve_video_path(prev_clip) or _prev_clip_from_state(state, idx)
@@ -1217,10 +1345,13 @@ class EagleH3ReferenceConditionNode:
             },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "LATENT", "STRING", "STRING", "STRING", "INT")
+    RETURN_TYPES = (
+        "CONDITIONING", "LATENT", "STRING", "STRING", "STRING", "INT",
+        "BOOLEAN",
+    )
     RETURN_NAMES = (
         "positive", "latent", "compiled_prompt", "active_references", "summary",
-        "trim_frames",
+        "trim_frames", "is_continuation",
     )
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 导演台/参考条件"
@@ -1270,21 +1401,51 @@ class EagleH3ReferenceConditionNode:
             is_first_shot and has_context
             and _is_usable_reference("image", context_image)
         )
+        if seed_context:
+            # ``seed_image`` is a real first-frame anchor, not merely a UI
+            # status flag.  Apply it after Ref2VA so reference media and the
+            # exact opening frame can coexist in one conditioning payload.
+            seed_guide = graph.node(
+                "MiniMaxH3AddGuide", "EagleH3FirstFrameGuide"
+            )
+            seed_guide.set_input("positive", positive)
+            seed_guide.set_input("latent", latent)
+            seed_guide.set_input("frame_idx", 0)
+            seed_guide.set_input("vae", vae)
+            seed_guide.set_input("image", context_image)
+            positive = seed_guide.out(0)
         current_index = int(report.get("scene_index", 1) or 1) - 1
         previous_latent, latent_source = _previous_latent_from_state(
             state, current_index
         ) if not is_first_shot else (None, "first_shot")
-        compatibility = (state.get("plan") or {}).get("compatibility") or {}
-        plan_shots = (state.get("plan") or {}).get("shots") or []
+        plan = (state.get("plan") or {})
+        compatibility = plan.get("compatibility") or {}
+        plan_shots = plan.get("shots") or []
         current_shot = (
             plan_shots[current_index]
             if 0 <= current_index < len(plan_shots)
             and isinstance(plan_shots[current_index], dict)
             else {}
         )
+        # Eagle 的审片重试可在不改导演台 Plan 快照的情况下覆盖当前镜头。
+        # 交给原生 Chain Context 的是本次实际生效的 shot，避免上下文
+        # 长度、接力模式与当前采样参数分叉。
+        effective = shot_params(state) if "current_index" in state else None
+        if effective and int(effective.get("index", -1)) == current_index:
+            current_shot = dict(effective.get("shot") or current_shot)
         audio_mode = str(compatibility.get("audio_mode", "generated_audio"))
         generated_audio_context = audio_mode in (
             "generated_audio", "source_plus_timeline"
+        )
+        requested_context = int(
+            current_shot.get("context_length", compatibility.get("context_length", 22))
+            or compatibility.get("context_length", 22) or 0
+        )
+        continuation_mode = str(
+            current_shot.get(
+                "continuation_mode",
+                compatibility.get("continuation_mode", "guide"),
+            ) or "guide"
         )
         audio_context = current_shot.get("audio_context_length")
         if audio_context in (None, ""):
@@ -1293,34 +1454,131 @@ class EagleH3ReferenceConditionNode:
                 current_shot.get("context_length", compatibility.get("context_length", 22)),
             )
         audio_context = int(audio_context or 0) if generated_audio_context else 0
+        needs_av_latent = bool(
+            (continuation_mode == "masked_av" and requested_context > 0)
+            or (generated_audio_context and audio_context > 0)
+        )
         if (
             not is_first_shot and use_context_guide
-            and generated_audio_context and audio_context > 0
+            and needs_av_latent
             and previous_latent is None
         ):
             raise ValueError(
                 "H3 续镜缺少上一镜 sampled AV latent；请确认采样器 output 同时连接"
                 "分段保存与审片和循环结束节点。旧的无 latent 检查点需要从上一镜重生成。"
             )
-        visual_context = bool(
+        input_visual_context = bool(
             has_context and _is_usable_reference("image", context_image)
         )
+        state_previous_frames = state.get("previous_frames")
+        state_visual_context = bool(
+            torch.is_tensor(state_previous_frames)
+            and state_previous_frames.ndim == 4
+            and int(state_previous_frames.shape[0]) > 0
+        )
+        visual_context = bool(input_visual_context or state_visual_context)
+        effective_context_frames = (
+            state_previous_frames if state_visual_context else context_image
+        )
+        external_first = bool(is_first_shot and state.get("external_context"))
         context_used = bool(
-            not is_first_shot and use_context_guide
-            and (
+            use_context_guide and (external_first or not is_first_shot) and
+            (
                 visual_context
                 or (generated_audio_context and previous_latent is not None)
             )
         )
         trim_frames = 0
-        if context_used:
-            try:
-                import nodes as comfy_nodes
-                motion_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3MotionContext")
-                motion_schema = motion_class.INPUT_TYPES() if motion_class else {}
-            except Exception:
-                motion_class = None
-                motion_schema = {}
+        is_continuation = False
+        use_latent_context = False
+        try:
+            import nodes as comfy_nodes
+            chain_context_class = comfy_nodes.NODE_CLASS_MAPPINGS.get(
+                "MiniMaxH3ChainContext"
+            )
+        except Exception:
+            comfy_nodes = None
+            chain_context_class = None
+
+        plan_requires_masked = bool(
+            (continuation_mode == "masked_av" and requested_context > 0)
+            or any(
+                str((shot or {}).get(
+                    "continuation_mode",
+                    compatibility.get("continuation_mode", "guide"),
+                )) == "masked_av"
+                and int((shot or {}).get(
+                    "context_length", compatibility.get("context_length", 0)
+                ) or 0) > 0
+                for shot in plan_shots if isinstance(shot, dict)
+            )
+        )
+        if (
+            not is_first_shot and use_context_guide
+            and continuation_mode == "masked_av" and requested_context > 0
+        ):
+            available_context = (
+                int(effective_context_frames.shape[0])
+                if torch.is_tensor(effective_context_frames)
+                and effective_context_frames.ndim == 4 else 0
+            )
+            if available_context < requested_context:
+                raise ValueError(
+                    f"H3 masked_av 需要 {requested_context} 帧上下文，"
+                    f"当前仅恢复 {available_context} 帧；请降低上下文长度，"
+                    "或从上一镜完整检查点重新执行"
+                )
+        if use_context_guide and chain_context_class is not None:
+            _validate_native_chain_context_contract(chain_context_class)
+            # 复用 Context Loop 的原生 Context 节点：guide 路径保留现有
+            # Motion Context 行为，masked_av 路径则生成含 AV 保留前缀与
+            # 双流 noise_mask 的 sampler-ready latent。
+            chain_plan = _clone_state(plan)
+            chain_shots = list(chain_plan.get("shots") or [])
+            if 0 <= current_index < len(chain_shots):
+                chain_shots[current_index] = dict(current_shot)
+                chain_plan["shots"] = chain_shots
+            chain_state = {
+                "index": current_index + 1,
+                "plan": chain_plan,
+            }
+            if state_visual_context:
+                chain_state["previous_frames"] = state_previous_frames
+            elif visual_context:
+                chain_state["previous_frames"] = effective_context_frames
+            if previous_latent is not None:
+                chain_state["previous_latent"] = previous_latent
+            for name in ("previous_audio", "external_context"):
+                if state.get(name) is not None:
+                    chain_state[name] = state.get(name)
+
+            chain_context = graph.node(
+                "MiniMaxH3ChainContext", "EagleH3NativeChainContext"
+            )
+            chain_context.set_input("state", chain_state)
+            chain_context.set_input("conditioning", positive)
+            chain_context.set_input("vae", vae)
+            chain_context.set_input("latent", latent)
+            chain_context.set_input("audio_vae", audio_vae)
+            positive = chain_context.out(0)
+            trim_frames = chain_context.out(1)
+            is_continuation = chain_context.out(2)
+            latent = chain_context.out(3)
+            use_latent_context = bool(
+                context_used and previous_latent is not None
+                and (continuation_mode == "masked_av" or generated_audio_context)
+            )
+        elif use_context_guide and plan_requires_masked:
+            raise RuntimeError(
+                "H3 masked_av 需要 MiniMaxH3ChainContext 及原生 H3 AV noise-mask "
+                "支持；请启用 ComfyUI-MiniMaxH3-Contex-Loop，或把该镜头改为 guide。"
+            )
+        elif context_used:
+            motion_class = (
+                comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3MotionContext")
+                if comfy_nodes is not None else None
+            )
+            motion_schema = motion_class.INPUT_TYPES() if motion_class else {}
             if motion_class is None:
                 raise RuntimeError(
                     "H3 续镜需要 MiniMaxH3MotionContext；请启用 ComfyUI-H3-Motion-Context"
@@ -1334,13 +1592,11 @@ class EagleH3ReferenceConditionNode:
             motion.set_input("vae", vae)
             motion.set_input("latent", latent)
             if visual_context and "context_frames" in declared:
-                motion.set_input("context_frames", context_image)
-            requested_context = int(
-                current_shot.get("context_length", compatibility.get("context_length", 22))
-                or compatibility.get("context_length", 22) or 22
-            )
+                motion.set_input("context_frames", effective_context_frames)
             if previous_latent is None and visual_context:
-                requested_context = min(requested_context, int(context_image.shape[0]))
+                requested_context = min(
+                    requested_context, int(effective_context_frames.shape[0])
+                )
             context_spec = declared.get("context_length", ())
             context_choices = context_spec[0] if context_spec else None
             if isinstance(context_choices, (list, tuple)):
@@ -1380,10 +1636,10 @@ class EagleH3ReferenceConditionNode:
                 motion.set_input("audio_mode", "timeline")
             positive = motion.out(0)
             trim_frames = motion.out(1)
-        else:
-            use_latent_context = False
+            is_continuation = True
         report["context_guide"] = context_used
         report["seed_context"] = seed_context
+        report["continuation_mode"] = continuation_mode
         report["latent_handoff"] = use_latent_context
         report["latent_source"] = latent_source
         report["ref_image_size"] = ref_image_size
@@ -1393,7 +1649,7 @@ class EagleH3ReferenceConditionNode:
             f"场景 {report['scene_index']} · 参考 "
             f"{len(grouped['image'])}图/{len(grouped['video'])}视频/"
             f"{len(grouped['audio'])}音频 · "
-            f"上下文 Guide={'开' if context_used else '关'}"
+            f"上下文 {continuation_mode}={'开' if context_used else '关'}"
             + (
                 f" · AV Latent={'运行期' if latent_source == 'runtime' else '检查点'}"
                 if use_latent_context else ""
@@ -1401,7 +1657,10 @@ class EagleH3ReferenceConditionNode:
             + (" · 首镜种子图" if seed_context else "")
         )
         return {
-            "result": (positive, latent, compiled, active_json, summary, trim_frames),
+            "result": (
+                positive, latent, compiled, active_json, summary, trim_frames,
+                is_continuation,
+            ),
             "expand": graph.finalize(),
         }
 
@@ -1645,9 +1904,15 @@ class EagleH3SegmentCheckpointNode:
             latent_path = ""
             if sampled_latent is not None:
                 latent_path = str(shot_dir / f"{stem}.pt")
-                # 检查点只保存采样器输出中的 H3 视频/音频双流；这是下一镜
-                # 无损承接的输入，不保存噪声、mask 等可能滞留显存的附加项。
-                torch.save(_compact_h3_latent(sampled_latent), latent_path)
+                # 同一个张量检查点同时保存紧凑 AV latent 与交付画面的
+                # 无损尾帧。重启/交互审片后可以先恢复原始 IMAGE 张量，旧版
+                # 仅 latent 检查点才回退到 MP4 抽帧。
+                checkpoint_payload = _compact_h3_latent(sampled_latent)
+                if has_images:
+                    checkpoint_payload["context_frames"] = _context_tail(
+                        state, images
+                    )
+                torch.save(checkpoint_payload, latent_path)
 
             effective_shot = params.get("shot") or {}
             prompt_text = str(effective_shot.get("prompt") or "")

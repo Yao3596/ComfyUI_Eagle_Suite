@@ -139,6 +139,20 @@ class H3ChainTests(unittest.TestCase):
         self.assertTrue((pathlib.Path(state["base_dir"]) / "manifest.json").exists())
         self.assertIn("test_run", summary)
 
+    def test_masked_av_plan_rejects_predecessor_shorter_than_context(self):
+        plan = _sample_plan()
+        plan["compatibility"]["continuation_mode"] = "masked_av"
+        plan["shots"][1]["context_length"] = 243
+        with self.assertRaisesRegex(ValueError, "上一镜仅交付 223 帧"):
+            h3_nodes._validate_plan(plan)
+
+        plan["shots"][1]["context_length"] = 209
+        self.assertIs(plan, h3_nodes._validate_plan(plan))
+
+        plan["shots"][1]["context_length"] = 6
+        with self.assertRaisesRegex(ValueError, "17k\\+5"):
+            h3_nodes._validate_plan(plan)
+
     def test_plan_interop_accepts_typed_plan_and_string_json(self):
         plan = _sample_plan()
         node = EagleH3PlanInteropNode()
@@ -758,6 +772,8 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual("EAGLE_H3_STATE,H3_CHAIN_STATE", inputs["required"]["state"][0])
         self.assertNotIn("run_state", inputs["required"])
         self.assertEqual(("CONDITIONING", "LATENT"), EagleH3ReferenceConditionNode.RETURN_TYPES[:2])
+        self.assertEqual("BOOLEAN", EagleH3ReferenceConditionNode.RETURN_TYPES[-1])
+        self.assertEqual("is_continuation", EagleH3ReferenceConditionNode.RETURN_NAMES[-1])
         for name in ("prompt", "width", "height", "length"):
             self.assertTrue(inputs["required"][name][1].get("forceInput"), name)
 
@@ -782,7 +798,11 @@ class H3ChainTests(unittest.TestCase):
             def finalize(self):
                 return {}
 
+        import nodes as comfy_nodes
         original = h3_nodes.GraphBuilder
+        original_chain = comfy_nodes.NODE_CLASS_MAPPINGS.pop(
+            "MiniMaxH3ChainContext", None
+        )
         h3_nodes.GraphBuilder = FakeGraph
         try:
             result = EagleH3ReferenceConditionNode().execute(
@@ -796,12 +816,17 @@ class H3ChainTests(unittest.TestCase):
             )
         finally:
             h3_nodes.GraphBuilder = original
+            if original_chain is not None:
+                comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3ChainContext"] = original_chain
 
-        self.assertEqual(["MiniMaxH3ReferenceToVideo"], created)
+        self.assertEqual(
+            ["MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide"], created
+        )
         report = json.loads(result["result"][3])
         self.assertTrue(report["seed_context"])
         self.assertFalse(report["context_guide"])
         self.assertEqual(0, result["result"][5])
+        self.assertEqual(("MiniMaxH3AddGuide", 0), result["result"][0])
 
     def test_continuation_wires_previous_av_latent_into_motion_context(self):
         created = {}
@@ -852,6 +877,9 @@ class H3ChainTests(unittest.TestCase):
         import nodes as comfy_nodes
         original_graph = h3_nodes.GraphBuilder
         original_motion = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3MotionContext")
+        original_chain = comfy_nodes.NODE_CLASS_MAPPINGS.pop(
+            "MiniMaxH3ChainContext", None
+        )
         h3_nodes.GraphBuilder = FakeGraph
         comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3MotionContext"] = FakeMotion
         try:
@@ -867,6 +895,8 @@ class H3ChainTests(unittest.TestCase):
                 comfy_nodes.NODE_CLASS_MAPPINGS.pop("MiniMaxH3MotionContext", None)
             else:
                 comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3MotionContext"] = original_motion
+            if original_chain is not None:
+                comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3ChainContext"] = original_chain
 
         motion_inputs = created["MiniMaxH3MotionContext"].inputs
         self.assertEqual(2, len(motion_inputs["context_latent"]["samples"]))
@@ -874,6 +904,226 @@ class H3ChainTests(unittest.TestCase):
         report = json.loads(result["result"][3])
         self.assertTrue(report["latent_handoff"])
         self.assertEqual("runtime", report["latent_source"])
+        self.assertTrue(result["result"][-1])
+
+    def test_masked_av_routes_through_native_chain_context(self):
+        created = {}
+
+        class FakeNode:
+            def __init__(self, name):
+                self.name = name
+                self.inputs = {}
+
+            def set_input(self, name, value):
+                self.inputs[name] = value
+
+            def out(self, index):
+                return (self.name, index)
+
+        class FakeGraph:
+            def node(self, name, _label):
+                node = FakeNode(name)
+                created[name] = node
+                return node
+
+            def finalize(self):
+                return {}
+
+        class FakeChainContext:
+            RETURN_TYPES = ("CONDITIONING", "INT", "BOOLEAN", "LATENT")
+            RETURN_NAMES = (
+                "conditioning", "trim_frames", "is_continuation", "latent",
+            )
+
+        state = self._init_state(_sample_plan())
+        state["current_index"] = 1
+        state["plan"]["compatibility"].update({
+            "context_length": 39,
+            "audio_context_length": 39,
+            "continuation_mode": "masked_av",
+        })
+        state["previous_frames"] = torch.zeros((39, 16, 16, 3))
+        state["previous_latent"] = {"samples": [
+            torch.ones((1, 16, 4, 2, 2)),
+            torch.ones((1, 32, 2, 65)),
+        ]}
+
+        import nodes as comfy_nodes
+        original_graph = h3_nodes.GraphBuilder
+        original_chain = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3ChainContext")
+        h3_nodes.GraphBuilder = FakeGraph
+        comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3ChainContext"] = FakeChainContext
+        try:
+            result = EagleH3ReferenceConditionNode().execute(
+                clip=object(), vae=object(), audio_vae=object(),
+                media_bundle={"media_mapping": "[]"}, state=state,
+                prompt="same shot continuation", width=1080, height=1920,
+                length=260, has_context=False,
+            )
+        finally:
+            h3_nodes.GraphBuilder = original_graph
+            if original_chain is None:
+                comfy_nodes.NODE_CLASS_MAPPINGS.pop("MiniMaxH3ChainContext", None)
+            else:
+                comfy_nodes.NODE_CLASS_MAPPINGS["MiniMaxH3ChainContext"] = original_chain
+
+        context = created["MiniMaxH3ChainContext"]
+        self.assertEqual(2, context.inputs["state"]["index"])
+        self.assertEqual(
+            "masked_av",
+            context.inputs["state"]["plan"]["compatibility"]["continuation_mode"],
+        )
+        self.assertEqual(("MiniMaxH3ChainContext", 3), result["result"][1])
+        self.assertEqual(("MiniMaxH3ChainContext", 1), result["result"][5])
+        self.assertEqual(("MiniMaxH3ChainContext", 2), result["result"][6])
+        report = json.loads(result["result"][3])
+        self.assertEqual("masked_av", report["continuation_mode"])
+        self.assertTrue(report["context_guide"])
+        self.assertTrue(report["latent_handoff"])
+
+    def test_native_chain_context_requires_four_output_contract(self):
+        class FakeNode:
+            def set_input(self, _name, _value):
+                return None
+
+            def out(self, index):
+                return ("fake", index)
+
+        class FakeGraph:
+            def node(self, _name, _label):
+                return FakeNode()
+
+        class OldChainContext:
+            RETURN_TYPES = ("CONDITIONING", "INT", "BOOLEAN")
+            RETURN_NAMES = (
+                "conditioning", "trim_frames", "is_continuation",
+            )
+
+        state = self._init_state(_sample_plan())
+        state["current_index"] = 1
+        state["plan"]["compatibility"].update({
+            "context_length": 22,
+            "audio_context_length": 22,
+            "continuation_mode": "masked_av",
+        })
+        state["previous_frames"] = torch.zeros((22, 8, 8, 3))
+        state["previous_latent"] = {"samples": [
+            torch.ones((1, 16, 3, 2, 2)),
+            torch.ones((1, 32, 2, 8)),
+        ]}
+
+        import nodes as comfy_nodes
+        original_graph = h3_nodes.GraphBuilder
+        original_chain = comfy_nodes.NODE_CLASS_MAPPINGS.get(
+            "MiniMaxH3ChainContext"
+        )
+        h3_nodes.GraphBuilder = FakeGraph
+        comfy_nodes.NODE_CLASS_MAPPINGS[
+            "MiniMaxH3ChainContext"
+        ] = OldChainContext
+        try:
+            with self.assertRaisesRegex(RuntimeError, "端口合同过旧"):
+                EagleH3ReferenceConditionNode().execute(
+                    clip=object(), vae=object(), audio_vae=object(),
+                    media_bundle={"media_mapping": "[]"}, state=state,
+                    prompt="continued shot", width=1080, height=1920,
+                    length=245,
+                )
+        finally:
+            h3_nodes.GraphBuilder = original_graph
+            if original_chain is None:
+                comfy_nodes.NODE_CLASS_MAPPINGS.pop(
+                    "MiniMaxH3ChainContext", None
+                )
+            else:
+                comfy_nodes.NODE_CLASS_MAPPINGS[
+                    "MiniMaxH3ChainContext"
+                ] = original_chain
+
+    def test_native_chain_context_accepts_v3_schema_contract(self):
+        class Output:
+            def __init__(self, io_type, output_id):
+                self.io_type = io_type
+                self.id = output_id
+
+            def get_io_type(self):
+                return self.io_type
+
+        class Schema:
+            outputs = [
+                Output("CONDITIONING", "conditioning"),
+                Output("INT", "trim_frames"),
+                Output("BOOLEAN", "is_continuation"),
+                Output("LATENT", "latent"),
+            ]
+
+        class V3ChainContext:
+            @classmethod
+            def define_schema(cls):
+                return Schema()
+
+        self.assertIsNone(
+            h3_nodes._validate_native_chain_context_contract(V3ChainContext)
+        )
+
+    def test_masked_av_rejects_short_runtime_frame_context(self):
+        class FakeNode:
+            def set_input(self, _name, _value):
+                return None
+
+            def out(self, index):
+                return ("fake", index)
+
+        class FakeGraph:
+            def node(self, _name, _label):
+                return FakeNode()
+
+        class FakeChainContext:
+            RETURN_TYPES = ("CONDITIONING", "INT", "BOOLEAN", "LATENT")
+            RETURN_NAMES = (
+                "conditioning", "trim_frames", "is_continuation", "latent",
+            )
+
+        state = self._init_state(_sample_plan())
+        state["current_index"] = 1
+        state["plan"]["compatibility"].update({
+            "context_length": 22,
+            "audio_context_length": 22,
+            "continuation_mode": "masked_av",
+        })
+        state["previous_frames"] = torch.zeros((5, 8, 8, 3))
+        state["previous_latent"] = {"samples": [
+            torch.ones((1, 16, 3, 2, 2)),
+            torch.ones((1, 32, 2, 8)),
+        ]}
+
+        import nodes as comfy_nodes
+        original_graph = h3_nodes.GraphBuilder
+        original_chain = comfy_nodes.NODE_CLASS_MAPPINGS.get(
+            "MiniMaxH3ChainContext"
+        )
+        h3_nodes.GraphBuilder = FakeGraph
+        comfy_nodes.NODE_CLASS_MAPPINGS[
+            "MiniMaxH3ChainContext"
+        ] = FakeChainContext
+        try:
+            with self.assertRaisesRegex(ValueError, "需要 22 帧.*仅恢复 5 帧"):
+                EagleH3ReferenceConditionNode().execute(
+                    clip=object(), vae=object(), audio_vae=object(),
+                    media_bundle={"media_mapping": "[]"}, state=state,
+                    prompt="continued shot", width=1080, height=1920,
+                    length=245,
+                )
+        finally:
+            h3_nodes.GraphBuilder = original_graph
+            if original_chain is None:
+                comfy_nodes.NODE_CLASS_MAPPINGS.pop(
+                    "MiniMaxH3ChainContext", None
+                )
+            else:
+                comfy_nodes.NODE_CLASS_MAPPINGS[
+                    "MiniMaxH3ChainContext"
+                ] = original_chain
 
     def test_reference_size_presets_map_and_downscale_only(self):
         large = torch.ones((1, 1600, 2400, 3), dtype=torch.float32)
@@ -1227,6 +1477,98 @@ class H3ChainTests(unittest.TestCase):
         restored, source = h3_nodes._previous_latent_from_state(state, 1)
         self.assertEqual("checkpoint", source)
         self.assertEqual(2, len(restored["samples"]))
+
+    def test_context_restores_lossless_frames_from_checkpoint_after_restart(self):
+        state = self._init_state(_sample_plan())
+        frames = torch.arange(30 * 2 * 2 * 3, dtype=torch.float32).reshape(
+            30, 2, 2, 3
+        )
+        checkpoint = self.tmpdir / "lossless_context.pt"
+        torch.save({
+            "samples": [
+                torch.ones((1, 16, 2, 2, 2)),
+                torch.ones((1, 32, 2, 4)),
+            ],
+            "context_frames": frames,
+        }, checkpoint)
+        state["shots"] = [{
+            "index": 0,
+            "latent": str(checkpoint),
+            "clip": "",
+        }]
+        state["current_index"] = 1
+        h3_state.save_state(state)
+
+        restarted = h3_state.load_state(state["base_dir"])
+        self.assertNotIn("previous_frames", restarted)
+        image, count, has_context, note = EagleH3ContextNode().execute(
+            restarted
+        )
+        self.assertTrue(has_context)
+        self.assertEqual(22, count)
+        self.assertTrue(torch.equal(frames[-22:], image))
+        self.assertIn("检查点无损上下文", note)
+
+    def test_legacy_latent_checkpoint_falls_back_to_previous_mp4(self):
+        state = self._init_state(_sample_plan())
+        checkpoint = self.tmpdir / "legacy.pt"
+        torch.save({"samples": [
+            torch.ones((1, 16, 2, 2, 2)),
+            torch.ones((1, 32, 2, 4)),
+        ]}, checkpoint)
+        clip = self.tmpdir / "legacy.mp4"
+        clip.write_bytes(b"legacy")
+        state["shots"] = [{
+            "index": 0,
+            "latent": str(checkpoint),
+            "clip": str(clip),
+        }]
+        state["current_index"] = 1
+        fallback = np.full((22, 2, 2, 3), 128, dtype=np.uint8)
+        original = h3_nodes._cached_context_frames
+        h3_nodes._cached_context_frames = lambda _path, _count: fallback
+        try:
+            image, count, has_context, note = EagleH3ContextNode().execute(
+                state
+            )
+        finally:
+            h3_nodes._cached_context_frames = original
+        self.assertTrue(has_context)
+        self.assertEqual(22, count)
+        self.assertEqual((22, 2, 2, 3), tuple(image.shape))
+        self.assertIn("已取 22 帧上下文", note)
+
+    def test_segment_checkpoint_persists_exact_context_frame_tail(self):
+        state = self._init_state(_sample_plan())
+        images = torch.arange(223 * 2 * 2 * 3, dtype=torch.float32).reshape(
+            223, 2, 2, 3
+        )
+        sampled_latent = {"samples": [
+            torch.ones((1, 16, 2, 2, 2)),
+            torch.ones((1, 32, 2, 4)),
+        ]}
+        original = h3_nodes.frames_to_video
+
+        def fake_frames_to_video(_frames, output_path, **_kwargs):
+            pathlib.Path(output_path).write_bytes(b"video")
+
+        h3_nodes.frames_to_video = fake_frames_to_video
+        try:
+            _clip, saved_state, _clip_path = (
+                h3_nodes.EagleH3SegmentCheckpointNode().execute(
+                    state, images=images, sampled_latent=sampled_latent
+                )
+            )
+        finally:
+            h3_nodes.frames_to_video = original
+
+        latent_path = pathlib.Path(saved_state["shots"][0]["latent"])
+        payload = torch.load(
+            latent_path, map_location="cpu", weights_only=True
+        )
+        self.assertEqual(2, len(payload["samples"]))
+        self.assertEqual(22, payload["context_frames"].shape[0])
+        self.assertTrue(torch.equal(images[-22:], payload["context_frames"]))
 
     def test_native_end_carries_compact_av_latent_and_frame_tail(self):
         state = self._init_state(_sample_plan())
