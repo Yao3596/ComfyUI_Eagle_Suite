@@ -18,8 +18,10 @@ import torch
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-COMFY_ROOT = pathlib.Path(os.environ.get("COMFYUI_ROOT", r"E:\ComfyUI-AKI\ComfyUI"))
-sys.path.insert(0, str(COMFY_ROOT))
+COMFY_ROOT = os.environ.get("COMFYUI_ROOT")
+if COMFY_ROOT:
+    COMFY_ROOT = pathlib.Path(COMFY_ROOT).expanduser()
+    sys.path.insert(0, str(COMFY_ROOT))
 SPEC = importlib.util.spec_from_file_location(
     "eagle_suite_test_package",
     REPO / "__init__.py",
@@ -132,12 +134,38 @@ class H3ChainTests(unittest.TestCase):
         plan = _sample_plan()
         node = EagleH3PlanNode()
         out = node.execute(plan, output_dir=str(self.tmpdir), resume_policy="overwrite")
-        state, summary = out["result"]
+        self.assertEqual(len(node.RETURN_TYPES), len(out["result"]))
+        state, manifest, manifest_path, summary = out["result"]
         self.assertIn("run_name", state)
         self.assertEqual(0, state["current_index"])
         self.assertEqual(2, state["total_shots"])
-        self.assertTrue((pathlib.Path(state["base_dir"]) / "manifest.json").exists())
+        self.assertEqual(2, manifest["total_shots"])
+        self.assertEqual(plan, manifest["plan"])
+        self.assertEqual(
+            pathlib.Path(state["base_dir"]) / "manifest.json",
+            pathlib.Path(manifest_path),
+        )
+        self.assertTrue(pathlib.Path(manifest_path).exists())
         self.assertIn("test_run", summary)
+
+    def test_run_name_override_is_the_runtime_identity_on_create_and_resume(self):
+        plan = _sample_plan()
+        state = h3_state.init_state(
+            plan, str(self.tmpdir), run_name_override="dual/loop:v2",
+            resume_policy="overwrite",
+        )
+        self.assertEqual("dual_loop_v2", state["run_name"])
+        self.assertEqual("test_run", state["plan"]["run_name"])
+        self.assertEqual("dual_loop_v2", pathlib.Path(state["base_dir"]).name)
+
+        state["current_index"] = 1
+        h3_state.save_state(state)
+        resumed = h3_state.init_state(
+            plan, str(self.tmpdir), run_name_override="dual/loop:v2",
+            resume_policy="resume",
+        )
+        self.assertEqual("dual_loop_v2", resumed["run_name"])
+        self.assertEqual(1, resumed["current_index"])
 
     def test_masked_av_plan_rejects_predecessor_shorter_than_context(self):
         plan = _sample_plan()
@@ -241,6 +269,300 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(clip_count, 2)
         self.assertTrue(status)
 
+    def test_native_start_repairs_legacy_zero_shot_manifest_from_plan(self):
+        plan = _sample_plan()
+        initialized = EagleH3PlanNode().execute(
+            plan, output_dir=str(self.tmpdir), resume_policy="overwrite"
+        )
+        manifest_path = pathlib.Path(initialized["result"][2])
+        legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+        legacy["total_shots"] = 0
+        manifest_path.write_text(
+            json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        out = EagleH3NativeLoopStartNode().execute(
+            plan, 1, output_dir=str(self.tmpdir), resume_policy="resume",
+            unique_id="native-start",
+        )
+        _flow, state, _width, _height, _fps, status, clip_count = out["result"]
+        payload = out["ui"]["h3_start"][0]
+        self.assertEqual(2, state["total_shots"])
+        self.assertEqual(2, clip_count)
+        self.assertEqual(2, payload["total_shots"])
+        self.assertEqual(2, payload["plan_shot_count"])
+        self.assertEqual(2, payload["clip_count"])
+        self.assertEqual("native-start", payload["execution_node_id"])
+        self.assertNotIn("/0", status)
+
+        from execution import get_output_from_returns
+        _merged_output, merged_ui, _has_subgraph = get_output_from_returns(
+            [out], EagleH3NativeLoopStartNode()
+        )
+        self.assertIsInstance(merged_ui["h3_start"][0], dict)
+        self.assertEqual(2, merged_ui["h3_start"][0]["clip_count"])
+
+    def test_native_loop_graphbuilder_advances_all_four_scenes(self):
+        from comfy_execution.graph import DynamicPrompt
+
+        plan = json.loads(json.dumps(_sample_plan()))
+        template = plan["shots"][-1]
+        for index in range(2, 4):
+            shot = dict(template)
+            shot.update({
+                "index": index + 1,
+                "id": f"scene_{index + 1:02d}",
+                "prompt": f"scene {index + 1}",
+                "prompt_hash": f"hash-{index + 1}",
+                "generation_start_frame": index * 223,
+                "audio_start_seconds": index * 9.29,
+            })
+            plan["shots"].append(shot)
+        plan["plan_hash"] = "four-scene-plan"
+        plan["summary"] = "4 clips"
+
+        original_prompt = {
+            "1": {"class_type": "EagleH3DirectorNode", "inputs": {}},
+            "2": {
+                "class_type": "EagleH3NativeLoopStartNode",
+                "inputs": {"plan": ["1", 0], "start_index": 1},
+            },
+            "3": {
+                "class_type": "EagleH3ShotContextNode",
+                "inputs": {"state": ["2", 1]},
+            },
+            "4": {
+                "class_type": "EagleH3NativeLoopEndNode",
+                "inputs": {"flow": ["2", 0], "state": ["3", 0]},
+            },
+            "5": {
+                "class_type": "PreviewImage",
+                "inputs": {"images": ["3", 10]},
+            },
+        }
+        dynprompt = DynamicPrompt(original_prompt)
+        state = self._init_state(plan)
+        self.assertEqual(4, state["total_shots"])
+        flow = ["2", 0]
+        end_id = "4"
+        all_expansion_ids = set()
+        original_prefix = (
+            h3_nodes.GraphBuilder._default_prefix_root,
+            h3_nodes.GraphBuilder._default_prefix_call_index,
+            h3_nodes.GraphBuilder._default_prefix_graph_index,
+        )
+        try:
+            for processed_scene in range(4):
+                h3_nodes.GraphBuilder.set_default_prefix(end_id, 0, 0)
+                result = EagleH3NativeLoopEndNode().execute(
+                    flow,
+                    state,
+                    images=torch.zeros((24, 8, 8, 3), dtype=torch.float32),
+                    sampled_latent={"samples": [
+                        torch.zeros((1, 16, 3, 2, 2)),
+                        torch.zeros((1, 32, 2, 8)),
+                    ]},
+                    dynprompt=dynprompt,
+                    unique_id=end_id,
+                )
+                if processed_scene == 3:
+                    self.assertNotIn("expand", result)
+                    final_state, _video, done, next_index = result["result"][:4]
+                    self.assertTrue(done)
+                    self.assertEqual(4, final_state["current_index"])
+                    self.assertEqual(4, final_state["total_shots"])
+                    self.assertEqual(4, next_index)
+                    self.assertNotIn("5/4", result["result"][4])
+                    break
+
+                expansion = result["expand"]
+                expansion_ids = set(expansion)
+                self.assertTrue(expansion_ids.isdisjoint(all_expansion_ids))
+                all_expansion_ids.update(expansion_ids)
+                for node_id, node_info in expansion.items():
+                    dynprompt.add_ephemeral_node(
+                        node_id,
+                        node_info,
+                        parent_id=end_id,
+                        display_id=node_info.get("override_display_id", end_id),
+                    )
+
+                start_id = next(
+                    node_id for node_id, info in expansion.items()
+                    if info["class_type"] == "EagleH3NativeLoopStartNode"
+                )
+                end_id = next(
+                    node_id for node_id, info in expansion.items()
+                    if info["class_type"] == "EagleH3NativeLoopEndNode"
+                )
+                preview_id = next(
+                    node_id for node_id, info in expansion.items()
+                    if info["class_type"] == "PreviewImage"
+                )
+                self.assertEqual("2", expansion[start_id]["override_display_id"])
+                self.assertEqual("4", expansion[end_id]["override_display_id"])
+                self.assertEqual("5", expansion[preview_id]["override_display_id"])
+                self.assertEqual("2", dynprompt.get_display_node_id(start_id))
+                self.assertEqual("4", dynprompt.get_display_node_id(end_id))
+                self.assertEqual("5", dynprompt.get_display_node_id(preview_id))
+
+                recursive_state = expansion[start_id]["inputs"]["initial_state"]
+                started = EagleH3NativeLoopStartNode().execute(
+                    plan,
+                    initial_state=recursive_state,
+                    unique_id=start_id,
+                )
+                state = started["result"][1]
+                payload = started["ui"]["h3_start"][0]
+                self.assertEqual(processed_scene + 1, state["current_index"])
+                self.assertEqual(4, state["total_shots"])
+                self.assertEqual(4, started["result"][-1])
+                self.assertEqual(4, payload["clip_count"])
+                flow = expansion[end_id]["inputs"]["flow"]
+        finally:
+            h3_nodes.GraphBuilder.set_default_prefix(*original_prefix)
+
+    def test_native_recurse_keeps_dual_sampler_save_preview_without_fake_end_id(self):
+        """复现真实 eagle_h3_full 的三级采样、主审片、重复审片旁路、
+        高级保存与预览旁路。第二层不得伪造 29.0.0.29。
+        """
+        from comfy_execution.graph import DynamicPrompt
+        import nodes as comfy_nodes
+
+        class OutputNode:
+            OUTPUT_NODE = True
+
+        output_classes = (
+            "EagleH3NativeLoopEndNode",
+            "EagleH3CheckpointReviewNode",
+            "EagleH3ReviewWorkspaceNode",
+            "EagleAdvancedVideoSaver",
+        )
+        previous_mappings = {
+            name: comfy_nodes.NODE_CLASS_MAPPINGS.get(name)
+            for name in output_classes
+        }
+        comfy_nodes.NODE_CLASS_MAPPINGS.update({
+            name: OutputNode for name in output_classes
+        })
+
+        prompt = {
+            "33": {"class_type": "EagleH3NativeLoopStartNode", "inputs": {}},
+            "32": {"class_type": "EagleH3ShotContextNode", "inputs": {
+                "state": ["33", 1],
+            }},
+            "31": {"class_type": "EagleH3ReferenceConditionNode", "inputs": {
+                "state": ["32", 0], "prompt": ["32", 1],
+                "width": ["33", 2], "height": ["33", 3],
+            }},
+            "45": {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "latent_image": ["31", 1],
+            }},
+            "47": {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "latent_image": ["45", 1],
+            }},
+            "51": {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "latent_image": ["47", 1],
+            }},
+            "52": {"class_type": "VAEDecode", "inputs": {"samples": ["51", 0]}},
+            "78": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["51", 0]}},
+            "30": {"class_type": "EagleH3FrameTrimNode", "inputs": {
+                "images": ["52", 0], "audio": ["78", 0],
+            }},
+            # 已接入 End 状态/决策的唯一主审片节点。
+            "86": {"class_type": "EagleH3ReviewWorkspaceNode", "inputs": {
+                "state": ["32", 0], "images": ["30", 0],
+                "audio": ["30", 1], "sampled_latent": ["51", 0],
+            }},
+            "29": {"class_type": "EagleH3NativeLoopEndNode", "inputs": {
+                "flow": ["33", 0], "state": ["86", 1],
+                "images": ["30", 0], "sampled_latent": ["51", 0],
+                "decision": ["86", 2],
+            }},
+            # 留在画布的历史审片节点：普通模式不得作为旁路重复写检查点。
+            "28": {"class_type": "EagleH3CheckpointReviewNode", "inputs": {
+                "state": ["32", 0], "images": ["30", 0],
+                "sampled_latent": ["51", 0], "read_only": False,
+            }},
+            # read_only 只输出历史/预览 UI，没有持久化和等待副作用，可保留。
+            "27": {"class_type": "EagleH3CheckpointReviewNode", "inputs": {
+                "state": ["86", 1], "video": ["86", 0], "read_only": True,
+            }},
+            # 这两个是必须保留的无状态输出旁路。
+            "80": {"class_type": "EagleAdvancedVideoSaver", "inputs": {
+                "images": ["30", 0], "audio": ["30", 1],
+            }},
+            "81": {"class_type": "PreviewImage", "inputs": {
+                "images": ["30", 0],
+            }},
+        }
+        dynprompt = DynamicPrompt(prompt)
+        flow = ["33", 0]
+        end_id = "29"
+        seen_ids = set()
+        original_prefix = (
+            h3_nodes.GraphBuilder._default_prefix_root,
+            h3_nodes.GraphBuilder._default_prefix_call_index,
+            h3_nodes.GraphBuilder._default_prefix_graph_index,
+        )
+        try:
+            for round_index in range(3):
+                h3_nodes.GraphBuilder.set_default_prefix(end_id, 0, 0)
+                result = EagleH3NativeLoopEndNode()._recurse(
+                    flow, {"current_index": round_index + 1}, dynprompt, end_id
+                )
+                expansion = result["expand"]
+                self.assertTrue(set(expansion).isdisjoint(seen_ids))
+                seen_ids.update(expansion)
+                self.assertEqual(
+                    3,
+                    sum(info["class_type"] == "SamplerCustomAdvanced"
+                        for info in expansion.values()),
+                )
+                self.assertEqual(
+                    1,
+                    sum(info["class_type"] == "EagleAdvancedVideoSaver"
+                        for info in expansion.values()),
+                )
+                self.assertEqual(
+                    1,
+                    sum(info["class_type"] == "PreviewImage"
+                        for info in expansion.values()),
+                )
+                read_only_reviews = [
+                    info for info in expansion.values()
+                    if info["class_type"] == "EagleH3CheckpointReviewNode"
+                ]
+                self.assertEqual(1, len(read_only_reviews))
+                self.assertIs(True, read_only_reviews[0]["inputs"]["read_only"])
+                self.assertFalse(any(
+                    str(node_id).endswith(".29") for node_id in expansion
+                ))
+
+                for node_id, node_info in expansion.items():
+                    dynprompt.add_ephemeral_node(
+                        node_id, node_info, parent_id=end_id,
+                        display_id=node_info.get("override_display_id", end_id),
+                    )
+                start_id = next(
+                    node_id for node_id, info in expansion.items()
+                    if info["class_type"] == "EagleH3NativeLoopStartNode"
+                )
+                end_id = next(
+                    node_id for node_id, info in expansion.items()
+                    if info["class_type"] == "EagleH3NativeLoopEndNode"
+                )
+                flow = expansion[end_id]["inputs"]["flow"]
+                self.assertEqual("33", dynprompt.get_display_node_id(start_id))
+                self.assertEqual("29", dynprompt.get_display_node_id(end_id))
+        finally:
+            h3_nodes.GraphBuilder.set_default_prefix(*original_prefix)
+            for name, previous in previous_mappings.items():
+                if previous is None:
+                    comfy_nodes.NODE_CLASS_MAPPINGS.pop(name, None)
+                else:
+                    comfy_nodes.NODE_CLASS_MAPPINGS[name] = previous
+
     def test_native_end_expands_body_in_auto_mode(self):
         state = self._init_state(_sample_plan())
 
@@ -272,6 +594,65 @@ class H3ChainTests(unittest.TestCase):
         classes = {item["class_type"] for item in result["expand"].values()}
         self.assertIn("EagleH3NativeLoopStartNode", classes)
         self.assertIn("EagleH3NativeLoopEndNode", classes)
+
+    def test_interactive_native_end_approve_retry_and_stop_contract(self):
+        class FakeDynPrompt:
+            nodes = {
+                "1": {"class_type": "EagleH3DirectorNode", "inputs": {}},
+                "2": {
+                    "class_type": "EagleH3NativeLoopStartNode",
+                    "inputs": {"plan": ["1", 0], "start_index": 1},
+                },
+                "3": {
+                    "class_type": "EagleH3ShotContextNode",
+                    "inputs": {"state": ["2", 1]},
+                },
+                "4": {
+                    "class_type": "EagleH3NativeLoopEndNode",
+                    "inputs": {"flow": ["2", 0], "state": ["3", 0]},
+                },
+            }
+
+            def get_node(self, node_id):
+                return self.nodes[str(node_id)]
+
+            def get_display_node_id(self, node_id):
+                return str(node_id)
+
+        def run(decision):
+            state = self._init_state(_sample_plan())
+            state["mode"] = "interactive"
+            h3_nodes.GraphBuilder.set_default_prefix("interactive-end", 0, 0)
+            return EagleH3NativeLoopEndNode().execute(
+                ["2", 0], state,
+                images=torch.zeros((24, 8, 8, 3), dtype=torch.float32),
+                sampled_latent={"samples": [
+                    torch.zeros((1, 16, 3, 2, 2)),
+                    torch.zeros((1, 32, 2, 8)),
+                ]},
+                decision=decision,
+                dynprompt=FakeDynPrompt(), unique_id="4",
+            )
+
+        approved = run("approve")
+        approved_start = next(
+            item for item in approved["expand"].values()
+            if item["class_type"] == "EagleH3NativeLoopStartNode"
+        )
+        self.assertEqual(1, approved_start["inputs"]["initial_state"]["current_index"])
+
+        retried = run("retry")
+        retried_start = next(
+            item for item in retried["expand"].values()
+            if item["class_type"] == "EagleH3NativeLoopStartNode"
+        )
+        self.assertEqual(0, retried_start["inputs"]["initial_state"]["current_index"])
+        self.assertEqual(0, retried_start["inputs"]["initial_state"]["reroll_index"])
+
+        stopped = run("stop")
+        self.assertNotIn("expand", stopped)
+        self.assertTrue(stopped["result"][2])
+        self.assertTrue(stopped["result"][6])
 
     def test_plan_preflight_reports_invalid_reference_tag(self):
         project = {
@@ -1301,6 +1682,23 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(state["current_index"], 1)
         self.assertTrue(loop_again)
 
+    def test_end_clamps_final_next_index_and_reports_exact_counts(self):
+        state = self._init_state(_sample_plan())
+        state["current_index"] = 1
+        h3_state.save_state(state)
+        out = EagleH3EndNode().execute(state, "approve")
+        state, done, next_index, loop_again, summary = out["result"]
+        payload = out["ui"]["h3_loop"][0]
+        self.assertTrue(done)
+        self.assertFalse(loop_again)
+        self.assertEqual(2, state["current_index"])
+        self.assertEqual(2, next_index)
+        self.assertEqual(1, payload["processed_index"])
+        self.assertEqual(2, payload["current_index"])
+        self.assertEqual(2, payload["next_index"])
+        self.assertEqual(2, payload["total_shots"])
+        self.assertNotIn("3/2", summary)
+
     def test_end_stops(self):
         plan = _sample_plan()
         out = EagleH3PlanNode().execute(plan, output_dir=str(self.tmpdir), resume_policy="overwrite")
@@ -1573,6 +1971,8 @@ class H3ChainTests(unittest.TestCase):
     def test_native_end_carries_compact_av_latent_and_frame_tail(self):
         state = self._init_state(_sample_plan())
         state["mode"] = "interactive"
+        # 只验证最后一镜的运行态交接，避免在本测试重复搭建动态图。
+        state["total_shots"] = 1
         images = torch.arange(30 * 2 * 2 * 3, dtype=torch.float32).reshape(
             30, 2, 2, 3
         )
@@ -1584,7 +1984,7 @@ class H3ChainTests(unittest.TestCase):
         result = EagleH3NativeLoopEndNode().execute(
             ["2", 0], state, images, latent, decision="approve"
         )
-        carried = result[0]
+        carried = result["result"][0]
         self.assertEqual(22, carried["previous_frames"].shape[0])
         self.assertEqual(2, len(carried["previous_latent"]["samples"]))
         self.assertTrue(carried["previous_frames"].device.type == "cpu")
@@ -1611,21 +2011,24 @@ class H3ChainTests(unittest.TestCase):
         self.assertTrue(out_path.exists())
 
     def test_assemble_with_fake_clips(self):
-        # 创建两个假 clip
+        # CPU 生成两个真实可解码片段，帧率与计划一致；完整装配必须成功。
         for i in range(2):
             frames = np.full((5, 32, 32, 3), 128, dtype=np.uint8)
             shot_dir = self.tmpdir / "shots" / f"shot_{i+1:02d}"
             shot_dir.mkdir(parents=True)
-            media_utils.frames_to_video(frames, str(shot_dir / "clip.mp4"), fps=5)
+            media_utils.frames_to_video(frames, str(shot_dir / "clip.mp4"), fps=24)
         plan = _sample_plan()
+        for planned_shot in plan["shots"]:
+            planned_shot["delivered_frames"] = 5
         state = h3_state.init_state(plan, str(self.tmpdir), resume_policy="overwrite")
         h3_state.record_shot_result(
             state, str(self.tmpdir / "shots" / "shot_01" / "clip.mp4"),
-            delivered_frames=5, decision="approved", meta={"fps": 5}
+            delivered_frames=5, decision="approved", meta={"fps": 24}
         )
+        state["current_index"] = 1
         h3_state.record_shot_result(
             state, str(self.tmpdir / "shots" / "shot_02" / "clip.mp4"),
-            delivered_frames=5, decision="approved", meta={"fps": 5}
+            delivered_frames=5, decision="approved", meta={"fps": 24}
         )
         h3_state.save_state(state)
         out, summary = EagleH3AssembleNode().execute(state)
@@ -1646,6 +2049,93 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual("test_run_0001.mp4", pathlib.Path(first_copy).name)
         self.assertEqual("test_run_0002.mp4", pathlib.Path(second_copy).name)
         self.assertTrue(pathlib.Path(first_copy).exists())
+
+    def test_assemble_rejects_missing_and_undecodable_planned_scenes(self):
+        plan = _sample_plan()
+        for planned_shot in plan["shots"]:
+            planned_shot["delivered_frames"] = 5
+        state = h3_state.init_state(plan, str(self.tmpdir), resume_policy="overwrite")
+        first_clip = self.tmpdir / "first.mp4"
+        media_utils.frames_to_video(
+            np.full((5, 32, 32, 3), 128, dtype=np.uint8), str(first_clip), fps=5
+        )
+        h3_state.record_shot_result(
+            state, str(first_clip), delivered_frames=5, decision="approved"
+        )
+        video, status = EagleH3AssembleNode().execute(state)
+        self.assertFalse(video)
+        self.assertIn("场景 2", status)
+        self.assertFalse((pathlib.Path(state["base_dir"]) / "final").exists())
+
+        state["current_index"] = 1
+        second_clip = self.tmpdir / "broken.mp4"
+        second_clip.write_bytes(b"not a decodable video")
+        h3_state.record_shot_result(
+            state, str(second_clip), delivered_frames=5, decision="approved"
+        )
+        video, status = EagleH3AssembleNode().execute(state)
+        self.assertFalse(video)
+        self.assertIn("无法解码计帧", status)
+
+    def test_stale_manifest_revision_and_atomic_saver_numbering_do_not_overwrite(self):
+        from eagle_suite_test_package.eagle_suite.advanced_video_saver import EagleAdvancedVideoSaver
+
+        shot_dir = self.tmpdir / "shots" / "shot_01"
+        shot_dir.mkdir(parents=True)
+        old_take = shot_dir / "clip_r0001.mp4"
+        old_take.write_bytes(b"existing user take")
+        revision, reserved = h3_nodes._reserve_shot_revision(shot_dir, {"shots": []}, 0)
+        self.assertEqual(2, revision)
+        self.assertEqual(b"existing user take", old_take.read_bytes())
+        self.assertTrue(pathlib.Path(reserved).exists())
+
+        output_dir = self.tmpdir / "advanced"
+        output_dir.mkdir()
+        (output_dir / "video_00001.mp4").write_bytes(b"existing video")
+        (output_dir / "video_00002.json").write_text("{}", encoding="utf-8")
+        first_counter, _, first_path = EagleAdvancedVideoSaver._reserve_output_path(
+            output_dir, "video", "mp4"
+        )
+        second_counter, _, second_path = EagleAdvancedVideoSaver._reserve_output_path(
+            output_dir, "video", "mp4"
+        )
+        self.assertEqual((3, 4), (first_counter, second_counter))
+        self.assertNotEqual(first_path, second_path)
+        self.assertEqual(b"existing video", (output_dir / "video_00001.mp4").read_bytes())
+
+    def test_advanced_saver_commits_complete_video_to_own_reserved_name(self):
+        from eagle_suite_test_package.eagle_suite.advanced_video_saver import EagleAdvancedVideoSaver
+
+        output_dir = self.tmpdir / "actual_advanced_save"
+        output_dir.mkdir()
+        original = output_dir / "video_00001.mp4"
+        original.write_bytes(b"existing user video")
+        result = EagleAdvancedVideoSaver().save_video(
+            "", str(output_dir), "video", 5, "mp4", "h264", "high", 0,
+            preview=False, images=torch.zeros((3, 32, 32, 3)),
+        )
+        saved_path = pathlib.Path(result["result"][3])
+        self.assertEqual("video_00002.mp4", saved_path.name)
+        self.assertGreater(saved_path.stat().st_size, 0)
+        self.assertEqual(3, media_utils.probe_decoded_frame_count(saved_path))
+        self.assertEqual(b"existing user video", original.read_bytes())
+
+    def test_native_end_terminal_missing_take_is_not_marked_complete(self):
+        state = self._init_state(_sample_plan())
+        state["current_index"] = 1
+        latent = {"samples": [
+            torch.zeros((1, 16, 2, 2, 2)),
+            torch.zeros((1, 32, 2, 4)),
+        ]}
+        result = EagleH3NativeLoopEndNode().execute(
+            "flow", state, torch.zeros((1, 8, 8, 3)), latent,
+            decision="approve", auto_assemble=False,
+        )
+        final_state = result["result"][0]
+        self.assertTrue(result["result"][2])  # loop terminated; output not verified
+        self.assertEqual("incomplete", final_state["manifest_status"])
+        self.assertEqual("incomplete", h3_state.load_state(state["base_dir"])["manifest_status"])
+        self.assertIn("未标记完成", result["result"][4])
 
     def test_combined_nodes_use_native_video_contract(self):
         self.assertEqual("EAGLE_H3_STATE", EagleH3ShotContextNode.RETURN_TYPES[0])
@@ -1709,6 +2199,45 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(240, overlap.shape[0])
         self.assertEqual(0, overlap_frames)
         self.assertEqual(10000, synced["waveform"].shape[-1])
+
+
+class H3ReviewSafetyTests(unittest.TestCase):
+    def test_completed_resume_does_not_silently_resample_last_scene(self):
+        state = {"plan": _sample_plan(), "current_index": 2, "total_shots": 2, "shots": []}
+        with self.assertRaisesRegex(ValueError, "已全部完成"):
+            EagleH3StartNode().execute(state)
+        self.assertEqual(state["current_index"], 2)
+
+    def test_read_only_history_never_saves_or_waits(self):
+        from unittest.mock import patch
+        state = {"plan": _sample_plan(), "current_index": 0, "total_shots": 2,
+                 "mode": "interactive", "shots": []}
+        with patch.object(h3_nodes.EagleH3SegmentCheckpointNode, "execute") as save:
+            with patch.object(h3_nodes.EagleH3ReviewGateNode, "execute") as review:
+                out = asyncio.run(h3_nodes.EagleH3CheckpointReviewNode().execute(state, read_only=True))
+        save.assert_not_called()
+        review.assert_not_called()
+        self.assertEqual(out["ui"]["h3_review"][0]["mode"], "history")
+        self.assertEqual(out["result"][2], "")
+        self.assertEqual(state["current_index"], 0)
+
+    def test_checkpoint_failure_raises_before_review_or_advance(self):
+        from unittest.mock import patch
+        state = {"plan": _sample_plan(), "current_index": 0, "total_shots": 2, "shots": []}
+        with patch.object(h3_nodes.EagleH3SegmentCheckpointNode, "execute", return_value=("", state, "disk full")):
+            with self.assertRaisesRegex(RuntimeError, "不推进"):
+                asyncio.run(h3_nodes.EagleH3CheckpointReviewNode().execute(state))
+        with self.assertRaisesRegex(ValueError, "不推进"):
+            h3_state.advance(state, "error")
+        self.assertEqual(state["current_index"], 0)
+
+    def test_resume_drops_stale_runtime_context(self):
+        state = {"current_index": 3, "total_shots": 4, "shots": [],
+                 "previous_frames": "scene3", "previous_latent": "scene3"}
+        h3_state.restore_from_scene(state, 2)
+        self.assertEqual(state["current_index"], 1)
+        self.assertNotIn("previous_frames", state)
+        self.assertNotIn("previous_latent", state)
 
 
 if __name__ == "__main__":

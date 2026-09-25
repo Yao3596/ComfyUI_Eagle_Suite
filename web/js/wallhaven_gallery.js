@@ -12,14 +12,16 @@
  * 直接从 widget kwarg 读取，不走服务端全局缓存，与 Eagle/Pinterest 不同）。
  */
 import { app } from "../../../scripts/app.js";
-import { createApp, reactive, ref, onMounted } from "../lib/vue.esm-browser.js";
+import { createApp, reactive, ref, onMounted, onBeforeUnmount } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 
 const PAGE_SIZE = 24;
 
 const CSS = `
-.whg-root{display:flex;flex-direction:column;width:100%;height:100%;background:#1a1a1e;font-size:12px;color:#ddd;box-sizing:border-box;font-family:sans-serif;overflow:hidden}
-.whg-preview{display:flex;gap:6px;padding:8px 10px;background:#1e1e22;border-bottom:1px solid #333;min-height:70px;max-height:90px;overflow-x:auto;overflow-y:hidden;flex-shrink:0}
+.whg-root{position:relative;display:flex;flex-direction:column;width:100%;height:100%;background:#1a1a1e;font-size:12px;color:#ddd;box-sizing:border-box;font-family:sans-serif;overflow:hidden}
+.whg-preview{display:flex;gap:6px;padding:8px 10px;background:#1e1e22;border-bottom:1px solid #333;min-height:56px;max-height:none;overflow-x:auto;overflow-y:hidden;flex-shrink:0;box-sizing:border-box}
+.whg-resizer-row{height:7px;flex:0 0 7px;margin-top:-7px;z-index:30;cursor:row-resize;background:transparent;touch-action:none;user-select:none}
+.whg-resizer-row:hover{background:rgba(74,125,224,.35)}
 .whg-preview::-webkit-scrollbar{height:4px}
 .whg-preview::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
 .whg-preview-thumb{flex-shrink:0;width:80px;height:60px;border-radius:4px;overflow:hidden;border:1px solid #444;position:relative;background:#25252a}
@@ -148,6 +150,116 @@ const WallhavenGalleryApp = {
         const isSettingsOpen = ref(false);
         const apiKey = ref(localStorage.getItem("wallhaven_api_key") || "");
         const savedKeyHint = ref("");
+        const rootEl = ref(null);
+        const previewHeight = ref(72);
+        const previewRatio = ref(0.12);
+        let activeDragCleanup = null;
+        let layoutResizeObserver = null;
+
+        function clampLayoutValue(value, min, max) {
+            return Math.max(min, Math.min(max, Number(value) || min));
+        }
+
+        function availableLayoutHeight() {
+            const mountedHeight = Number(rootEl.value?.clientHeight);
+            return Math.max(300, mountedHeight || (Number(node.size?.[1]) || 720) - 120);
+        }
+
+        function persistSplitLayout(notifyGraph) {
+            const height = availableLayoutHeight();
+            previewRatio.value = clampLayoutValue(previewHeight.value / height, 0.08, 0.48);
+            node.properties ||= {};
+            node.properties.eagle_wallhaven_split_layout = {
+                version: 1,
+                preview_ratio: Number(previewRatio.value.toFixed(5)),
+            };
+            node.setDirtyCanvas?.(true, true);
+            if (notifyGraph) node.graph?.change?.();
+        }
+
+        function applySplitLayout() {
+            const height = availableLayoutHeight();
+            previewHeight.value = clampLayoutValue(
+                height * previewRatio.value,
+                56,
+                Math.max(56, Math.min(280, height - 220)),
+            );
+        }
+
+        function restoreSplitLayout() {
+            const saved = node.properties?.eagle_wallhaven_split_layout;
+            if (saved && Number(saved.version) >= 1 && Number.isFinite(Number(saved.preview_ratio))) {
+                previewRatio.value = clampLayoutValue(saved.preview_ratio, 0.08, 0.48);
+            }
+            applySplitLayout();
+        }
+
+        node._eagleRestoreSplitLayout = restoreSplitLayout;
+
+        function beginPreviewResize(event) {
+            if (event.pointerType !== "touch" && event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            activeDragCleanup?.();
+
+            const target = event.currentTarget;
+            const pointerId = event.pointerId;
+            const startY = event.clientY;
+            const startHeight = previewHeight.value;
+            const previousCursor = document.body.style.cursor;
+            const previousUserSelect = document.body.style.userSelect;
+            document.body.style.cursor = "row-resize";
+            document.body.style.userSelect = "none";
+            target.setPointerCapture?.(pointerId);
+
+            const onMove = (moveEvent) => {
+                if (moveEvent.pointerId !== pointerId) return;
+                moveEvent.preventDefault();
+                moveEvent.stopPropagation();
+                const height = availableLayoutHeight();
+                previewHeight.value = clampLayoutValue(
+                    startHeight + moveEvent.clientY - startY,
+                    56,
+                    Math.max(56, Math.min(280, height - 220)),
+                );
+                persistSplitLayout(false);
+            };
+
+            const finish = (finishEvent) => {
+                if (finishEvent && finishEvent.pointerId !== pointerId) return;
+                target.removeEventListener("pointermove", onMove);
+                target.removeEventListener("pointerup", finish);
+                target.removeEventListener("pointercancel", finish);
+                target.removeEventListener("lostpointercapture", finish);
+                if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+                document.body.style.cursor = previousCursor;
+                document.body.style.userSelect = previousUserSelect;
+                if (activeDragCleanup === finish) activeDragCleanup = null;
+                persistSplitLayout(true);
+            };
+
+            activeDragCleanup = finish;
+            target.addEventListener("pointermove", onMove);
+            target.addEventListener("pointerup", finish);
+            target.addEventListener("pointercancel", finish);
+            target.addEventListener("lostpointercapture", finish);
+        }
+
+        function nudgePreviewHeight(event) {
+            let delta = 0;
+            if (event.key === "ArrowUp") delta = -16;
+            else if (event.key === "ArrowDown") delta = 16;
+            else return;
+            event.preventDefault();
+            event.stopPropagation();
+            const height = availableLayoutHeight();
+            previewHeight.value = clampLayoutValue(
+                previewHeight.value + delta,
+                56,
+                Math.max(56, Math.min(280, height - 220)),
+            );
+            persistSplitLayout(true);
+        }
 
         function proxied(url) {
             return url ? "/wallhaven_gallery/image_proxy?url=" + encodeURIComponent(url) : "";
@@ -299,7 +411,22 @@ const WallhavenGalleryApp = {
 
         onMounted(() => {
             restoreSelection();
+            restoreSplitLayout();
+            if (typeof ResizeObserver === "function" && rootEl.value) {
+                layoutResizeObserver = new ResizeObserver(() => {
+                    if (!activeDragCleanup) applySplitLayout();
+                });
+                layoutResizeObserver.observe(rootEl.value);
+            }
             search();
+        });
+
+        onBeforeUnmount(() => {
+            activeDragCleanup?.();
+            layoutResizeObserver?.disconnect();
+            layoutResizeObserver = null;
+            if (node._eagleRestoreUiState === restoreSelection) node._eagleRestoreUiState = null;
+            if (node._eagleRestoreSplitLayout === restoreSplitLayout) node._eagleRestoreSplitLayout = null;
         });
 
         return {
@@ -311,12 +438,13 @@ const WallhavenGalleryApp = {
             proxied, toggleDropdown, toggleSet, doSearch, onFilterChange, onSortChange,
             prevPage, nextPage, toggleSelect, removeSelection, clearSelection,
             openSettings, saveSettings, totalPages,
+            rootEl, previewHeight, beginPreviewResize, nudgePreviewHeight,
         };
     },
     template: `
-    <div class="whg-root" @click="openDropdown = ''">
+    <div ref="rootEl" class="whg-root" @click="openDropdown = ''">
         <!-- 预览条 -->
-        <div class="whg-preview">
+        <div class="whg-preview" :style="{height: previewHeight + 'px'}">
             <template v-if="selectedItems.length === 0">
                 <div class="whg-preview-empty">选中图片将显示在这里</div>
             </template>
@@ -328,6 +456,8 @@ const WallhavenGalleryApp = {
                 <button class="whg-btn" style="flex-shrink:0;height:60px;align-self:center;margin-left:4px" @click.stop="clearSelection">清除</button>
             </template>
         </div>
+        <div class="whg-resizer-row" role="separator" tabindex="0" aria-orientation="horizontal"
+             title="拖拽调整预览区高度" @pointerdown="beginPreviewResize" @keydown="nudgePreviewHeight"></div>
 
         <!-- 工具栏 -->
         <div class="whg-header" @click.stop>
@@ -445,22 +575,39 @@ app.registerExtension({
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "WallhavenGalleryNode") return;
 
+        const inputDefs = nodeData?.input || nodeData?.inputs;
+        for (const groupName of ["required", "optional"]) {
+            const definition = inputDefs?.[groupName]?.selection_data;
+            if (!Array.isArray(definition)) continue;
+            definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+        }
+
+        const hideSel = (node) => {
+            const w = node.widgets?.find(x => x.name === "selection_data");
+            if (!w) return false;
+            w.type = "hidden";
+            w.options ||= {};
+            Object.assign(w.options, { hidden: true, vueNode: "never", hideInPanel: true });
+            w.computeSize = () => [0, -4];
+            w.hidden = true;
+            w.draw = () => {};
+            const widgetIndex = node.widgets?.indexOf(w) ?? -1;
+            if (widgetIndex >= 0) node.widgets.splice(widgetIndex, 1, w);
+            node.setDirtyCanvas(true, true);
+            return true;
+        };
+
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             onNodeCreated?.apply(this, arguments);
-            this.setSize([900, 760]);
-
-            const hideSel = (node) => {
-                const w = node.widgets?.find(x => x.name === "selection_data");
-                if (!w) return false;
-                w.type = "hidden";
-                w.computeSize = () => [0, -4];
-                w.hidden = true;
-                w.draw = () => {};
-                node.setDirtyCanvas(true, true);
-                return true;
-            };
-            setTimeout(() => { if (!hideSel(this)) setTimeout(() => hideSel(this), 500); }, 300);
+            if (!this.size || Number(this.size[0]) < 480 || Number(this.size[1]) < 260) {
+                this.setSize([960, 720]);
+            }
+            hideSel(this);
+            const hideNode = this;
+            setTimeout(() => hideSel(hideNode), 0);
+            setTimeout(() => hideSel(hideNode), 250);
+            setTimeout(() => hideSel(hideNode), 500);
 
             if (!document.getElementById("whg-style")) {
                 const style = document.createElement("style");
@@ -470,16 +617,29 @@ app.registerExtension({
             }
 
             const container = document.createElement("div");
-            container.style.cssText = "width:880px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;";
-            const widget = this.addDOMWidget("wallhaven_gallery", "div", container, { serialize: false, canvasOnly: true });
+            container.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;";
+            const INITIAL_VIEWPORT_HEIGHT = 600;
+            const MIN_VIEWPORT_HEIGHT = 300;
+            let currentViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+            const MAX_VIEWPORT_HEIGHT = 4096;
+            const widget = this.addDOMWidget("wallhaven_gallery", "div", container, {
+                serialize: false, hideInPanel: true,
+                getMinHeight: () => MIN_VIEWPORT_HEIGHT,
+                getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
+                getHeight: () => currentViewportHeight,
+            });
             widget.width = undefined;
+            widget._eagleViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+            // Preserve DOMWidgetImpl.computeLayoutSize so both canvas renderers
+            // allocate this gallery as the growable part of the node body.
             this._whgContainer = container;
 
             const applyFrame = (size) => {
-                const nodeWidth = Number(size?.[0]) || 900;
-                const nodeHeight = Number(size?.[1]) || 760;
+                const nodeWidth = Number(size?.[0]) || 960;
                 const width = Math.max(320, nodeWidth - 20);
-                const height = Math.max(400, nodeHeight - 100);
+                const height = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, (Number(size?.[1]) || 720) - 120));
+                currentViewportHeight = height;
+                widget._eagleViewportHeight = height;
                 container.style.width = width + "px";
                 container.style.height = height + "px";
                 const host = container.parentElement;
@@ -512,6 +672,10 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             const result = onConfigure?.apply(this, arguments);
+            hideSel(this);
+            const node = this;
+            setTimeout(() => hideSel(node), 0);
+            setTimeout(() => hideSel(node), 250);
             // ComfyUI 1.49 can drop this input from positional widgets_values
             // when the DOM widget is present.  The named map remains stable.
             if (info?.widgets_values_named && Object.prototype.hasOwnProperty.call(info.widgets_values_named, "selection_data")) {
@@ -520,6 +684,7 @@ app.registerExtension({
             }
             requestAnimationFrame(() => {
                 this._whgApplyFrame?.(this.size);
+                this._eagleRestoreSplitLayout?.();
                 this._eagleRestoreUiState?.();
             });
             return result;
@@ -531,6 +696,7 @@ app.registerExtension({
             this._whgApplyFrame = null;
             this._whgContainer = null;
             this._eagleRestoreUiState = null;
+            this._eagleRestoreSplitLayout = null;
             onRemoved?.apply(this, arguments);
         };
     },

@@ -37,6 +37,8 @@ from .h3_review_workspace import (
     NODE_CLASS_MAPPINGS_H3_REVIEW_SVELTE,
     NODE_DISPLAY_NAME_MAPPINGS_H3_REVIEW_SVELTE,
 )
+from .svelte_character_interaction import EagleSvelteCharacterInteractionNode
+from .svelte_character_pv import EagleSvelteCharacterPVNode
 from .director_skill_node import EagleDirectorSkillNode
 from .memory_node import EagleMemoryReleaseNode
 
@@ -90,6 +92,8 @@ NODE_CLASS_MAPPINGS = {
     "EagleH3DirectorNode": EagleH3DirectorNode,
     "EagleH3MediaBridgeNode": EagleH3MediaBridgeNode,
     "EagleH3PVCreativeCardsNode": EagleH3PVCreativeCardsNode,
+    "EagleSvelteCharacterInteractionNode": EagleSvelteCharacterInteractionNode,
+    "EagleSvelteCharacterPVNode": EagleSvelteCharacterPVNode,
     "EagleDirectorSkillNode": EagleDirectorSkillNode,
     "EagleMemoryReleaseNode": EagleMemoryReleaseNode,
 
@@ -154,6 +158,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleH3DirectorNode": "🦅 H3 导演台",
     "EagleH3MediaBridgeNode": "🦅 H3 标准媒体桥",
     "EagleH3PVCreativeCardsNode": "🦅 H3 · PV 创意抽卡",
+    "EagleSvelteCharacterInteractionNode": "🦅 Svelte · 角色动态交互",
+    "EagleSvelteCharacterPVNode": "🦅 Svelte · 角色 PV 动效规划器",
     "EagleDirectorSkillNode": "🦅 导演技能库",
     "EagleMemoryReleaseNode": "🦅 模型显存释放",
     # Danbooru
@@ -236,6 +242,8 @@ _CATEGORY_GROUPS = {
         EagleH3DirectorNode,
         EagleH3MediaBridgeNode,
         EagleH3PVCreativeCardsNode,
+        EagleSvelteCharacterInteractionNode,
+        EagleSvelteCharacterPVNode,
         EagleDirectorSkillNode,
         *tuple(NODE_CLASS_MAPPINGS_H3PIPELINE.values()),
     ),

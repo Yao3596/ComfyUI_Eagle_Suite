@@ -202,13 +202,28 @@ function scheduleRefresh() {
   requestAnimationFrame(refreshEagleVueTheme);
 }
 
+function mutationAddsEagleRoot(records) {
+  for (const record of records) {
+    for (const added of record.addedNodes || []) {
+      if (added.nodeType !== 1) continue;
+      if (added.matches?.(ROOT_SELECTOR) || added.querySelector?.(ROOT_SELECTOR)) return true;
+    }
+  }
+  return false;
+}
+
 function startThemeBridge() {
   injectThemeStyle();
   scheduleRefresh();
   const paletteObserver = new MutationObserver(scheduleRefresh);
   paletteObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-color-palette"] });
   if (document.body) paletteObserver.observe(document.body, { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-color-palette"] });
-  const mountObserver = new MutationObserver(scheduleRefresh);
+  // Galleries add many cards while scrolling. Rechecking every Eagle root for
+  // each child mutation needlessly taxes the whole ComfyUI page; only a newly
+  // mounted Eagle root needs the palette class applied.
+  const mountObserver = new MutationObserver((records) => {
+    if (mutationAddsEagleRoot(records)) scheduleRefresh();
+  });
   if (document.body) mountObserver.observe(document.body, { childList: true, subtree: true });
   window.addEventListener("storage", scheduleRefresh);
   // The legacy settings API does not emit a public palette-change event.

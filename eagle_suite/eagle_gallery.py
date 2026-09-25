@@ -1006,11 +1006,13 @@ class EagleGalleryNode:
             try:
                 data = json.loads(selection_data)
                 selections = data.get("selections", [])
+                output_mode = data.get("output_mode", "rgb")
+                sequence_index = data.get("sequence_index", 0)
                 with _selection_cache_lock:
                     _selection_cache[node_id] = {
                         "selections": selections,
-                        "output_mode": data.get("output_mode", "rgb"),
-                        "sequence_index": data.get("sequence_index", 0),
+                        "output_mode": output_mode,
+                        "sequence_index": sequence_index,
                     }
                 logger.info(f"[EagleGallery] 内存缓存丢失，从节点属性恢复了 {len(selections)} 个选中项")
             except (TypeError, ValueError, json.JSONDecodeError):

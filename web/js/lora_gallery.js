@@ -4,6 +4,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, onMounted, onBeforeUnmount } from "../lib/vue.esm-browser.js";
+import { redactSecretWidgetFromWorkflow } from "./workflow_secret_redaction.js";
 import "./eagle_vue_theme.js";
 
 // ============================================================
@@ -107,6 +108,8 @@ var LoraGallery = {
     var manualTriggers = ref("");
     var sideWidth = ref(160);
     var selectedWidth = ref(200);
+    var sideRatio = ref(0.17);
+    var selectedRatio = ref(0.22);
     var collapseStorageKey = "eagle_lora_gallery_collapsed_" + String(props.node.id);
     var galleryCollapsed = ref(localStorage.getItem(collapseStorageKey) === "1");
     var showQuickPicker = ref(false);
@@ -118,6 +121,9 @@ var LoraGallery = {
     var quickHoverItem = ref(null);
     var quickLoaded = false;
     var documentClickHandler = null;
+    var activeDragCleanup = null;
+    var layoutResizeObserver = null;
+    var restoreTimer = null;
     var autoPreviewEnabled = ref(localStorage.getItem("eagle_lora_auto_preview") !== "0");
     var autoPreviewQueue = [];
     var autoPreviewQueued = {};
@@ -320,6 +326,14 @@ var LoraGallery = {
       syncSelection();
     }
 
+    function civitaiRequestOptions() {
+      var key = String(apiKey.value || "").trim();
+      return {
+        cache: "no-store",
+        headers: key ? { "X-Eagle-Civitai-Key": key } : {}
+      };
+    }
+
     function toggleEnabled(id) {
       enabledMap.value[id] = enabledMap.value[id] === false;
       syncSelection();
@@ -456,7 +470,7 @@ var LoraGallery = {
       detailsError.value = "";
       detailsLoading.value = true;
       showDetails.value = true;
-      fetchJson("/lora_gallery/model_details?id=" + encodeURIComponent(item.id) + "&api_key=" + encodeURIComponent(apiKey.value))
+      fetchJson("/lora_gallery/model_details?id=" + encodeURIComponent(item.id), civitaiRequestOptions())
         .then(function(d) {
           detailsLoading.value = false;
           if (!d.success) {
@@ -574,7 +588,7 @@ var LoraGallery = {
     }
 
     function refreshCivitaiWords(id) {
-      fetch("/lora_gallery/civitai_info?id=" + encodeURIComponent(id) + "&api_key=" + encodeURIComponent(apiKey.value))
+      fetch("/lora_gallery/civitai_info?id=" + encodeURIComponent(id), civitaiRequestOptions())
         .then(function(r) { return r.json(); })
         .then(function(d) {
           if (d.success) {
@@ -681,23 +695,112 @@ var LoraGallery = {
       });
     }
 
-    function makeDragHandler(axis, refVar, min, max, invert) {
+    function clampLayoutValue(value, min, max) {
+      return Math.max(min, Math.min(max, Number(value) || min));
+    }
+
+    function availableLayoutWidth() {
+      var mountedWidth = Number(rootElRef?.clientWidth);
+      return Math.max(400, mountedWidth || (Number(props.node.size?.[0]) || 960) - 20);
+    }
+
+    function persistSplitLayout(notifyGraph) {
+      var total = availableLayoutWidth();
+      sideRatio.value = clampLayoutValue(sideWidth.value / total, 0.10, 0.45);
+      selectedRatio.value = clampLayoutValue(selectedWidth.value / total, 0.14, 0.50);
+      props.node.properties = props.node.properties || {};
+      props.node.properties.eagle_lora_split_layout = {
+        version: 1,
+        side_ratio: Number(sideRatio.value.toFixed(5)),
+        selected_ratio: Number(selectedRatio.value.toFixed(5)),
+      };
+      props.node.setDirtyCanvas?.(true, true);
+      if (notifyGraph) props.node.graph?.change?.();
+    }
+
+    function applySplitLayout() {
+      var total = availableLayoutWidth();
+      var mainMin = 180;
+      var nextSide = clampLayoutValue(total * sideRatio.value, 90, Math.max(90, total - selectedWidth.value - mainMin));
+      var nextSelected = clampLayoutValue(total * selectedRatio.value, 130, Math.max(130, total - nextSide - mainMin));
+      sideWidth.value = nextSide;
+      selectedWidth.value = nextSelected;
+    }
+
+    function restoreSplitLayout() {
+      var saved = props.node.properties?.eagle_lora_split_layout;
+      if (saved && Number(saved.version) >= 1) {
+        if (Number.isFinite(Number(saved.side_ratio))) sideRatio.value = clampLayoutValue(saved.side_ratio, 0.10, 0.45);
+        if (Number.isFinite(Number(saved.selected_ratio))) selectedRatio.value = clampLayoutValue(saved.selected_ratio, 0.14, 0.50);
+      }
+      applySplitLayout();
+    }
+
+    props.node._eagleRestoreSplitLayout = restoreSplitLayout;
+
+    function makePointerDragHandler(axis, refVar, getBounds, invert) {
       return function(e) {
+        if (e.pointerType !== "touch" && e.button !== 0) return;
         e.preventDefault();
+        e.stopPropagation();
+        activeDragCleanup?.();
+
+        var target = e.currentTarget;
+        var pointerId = e.pointerId;
         var start = axis === "x" ? e.clientX : e.clientY;
         var startVal = refVar.value;
+        var previousCursor = document.body.style.cursor;
+        var previousUserSelect = document.body.style.userSelect;
+        document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
+        document.body.style.userSelect = "none";
+        target.setPointerCapture?.(pointerId);
+
         function onMove(ev) {
+          if (ev.pointerId !== pointerId) return;
+          ev.preventDefault();
+          ev.stopPropagation();
           var delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
           if (invert) delta = -delta;
-          var next = startVal + delta;
-          refVar.value = Math.max(min, Math.min(max, next));
+          var bounds = getBounds();
+          refVar.value = clampLayoutValue(startVal + delta, bounds[0], bounds[1]);
+          persistSplitLayout(false);
         }
-        function onUp() {
-          document.removeEventListener("mousemove", onMove);
-          document.removeEventListener("mouseup", onUp);
+
+        function finish(ev) {
+          if (ev && ev.pointerId !== pointerId) return;
+          target.removeEventListener("pointermove", onMove);
+          target.removeEventListener("pointerup", finish);
+          target.removeEventListener("pointercancel", finish);
+          target.removeEventListener("lostpointercapture", finish);
+          if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+          document.body.style.cursor = previousCursor;
+          document.body.style.userSelect = previousUserSelect;
+          if (activeDragCleanup === finish) activeDragCleanup = null;
+          persistSplitLayout(true);
         }
-        document.addEventListener("mousemove", onMove);
-        document.addEventListener("mouseup", onUp);
+
+        activeDragCleanup = finish;
+        target.addEventListener("pointermove", onMove);
+        target.addEventListener("pointerup", finish);
+        target.addEventListener("pointercancel", finish);
+        target.addEventListener("lostpointercapture", finish);
+      };
+    }
+
+    function makeKeyboardResizeHandler(axis, refVar, getBounds, invert) {
+      return function(e) {
+        var delta = 0;
+        if (axis === "x" && e.key === "ArrowLeft") delta = -16;
+        else if (axis === "x" && e.key === "ArrowRight") delta = 16;
+        else if (axis === "y" && e.key === "ArrowUp") delta = -16;
+        else if (axis === "y" && e.key === "ArrowDown") delta = 16;
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (invert) delta = -delta;
+        var bounds = getBounds();
+        refVar.value = clampLayoutValue(refVar.value + delta, bounds[0], bounds[1]);
+        persistSplitLayout(true);
       };
     }
 
@@ -723,14 +826,26 @@ var LoraGallery = {
       if (!galleryCollapsed.value) loadItems(1, false);
       documentClickHandler = function() { showQuickPicker.value = false; };
       document.addEventListener("click", documentClickHandler);
-      setTimeout(restoreSelection, 500);
+      restoreSplitLayout();
+      if (typeof ResizeObserver === "function" && rootElRef) {
+        layoutResizeObserver = new ResizeObserver(function() {
+          if (!activeDragCleanup) applySplitLayout();
+        });
+        layoutResizeObserver.observe(rootElRef);
+      }
+      restoreTimer = setTimeout(function() { restoreTimer = null; if (!destroyed) restoreSelection(); }, 500);
     });
 
     onBeforeUnmount(function() {
       destroyed = true;
       autoPreviewQueue = [];
+      if (restoreTimer != null) clearTimeout(restoreTimer);
+      activeDragCleanup?.();
+      layoutResizeObserver?.disconnect();
+      layoutResizeObserver = null;
       if (documentClickHandler) document.removeEventListener("click", documentClickHandler);
       if (props.node._eagleRestoreUiState === restoreSelection) delete props.node._eagleRestoreUiState;
+      if (props.node._eagleRestoreSplitLayout === restoreSplitLayout) delete props.node._eagleRestoreSplitLayout;
     });
 
     return function() {
@@ -1095,7 +1210,21 @@ var LoraGallery = {
         class: "lg-selected" + (galleryCollapsed.value ? " lg-selected-full" : ""),
         style: galleryCollapsed.value ? "" : "width:" + selectedWidth.value + "px"
       }, [
-        !galleryCollapsed.value ? h("div", { class: "lg-resizer-right", onMousedown: makeDragHandler("x", selectedWidth, 160, 360, true), title: "拖拽调整宽度" }) : null,
+        !galleryCollapsed.value ? h("div", {
+          class: "lg-resizer-right",
+          role: "separator",
+          tabindex: 0,
+          "aria-orientation": "vertical",
+          onPointerdown: makePointerDragHandler("x", selectedWidth, function() {
+            var total = availableLayoutWidth();
+            return [130, Math.max(130, total - sideWidth.value - 180)];
+          }, true),
+          onKeydown: makeKeyboardResizeHandler("x", selectedWidth, function() {
+            var total = availableLayoutWidth();
+            return [130, Math.max(130, total - sideWidth.value - 180)];
+          }, true),
+          title: "拖拽调整宽度"
+        }) : null,
         h("div", { class: "lg-sel-hd" }, [
           h("span", "已选 LoRA (" + selectedIds.value.length + " / 启用 " + selectedIds.value.filter(function(id) { return enabledMap.value[id] !== false; }).length + ")"),
           galleryCollapsed.value ? h("span", { class: "lg-sel-hd-tip" }, "画廊已折叠，可用顶部模型树继续添加") : null
@@ -1116,7 +1245,21 @@ var LoraGallery = {
 
       var galleryBody = galleryCollapsed.value ? [selectedPanel] : [
         h("div", { class: "lg-side", style: "width:" + sideWidth.value + "px" }, [
-          h("div", { class: "lg-resizer", onMousedown: makeDragHandler("x", sideWidth, 110, 260), title: "拖拽调整宽度" }),
+          h("div", {
+            class: "lg-resizer",
+            role: "separator",
+            tabindex: 0,
+            "aria-orientation": "vertical",
+            onPointerdown: makePointerDragHandler("x", sideWidth, function() {
+              var total = availableLayoutWidth();
+              return [90, Math.max(90, total - selectedWidth.value - 180)];
+            }),
+            onKeydown: makeKeyboardResizeHandler("x", sideWidth, function() {
+              var total = availableLayoutWidth();
+              return [90, Math.max(90, total - selectedWidth.value - 180)];
+            }),
+            title: "拖拽调整宽度"
+          }),
           h("div", { class: "lg-folder-hd" }, [
             h("input", { class: "lg-folder-srch", type: "text", value: folderQuery.value, placeholder: "搜索文件夹...",
               onInput: function(e) { folderQuery.value = e.target.value; }
@@ -1235,13 +1378,13 @@ var CSS = [
   ".lg-quick-error{color:#e98282}",
   ".lg-quick-limit{padding:8px;text-align:center;color:#9a7b55;font-size:9px}",
   ".lg-body{display:flex;flex:1;overflow:hidden;position:relative}",
-  ".lg-side{position:relative;width:160px;min-width:110px;max-width:260px;border-right:1px solid #2a2a32;background:#16161e;overflow:auto;padding:8px 0;flex-shrink:0}",
-  ".lg-resizer{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;background:transparent;z-index:10}",
+  ".lg-side{position:relative;width:160px;min-width:90px;max-width:none;border-right:1px solid #2a2a32;background:#16161e;overflow:auto;padding:8px 0;flex-shrink:0}",
+  ".lg-resizer{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;background:transparent;z-index:10;touch-action:none;user-select:none}",
   ".lg-resizer:hover{background:rgba(74,125,224,0.35)}",
   ".lg-folder-hd{padding:8px 10px;border-bottom:1px solid #2a2a32}",
   ".lg-folder-srch{width:100%;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:11px;box-sizing:border-box}",
   ".lg-folder-srch:focus{outline:none;border-color:#4a7de0}",
-  ".lg-main{flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;min-width:200px;background:#0f0f14;min-height:0}",
+  ".lg-main{flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;min-width:180px;background:#0f0f14;min-height:0}",
   ".lg-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:224px;gap:8px;padding:10px;overflow-y:auto;flex:1;width:100%;box-sizing:border-box;align-content:start;min-height:0}",
   ".lg-grid::-webkit-scrollbar{width:8px}",
   ".lg-grid::-webkit-scrollbar-track{background:transparent}",
@@ -1268,9 +1411,9 @@ var CSS = [
   ".lg-check{position:absolute;inset:0;background:rgba(74,125,224,0.25);display:flex;align-items:center;justify-content:center;z-index:6;pointer-events:none;animation:checkPop .2s cubic-bezier(0.175, 0.885, 0.32, 1.275)}",
   ".lg-check::after{content:'\u2714';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}",
   "@keyframes checkPop{from{transform:scale(0.8);opacity:0}to{transform:scale(1);opacity:1}}",
-  ".lg-selected{position:relative;width:200px;min-width:160px;max-width:360px;border-left:1px solid #2a2a32;background:#16161e;overflow:hidden;display:flex;flex-direction:column;flex-shrink:0}",
+  ".lg-selected{position:relative;width:200px;min-width:130px;max-width:none;border-left:1px solid #2a2a32;background:#16161e;overflow:hidden;display:flex;flex-direction:column;flex-shrink:0}",
   ".lg-selected-full{width:100%!important;min-width:0;max-width:none;border-left:0;flex:1 1 auto}",
-  ".lg-resizer-right{position:absolute;top:0;left:0;width:6px;height:100%;cursor:col-resize;background:transparent;z-index:10}",
+  ".lg-resizer-right{position:absolute;top:0;left:0;width:6px;height:100%;cursor:col-resize;background:transparent;z-index:10;touch-action:none;user-select:none}",
   ".lg-resizer-right:hover{background:rgba(74,125,224,0.35)}",
   ".lg-sel-hd{padding:8px 10px;font-weight:600;border-bottom:1px solid #2a2a32;background:#1a1a22;color:#ddd;display:flex;align-items:center;justify-content:space-between;gap:12px}",
   ".lg-sel-hd-tip{font-size:9px;font-weight:400;color:#71809b}",
@@ -1350,6 +1493,22 @@ app.registerExtension({
     if (nodeData.name !== "EagleLoraGalleryNode") return;
 
     var HIDDEN_WIDGETS = ["selection_data", "civitai_api_key", "manual_triggers"];
+    // Version 3 is the first layout that uses a stable, bounded DOM viewport.
+    // Persist it on new/current nodes so a deliberately tall gallery is not
+    // mistaken for an old height-feedback artifact on the next workflow load.
+    var LORA_LAYOUT_VERSION = 3;
+
+    var inputDefs = nodeData && (nodeData.input || nodeData.inputs);
+    ["required", "optional"].forEach(function(groupName) {
+      var group = inputDefs && inputDefs[groupName];
+      HIDDEN_WIDGETS.forEach(function(name) {
+        var definition = group && group[name];
+        if (!Array.isArray(definition)) return;
+        definition[1] = Object.assign({}, definition[1] || {}, {
+          hidden: true, vueNode: "never", hideInPanel: true
+        });
+      });
+    });
 
     var hideWidgets = function(node) {
       if (!node.widgets || !node.widgets.length) return false;
@@ -1358,9 +1517,12 @@ app.registerExtension({
         var w = node.widgets[i];
         if (HIDDEN_WIDGETS.indexOf(w.name) < 0) continue;
         w.type = "hidden";
+        w.options = w.options || {};
+        Object.assign(w.options, { hidden: true, vueNode: "never", hideInPanel: true });
         w.computeSize = function() { return [0, -4]; };
         w.hidden = true;
         w.draw = function() {};
+        node.widgets.splice(i, 1, w);
         found = true;
       }
       if (found) node.setDirtyCanvas(true, true);
@@ -1373,10 +1535,30 @@ app.registerExtension({
       if (this._lgInit) return;
       this._lgInit = true;
 
-      this.setSize([960, 720]);
-      setTimeout(function(node) {
-        return function() { if (!hideWidgets(node)) setTimeout(function() { hideWidgets(node); }, 500); };
-      }(this), 300);
+      // CivitAI credentials remain in the runtime widget for prompt execution,
+      // but workflow JSON is exportable and must not include the key. Resolve
+      // the widget at serialization time because some frontends create their
+      // native widgets after onNodeCreated returns.
+      var originalSerialize = this.serialize;
+      this.serialize = function() {
+        this.properties = this.properties || {};
+        this.properties.eagle_layout_size_version = LORA_LAYOUT_VERSION;
+        var data = originalSerialize ? originalSerialize.apply(this, arguments) : {};
+        var keyWidget = (this.widgets || []).find(function(w) { return w.name === "civitai_api_key"; });
+        data = redactSecretWidgetFromWorkflow(data, this, keyWidget) || {};
+        data.properties = data.properties || {};
+        data.properties.eagle_layout_size_version = LORA_LAYOUT_VERSION;
+        return data;
+      };
+
+      if (!this.size || Number(this.size[0]) < 480 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
+      hideWidgets(this);
+      var hideNodeRef = this;
+      setTimeout(function() { hideWidgets(hideNodeRef); }, 0);
+      setTimeout(function() { hideWidgets(hideNodeRef); }, 250);
+      setTimeout(function() { hideWidgets(hideNodeRef); }, 500);
 
       if (!document.getElementById("lg-style")) {
         var s = document.createElement("style"); s.id = "lg-style"; s.textContent = CSS; document.head.appendChild(s);
@@ -1387,23 +1569,40 @@ app.registerExtension({
       // 避免 Vue 画廊仍停留在旧宽度并被挤在节点左侧。
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
 
-      var widget = this.addDOMWidget("lora_gallery", "div", el, { serialize: false, canvasOnly: true });
+      var INITIAL_VIEWPORT_HEIGHT = 550;
+      var MIN_VIEWPORT_HEIGHT = 280;
+      var currentViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+      var MAX_VIEWPORT_HEIGHT = 4096;
+      var widget = this.addDOMWidget("lora_gallery", "div", el, {
+        serialize: false, hideInPanel: true,
+        getMinHeight: function() { return MIN_VIEWPORT_HEIGHT; },
+        getMaxHeight: function() { return MAX_VIEWPORT_HEIGHT; },
+        getHeight: function() { return currentViewportHeight; },
+      });
       widget.width = undefined;
+      widget._eagleViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+      // Do not install an instance computeSize override here.  Current ComfyUI
+      // classifies any such widget as fixed-height; the inherited
+      // DOMWidgetImpl.computeLayoutSize is what makes this surface consume the
+      // remaining node body while keeping getMinHeight/getMaxHeight bounded.
 
       var applyFrame = function(size) {
         var nodeWidth = Number(size && size[0]) || 960;
-        var nodeHeight = Number(size && size[1]) || 720;
         var w = Math.max(320, nodeWidth - 20);
-        // 标题、插槽和两个原生 widget 会占用约 170px；保留余量避免 DOM 越出节点底框。
-        var h = Math.max(300, nodeHeight - 180);
+        var h = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, (Number(size && size[1]) || 720) - 170));
+        currentViewportHeight = h;
+        widget._eagleViewportHeight = h;
         el.style.width = w + "px";
         el.style.height = h + "px";
+        var host = el.parentElement;
+        if (host) {
+          host.style.width = w + "px";
+          host.style.maxWidth = "none";
+          host.style.overflow = "hidden";
+        }
         return [w, h];
       };
       var nodeRef = this;
-      // 不覆盖 DOM widget.computeSize。ComfyUI 会在创建/拖入任意节点时重新测量
-      // 所有 widget；若这里用当前 node.size 反推控件高度，就会在每次测量时把
-      // LiteGraph 的标题/插槽高度重复加回节点，造成画廊持续增高。
       this._lgApplyFrame = applyFrame;
       applyFrame(this.size);
 
@@ -1439,10 +1638,14 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function() {
       var result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
       var nodeRef = this;
+      hideWidgets(nodeRef);
       setTimeout(function() {
+        hideWidgets(nodeRef);
         if (nodeRef._lgApplyFrame) nodeRef._lgApplyFrame(nodeRef.size);
+        nodeRef._eagleRestoreSplitLayout?.();
         nodeRef._eagleRestoreUiState?.();
       }, 0);
+      setTimeout(function() { hideWidgets(nodeRef); }, 250);
       return result;
     };
 
@@ -1451,6 +1654,7 @@ app.registerExtension({
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
       this._lgApplyFrame = null;
       this._eagleRestoreUiState = null;
+      this._eagleRestoreSplitLayout = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

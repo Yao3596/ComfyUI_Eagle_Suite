@@ -13,8 +13,10 @@ import torch
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-COMFY_ROOT = pathlib.Path(os.environ.get("COMFYUI_ROOT", r"E:\ComfyUI-AKI\ComfyUI"))
-sys.path.insert(0, str(COMFY_ROOT))
+COMFY_ROOT = os.environ.get("COMFYUI_ROOT")
+if COMFY_ROOT:
+    COMFY_ROOT = pathlib.Path(COMFY_ROOT).expanduser()
+    sys.path.insert(0, str(COMFY_ROOT))
 SPEC = importlib.util.spec_from_file_location(
     "eagle_suite_timeline_test_package",
     REPO / "__init__.py",
@@ -26,9 +28,11 @@ SPEC.loader.exec_module(PACKAGE)
 
 from eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor import (
     EagleMediaTimelineEditor,
+    _decode_frames,
     _load_project,
     _probe_media,
     _timeline_preview_frames,
+    _usable_cached_media,
 )
 from eagle_suite_timeline_test_package.eagle_suite.utils import get_cached_ffmpeg
 
@@ -141,6 +145,21 @@ class MediaTimelineEditorTests(unittest.TestCase):
                     fit_mode="cover", output_fps=12, include_video_audio=True,
                 )
                 strip = _timeline_preview_frames(str(red), count=4, width=96)
+                with mock.patch(
+                    "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.MAX_OUTPUT_FRAMES",
+                    3,
+                ):
+                    bounded_images, bounded_count, bounded = _decode_frames(str(red), max_frames=0)
+                with mock.patch(
+                    "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.MAX_OUTPUT_FRAME_PIXELS",
+                    96 * 64 * 2,
+                ):
+                    pixel_images, pixel_count, pixel_bounded = _decode_frames(str(red), max_frames=0)
+                with mock.patch(
+                    "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.MAX_SCANNED_VIDEO_FRAMES",
+                    3,
+                ):
+                    scan_images, scan_count, scan_bounded = _decode_frames(str(red), frame_step=240)
 
             result = output["result"]
             self.assertIsNotNone(result[0])
@@ -159,6 +178,97 @@ class MediaTimelineEditorTests(unittest.TestCase):
                 (temp_root / item["subfolder"] / item["filename"]).is_file()
                 for item in strip["frames"]
             ))
+            self.assertEqual((3, 64, 96, 3), tuple(bounded_images.shape))
+            self.assertEqual(3, bounded_count)
+            self.assertTrue(bounded)
+            self.assertEqual((2, 64, 96, 3), tuple(pixel_images.shape))
+            self.assertEqual(2, pixel_count)
+            self.assertTrue(pixel_bounded)
+            self.assertEqual((1, 64, 96, 3), tuple(scan_images.shape))
+            self.assertEqual(1, scan_count)
+            self.assertTrue(scan_bounded)
+
+            segment = next(temp_root.glob("eagle_timeline_renders/*/segment_0000.mp4"))
+            self.assertTrue(_usable_cached_media(segment, "video"))
+            segment.write_bytes(b"partial")
+            self.assertFalse(_usable_cached_media(segment, "video"))
+            with mock.patch(
+                "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.folder_paths.get_input_directory",
+                return_value=str(input_root),
+            ), mock.patch(
+                "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.folder_paths.get_temp_directory",
+                return_value=str(temp_root),
+            ):
+                EagleMediaTimelineEditor().render(
+                    timeline_json=json.dumps(project), output_mode="video_audio",
+                    size_mode="custom", width=128, height=72, lock_aspect_ratio=False,
+                    fit_mode="cover", output_fps=12, include_video_audio=True,
+                )
+            self.assertTrue(_usable_cached_media(segment, "video"))
+
+    def test_connected_audio_uses_execution_private_paths(self):
+        if not get_cached_ffmpeg():
+            self.skipTest("FFmpeg unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            temp_root = root / "temp"
+            temp_root.mkdir()
+            with mock.patch(
+                "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.folder_paths.get_temp_directory",
+                return_value=str(temp_root),
+            ):
+                for amplitude in (0.2, 0.8):
+                    result = EagleMediaTimelineEditor().render(
+                        output_mode="audio",
+                        audio_1={
+                            "waveform": torch.full((1, 1, 4800), amplitude),
+                            "sample_rate": 48000,
+                        },
+                    )
+                    self.assertGreater(result["result"][2]["waveform"].shape[-1], 4000)
+            private_wavs = sorted(temp_root.glob("eagle_timeline_renders/connected_inputs/*/connected_audio_1.wav"))
+            mixed_wavs = sorted(temp_root.glob("eagle_timeline_renders/*/mixed.wav"))
+            self.assertEqual(2, len(private_wavs))
+            self.assertEqual(2, len(mixed_wavs))
+            self.assertNotEqual(private_wavs[0].parent, private_wavs[1].parent)
+            self.assertNotEqual(private_wavs[0].read_bytes(), private_wavs[1].read_bytes())
+            self.assertTrue(_usable_cached_media(mixed_wavs[0], "audio"))
+            payload = mixed_wavs[0].read_bytes()
+            mixed_wavs[0].write_bytes(payload[:len(payload) // 2])
+            self.assertFalse(_usable_cached_media(mixed_wavs[0], "audio"))
+
+    def test_long_frames_mode_rejects_before_encoding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            input_root = root / "input"
+            temp_root = root / "temp"
+            media_root = input_root / "eagle_timeline"
+            media_root.mkdir(parents=True)
+            temp_root.mkdir()
+            (media_root / "long.mp4").write_bytes(b"test fixture")
+            project = {
+                "assets": [{"id": "long", "type": "video", "filename": "eagle_timeline/long.mp4"}],
+                "video_clips": [{"asset_id": "long", "in": 0, "out": 600}],
+            }
+            metadata = {
+                "duration": 600.0, "width": 1920, "height": 1080, "fps": 30.0,
+                "has_video": True, "has_audio": False,
+            }
+            with mock.patch(
+                "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.folder_paths.get_input_directory",
+                return_value=str(input_root),
+            ), mock.patch(
+                "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor.folder_paths.get_temp_directory",
+                return_value=str(temp_root),
+            ), mock.patch(
+                "eagle_suite_timeline_test_package.eagle_suite.media_timeline_editor._probe_media",
+                return_value=metadata,
+            ):
+                with self.assertRaisesRegex(ValueError, "图像帧模式"):
+                    EagleMediaTimelineEditor().render(
+                        timeline_json=json.dumps(project), output_mode="frames", max_frames=1,
+                    )
+            self.assertFalse(list(temp_root.glob("eagle_timeline_renders/*/segment_*.mp4")))
 
     def test_frontend_contains_persistent_drag_timeline_controls(self):
         source = (REPO / "web" / "js" / "media_timeline_editor.js").read_text(encoding="utf-8")

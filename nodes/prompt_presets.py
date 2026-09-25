@@ -4,6 +4,9 @@ EaglePromptPresets - 提示词预设模板（增强版）
 支持 Obsidian 集成、Markdown 格式、自定义路径、动态变量
 """
 
+import base64
+import binascii
+import hashlib
 import json
 import uuid
 import os
@@ -17,7 +20,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import web
@@ -42,15 +45,51 @@ CONFIG_FILE = BASE_DIR / "config.json"
 USER_TEMPLATES_FILE = BASE_DIR / "user_templates.json"
 USER_TEMPLATES_DIR = SKILL_DIR / "user_templates"
 USER_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
-COVERS_DIR = BASE_DIR / "covers"
-COVERS_DIR.mkdir(exist_ok=True)
+LEGACY_COVERS_DIR = BASE_DIR / "covers"
+LEGACY_COVERS_DIR.mkdir(exist_ok=True)
+
+
+def _default_persistent_data_dir() -> Path:
+    """Return update-safe storage for user-authored Prompt Presets data.
+
+    ComfyUI reserves ``user/__*`` directories for internal application data.
+    Keeping covers there makes them independent of both custom-node updates and
+    the browser-facing user-data endpoint; files are exposed only by the
+    validated Prompt Presets cover route below.
+    """
+    override = str(os.environ.get("EAGLE_SUITE_USER_DATA_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve() / "prompt_presets"
+    try:
+        import folder_paths
+
+        get_system_root = getattr(folder_paths, "get_system_user_directory", None)
+        if callable(get_system_root):
+            root = get_system_root("eagle_suite")
+        else:
+            root = Path(folder_paths.get_user_directory()) / "__eagle_suite"
+        return Path(root).expanduser().resolve() / "prompt_presets"
+    except Exception:
+        return Path.home().resolve() / ".comfyui" / "eagle_suite" / "prompt_presets"
+
+
+PERSISTENT_DATA_DIR = _default_persistent_data_dir()
+COVERS_DIR = PERSISTENT_DATA_DIR / "covers"
 _WRITE_LOCK = threading.RLock()
+
+_COVER_REFERENCE_PREFIX = "eagle-user://prompt-presets/covers/"
+_LEGACY_COVER_REFERENCE_PREFIX = "covers/"
+_COVER_MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+_COVER_MAX_PIXELS = 24_000_000
+_PREVIEW_IMAGE_LIMIT = 12
+_COVER_FILENAME_RE = re.compile(r"^cover_[0-9a-f]{32}\.(?:png|jpe?g|webp|gif)$", re.IGNORECASE)
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
     path = Path(path)
     temp_name = ""
     with _WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
             fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
@@ -65,6 +104,116 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 def _atomic_write_json(path: Path, data) -> None:
     _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path = Path(path)
+    temp_name = ""
+    with _WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+        finally:
+            if temp_name and os.path.exists(temp_name):
+                os.remove(temp_name)
+
+
+def _cover_url(reference: str) -> str:
+    return "/eaglePromptPresets/cover?path=" + quote(str(reference or ""), safe="")
+
+
+def _cover_response(reference: str) -> dict:
+    return {
+        "success": True,
+        # ``path`` is retained for older frontends. New code should use cover.
+        "path": reference,
+        "cover": reference,
+        "url": _cover_url(reference),
+    }
+
+
+def _managed_cover_filename(reference: str) -> Optional[str]:
+    raw = unquote(str(reference or "").strip()).replace("\\", "/")
+    if raw.startswith(_COVER_REFERENCE_PREFIX):
+        name = raw[len(_COVER_REFERENCE_PREFIX):]
+    elif raw.startswith(_LEGACY_COVER_REFERENCE_PREFIX):
+        name = raw[len(_LEGACY_COVER_REFERENCE_PREFIX):]
+    else:
+        return None
+    if "/" in name or not _COVER_FILENAME_RE.fullmatch(name):
+        return None
+    return name
+
+
+def _managed_cover_reference(filename: str) -> str:
+    if not _COVER_FILENAME_RE.fullmatch(str(filename or "")):
+        raise ValueError("封面文件名无效")
+    return _COVER_REFERENCE_PREFIX + filename
+
+
+def _normalized_cover_bytes(content: bytes) -> tuple[bytes, str]:
+    if not content:
+        raise ValueError("封面文件为空")
+    if len(content) > _COVER_MAX_UPLOAD_BYTES:
+        raise ValueError("封面不能超过 8 MB")
+    try:
+        with Image.open(io.BytesIO(content)) as opened:
+            opened.load()
+            if int(opened.width) * int(opened.height) > _COVER_MAX_PIXELS:
+                raise ValueError("封面像素不能超过 2400 万")
+            image_format = str(opened.format or "").upper()
+            if image_format not in {"PNG", "JPEG", "WEBP", "GIF"}:
+                raise ValueError(f"不支持的封面格式: {image_format or 'unknown'}")
+            image = ImageOps.exif_transpose(opened).copy()
+    except (ValueError, Image.DecompressionBombError):
+        raise
+    except Exception as error:
+        raise ValueError(f"封面不是有效图片: {error}") from error
+
+    output = io.BytesIO()
+    # Covers are static thumbnails. Flatten animations and re-encode every
+    # upload so trailing data/metadata cannot be served as active content.
+    if image_format == "JPEG":
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        image.save(output, format="JPEG", quality=92, optimize=True)
+        extension = ".jpg"
+    elif image_format == "WEBP":
+        image.save(output, format="WEBP", quality=92, method=4)
+        extension = ".webp"
+    elif image_format == "GIF":
+        if image.mode not in {"P", "L"}:
+            image = image.convert("P", palette=Image.Palette.ADAPTIVE)
+        image.save(output, format="GIF", optimize=True)
+        extension = ".gif"
+    else:
+        if image.mode not in {"RGB", "RGBA", "L", "LA", "P"}:
+            image = image.convert("RGBA")
+        image.save(output, format="PNG", optimize=True)
+        extension = ".png"
+    return output.getvalue(), extension
+
+
+def _store_cover_bytes(content: bytes, preferred_filename: str = "") -> str:
+    normalized, extension = _normalized_cover_bytes(content)
+    preferred = Path(str(preferred_filename or "")).name
+    if preferred and _COVER_FILENAME_RE.fullmatch(preferred):
+        filename = str(Path(preferred).with_suffix(extension))
+    else:
+        digest = hashlib.sha256(normalized).hexdigest()[:32]
+        filename = f"cover_{digest}{extension}"
+    destination = (COVERS_DIR / filename).resolve()
+    root = COVERS_DIR.resolve()
+    if destination.parent != root:
+        raise ValueError("封面保存路径无效")
+    if not destination.is_file():
+        _atomic_write_bytes(destination, normalized)
+    return _managed_cover_reference(filename)
 
 
 async def _read_json_request(request, label: str):
@@ -236,7 +385,11 @@ def _markdown_front_matter(content: str):
         key = key.strip().lower()
         value = value.strip()
         if value.startswith('[') and value.endswith(']'):
-            value = [item.strip().strip('"\'') for item in value[1:-1].split(',') if item.strip()]
+            try:
+                parsed_value = json.loads(value)
+                value = parsed_value if isinstance(parsed_value, list) else value
+            except (TypeError, ValueError):
+                value = [item.strip().strip('"\'') for item in value[1:-1].split(',') if item.strip()]
         metadata[key] = value
     return metadata, body[match.end():]
 
@@ -252,6 +405,100 @@ def _markdown_field(section_body: str, heading: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _normalize_loaded_cover(reference: str, source_file: str = "") -> str:
+    """Make file-relative Markdown/JSON cover references browser-resolvable."""
+    raw = str(reference or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith((_COVER_REFERENCE_PREFIX, _LEGACY_COVER_REFERENCE_PREFIX)):
+        return raw
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() in {"http", "https", "data", "blob"}:
+        return raw
+    try:
+        resolved = _allowed_cover_path(raw, source_file=source_file)
+    except NameError:
+        # This helper is invoked after module initialization in normal use. The
+        # fallback keeps direct parser calls safe during unusual import hooks.
+        resolved = None
+    return str(resolved) if resolved else raw
+
+
+def _preview_image_sources(template: Dict, strict: bool = False) -> List[str]:
+    """Return canonical ordered previews, falling back to legacy ``cover``."""
+    template = template if isinstance(template, dict) else {}
+    has_preview_images = "preview_images" in template
+    raw_images = template.get("preview_images", []) if has_preview_images else [template.get("cover", "")]
+    if isinstance(raw_images, str):
+        candidate = raw_images.strip()
+        if candidate.startswith("[") and candidate.endswith("]"):
+            try:
+                decoded = json.loads(candidate)
+                raw_images = decoded if isinstance(decoded, list) else [candidate]
+            except (TypeError, ValueError):
+                raw_images = [candidate]
+        else:
+            raw_images = [candidate] if candidate else []
+    elif not isinstance(raw_images, (list, tuple)):
+        if strict and raw_images not in (None, ""):
+            raise ValueError("预览效果素材必须是路径或 URL 列表")
+        raw_images = []
+
+    result = []
+    seen = set()
+    for value in raw_images:
+        if strict and not isinstance(value, str):
+            raise ValueError("预览效果素材必须是路径或 URL 字符串")
+        reference = str(value or "").strip()
+        if not reference or reference in seen:
+            continue
+        seen.add(reference)
+        if len(result) >= _PREVIEW_IMAGE_LIMIT:
+            if strict:
+                raise ValueError(f"预览效果素材最多 {_PREVIEW_IMAGE_LIMIT} 张")
+            break
+        result.append(reference)
+    return result
+
+
+def _normalize_loaded_preview_images(template: Dict, source_file: str = "") -> Dict:
+    """Normalize all preview references while preserving old single-cover data."""
+    normalized = []
+    seen = set()
+    for reference in _preview_image_sources(template):
+        value = _normalize_loaded_cover(reference, source_file)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    template["preview_images"] = normalized
+    template["cover"] = normalized[0] if normalized else ""
+    return template
+
+
+def _persist_template_preview_images(
+    template: Dict,
+    source_file: str = "",
+    allow_external: bool = False,
+) -> Dict:
+    """Persist every preview image and keep ``cover`` as the first-image alias."""
+    persisted = []
+    seen = set()
+    for reference in _preview_image_sources(template, strict=True):
+        value = _persist_cover_source(
+            reference,
+            source_file=source_file,
+            allow_external=allow_external,
+        )
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        persisted.append(value)
+    template["preview_images"] = persisted
+    template["cover"] = persisted[0] if persisted else ""
+    return template
+
+
 def parse_markdown_templates(content: str, filename: str, source: str = "local") -> List[Dict]:
     """解析单模板或多模板 Markdown。
 
@@ -264,7 +511,12 @@ def parse_markdown_templates(content: str, filename: str, source: str = "local")
         default_tags = metadata.get('tags', [])
         if isinstance(default_tags, str):
             default_tags = [item.strip() for item in default_tags.split(',') if item.strip()]
-        default_cover = str(metadata.get('cover') or '')
+        default_media = {"cover": metadata.get('cover') or ''}
+        if 'preview_images' in metadata:
+            default_media["preview_images"] = metadata.get('preview_images') or []
+        _normalize_loaded_preview_images(default_media, filename)
+        default_cover = default_media["cover"]
+        default_preview_images = default_media["preview_images"]
         results = []
 
         sections = list(re.finditer(r'(?ms)^##\s+([^\r\n]+?)\s*$\r?\n(.*?)(?=^##\s+|\Z)', body))
@@ -289,6 +541,7 @@ def parse_markdown_templates(content: str, filename: str, source: str = "local")
                 "category": default_category,
                 "tags": list(default_tags),
                 "cover": default_cover,
+                "preview_images": list(default_preview_images),
                 "source": source,
                 "file_path": filename,
                 "section_index": index,
@@ -320,6 +573,7 @@ def parse_markdown_templates(content: str, filename: str, source: str = "local")
             "category": default_category,
             "tags": list(default_tags),
             "cover": default_cover,
+            "preview_images": list(default_preview_images),
             "source": source,
             "file_path": filename,
         }]
@@ -337,13 +591,17 @@ def parse_markdown_template(content: str, filename: str) -> Optional[Dict]:
 def template_to_markdown(template: Dict) -> str:
     """将模板转换为 Markdown 格式"""
     tags_str = json.dumps(template.get('tags', []))
+    preview_images = _preview_image_sources(template)
+    preview_images_str = json.dumps(preview_images, ensure_ascii=False)
+    primary_cover = preview_images[0] if preview_images else ""
 
     return f"""---
 id: {template.get('id', '')}
 label: {template.get('Label', '')}
 category: {template.get('category', '自定义')}
 tags: {tags_str}
-cover: {template.get('cover', '')}
+cover: {primary_cover}
+preview_images: {preview_images_str}
 ---
 
 ## 指令
@@ -367,6 +625,9 @@ def load_local_templates(paths: List[str]) -> List[Dict]:
                     if isinstance(item, dict):
                         normalized = dict(item)
                         normalized['source'] = 'user'
+                        _normalize_loaded_preview_images(
+                            normalized, normalized.get('file_path', '')
+                        )
                         templates.append(normalized)
         except Exception as e:
             logger.error(f"加载用户模板文件失败 ({USER_TEMPLATES_FILE}): {e}")
@@ -408,6 +669,7 @@ def load_local_templates(paths: List[str]) -> List[Dict]:
                                     item = dict(entry)
                                     item['source'] = source
                                     item['file_path'] = str(file_path)
+                                    _normalize_loaded_preview_images(item, str(file_path))
                                     templates.append(item)
 
                     elif file_path.suffix.lower() in ['.md', '.markdown']:
@@ -482,6 +744,7 @@ def _load_obsidian_local_templates(obsidian: dict) -> List[Dict]:
                         item = dict(entry)
                         item["source"] = "obsidian"
                         item["file_path"] = str(file_path)
+                        _normalize_loaded_preview_images(item, str(file_path))
                         templates.append(item)
             else:
                 items = parse_markdown_templates(
@@ -677,6 +940,17 @@ async def save_template(request):
             template["id"] = str(uuid.uuid4())
         template["source"] = "user"
 
+        try:
+            _persist_template_preview_images(
+                template,
+                source_file=template.get("file_path", ""),
+                # Remote previews remain explicit external references. The
+                # backend never fetches them, avoiding an SSRF surface.
+                allow_external=True,
+            )
+        except ValueError as error:
+            return web.json_response({"success": False, "error": str(error)}, status=400)
+
         template["created_at"] = template.get("created_at", datetime.now().isoformat())
         template["updated_at"] = datetime.now().isoformat()
 
@@ -795,6 +1069,14 @@ async def import_file(request):
         for t in templates:
             if not t.get("id"):
                 t["id"] = str(uuid.uuid4())
+            try:
+                _persist_template_preview_images(
+                    t,
+                    source_file=t.get("file_path", ""),
+                    allow_external=True,
+                )
+            except ValueError as error:
+                return web.json_response({"success": False, "error": str(error)}, status=400)
             t["created_at"] = datetime.now().isoformat()
             # 导入内容保存为用户模板副本，因此可独立编辑和删除，不反向改写源文档。
             t["source"] = "user"
@@ -933,33 +1215,163 @@ async def test_obsidian(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-def _allowed_cover_path(raw_path: str) -> Optional[Path]:
-    try:
-        raw_candidate = Path(str(raw_path or "")).expanduser()
-        candidates = (
-            [raw_candidate.resolve()]
-            if raw_candidate.is_absolute()
-            else [(BASE_DIR / raw_candidate).resolve(), (SKILL_DIR / raw_candidate).resolve()]
-        )
-        config = load_config()
-        roots = [BASE_DIR.resolve(), SKILL_DIR.resolve()]
-        for raw_root in config.get("local_paths", []):
+def _cover_roots() -> List[Path]:
+    roots = [COVERS_DIR, LEGACY_COVERS_DIR, BASE_DIR, SKILL_DIR]
+    config = load_config()
+    for raw_root in config.get("local_paths", []):
+        try:
             root = Path(str(raw_root)).expanduser()
             if root.is_dir():
                 roots.append(root.resolve())
-        
-        obsidian_root = _resolve_obsidian_local_dir(config.get("obsidian", {}))
-        if obsidian_root:
-            roots.append(obsidian_root)
+        except (OSError, ValueError):
+            continue
+    obsidian_root = _resolve_obsidian_local_dir(config.get("obsidian", {}))
+    if obsidian_root:
+        roots.append(obsidian_root)
+    result = []
+    for root in roots:
+        try:
+            resolved = Path(root).expanduser().resolve()
+            if resolved not in result:
+                result.append(resolved)
+        except (OSError, ValueError):
+            continue
+    return result
 
+
+def _path_is_within(path: Path, roots: List[Path]) -> bool:
+    return any(path == root or root in path.parents for root in roots)
+
+
+def _file_uri_path(raw: str) -> Optional[Path]:
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() != "file" or parsed.username or parsed.password:
+        return None
+    value = unquote(parsed.path or "")
+    if parsed.netloc and parsed.netloc.lower() not in {"", "localhost"}:
+        # UNC is allowed only when that exact share is also an approved root.
+        value = f"//{parsed.netloc}{value}"
+    if os.name == "nt" and re.match(r"^/[A-Za-z]:/", value):
+        value = value[1:]
+    return Path(value)
+
+
+def _migrate_legacy_cover(filename: str) -> Optional[Path]:
+    legacy = (LEGACY_COVERS_DIR / filename).resolve()
+    legacy_root = LEGACY_COVERS_DIR.resolve()
+    if legacy.parent != legacy_root or not legacy.is_file():
+        return None
+    try:
+        reference = _store_cover_bytes(legacy.read_bytes(), preferred_filename=filename)
+        migrated_name = _managed_cover_filename(reference)
+        migrated = (COVERS_DIR / str(migrated_name or "")).resolve()
+        if migrated.parent == COVERS_DIR.resolve() and migrated.is_file():
+            return migrated
+    except Exception as error:
+        # Read compatibility remains available even if the persistent location
+        # is temporarily unwritable.
+        logger.warning(f"迁移旧封面失败 ({legacy}): {error}")
+    return legacy
+
+
+def _allowed_cover_path(raw_path: str, source_file: str = "") -> Optional[Path]:
+    """Resolve a cover only inside approved roots; migrate legacy covers lazily."""
+    try:
+        raw = unquote(str(raw_path or "").strip())
+        if not raw or "\x00" in raw or len(raw) > 4096:
+            return None
+        normalized_raw = raw.replace("\\", "/")
+        if any(part == ".." for part in normalized_raw.split("/")):
+            return None
+
+        if raw.startswith("/eaglePromptPresets/cover"):
+            nested = parse_qs(urlparse(raw).query).get("path", [""])[0]
+            return _allowed_cover_path(nested, source_file=source_file)
+
+        filename = _managed_cover_filename(raw)
+        if filename:
+            persistent = (COVERS_DIR / filename).resolve()
+            if persistent.parent == COVERS_DIR.resolve() and persistent.is_file():
+                return persistent
+            return _migrate_legacy_cover(filename)
+        if normalized_raw.startswith((_COVER_REFERENCE_PREFIX, _LEGACY_COVER_REFERENCE_PREFIX)):
+            # A malformed managed reference must not fall back to generic local
+            # path resolution (for example ``covers/../secret.png``).
+            return None
+
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() in {"http", "https", "data", "blob"}:
+            return None
+        file_uri = _file_uri_path(raw) if parsed.scheme.lower() == "file" else None
+        raw_candidate = file_uri or Path(raw).expanduser()
+        if raw_candidate.is_absolute():
+            candidates = [raw_candidate.resolve()]
+        else:
+            candidates = []
+            if source_file:
+                source = Path(str(source_file)).expanduser().resolve()
+                candidates.append((source.parent / raw_candidate).resolve())
+            candidates.extend([
+                (BASE_DIR / raw_candidate).resolve(),
+                (SKILL_DIR / raw_candidate).resolve(),
+            ])
+
+        roots = _cover_roots()
         for candidate in candidates:
-            if candidate.is_symlink():
-                candidate = candidate.readlink().resolve()
-            if candidate.is_file() and any(candidate == root or root in candidate.parents for root in roots):
+            # Path.resolve() above follows symlinks before containment testing.
+            if candidate.is_file() and _path_is_within(candidate, roots):
                 return candidate
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         pass
     return None
+
+
+def _decode_cover_data_url(source: str) -> Optional[bytes]:
+    match = re.fullmatch(
+        r"data:image/(?:png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=\s]+)",
+        str(source or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    payload = re.sub(r"\s+", "", match.group(1))
+    if len(payload) > ((_COVER_MAX_UPLOAD_BYTES + 2) // 3) * 4 + 8:
+        raise ValueError("封面不能超过 8 MB")
+    try:
+        return base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("封面 data URL 无效") from error
+
+
+def _persist_cover_source(source: str, source_file: str = "", allow_external: bool = False) -> str:
+    raw = str(source or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > 12 * 1024 * 1024:
+        raise ValueError("封面引用过长")
+
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() in {"http", "https"}:
+        if parsed.username or parsed.password or not parsed.hostname:
+            raise ValueError("封面 URL 无效")
+        if allow_external:
+            return raw
+        raise ValueError("为避免服务器端请求风险，请先下载网络图片后使用“选择封面”上传")
+    if parsed.scheme.lower() == "blob":
+        raise ValueError("blob 封面只在当前页面有效，请使用“选择封面”上传")
+    if parsed.scheme.lower() == "data":
+        content = _decode_cover_data_url(raw)
+        if content is None:
+            raise ValueError("仅支持 base64 编码的 PNG/JPG/WebP/GIF data URL")
+        return _store_cover_bytes(content)
+
+    path = _allowed_cover_path(raw, source_file=source_file)
+    if path is None:
+        raise ValueError("封面路径不存在或不在已登记的提示词目录中")
+    filename = _managed_cover_filename(raw)
+    if filename and path.parent == COVERS_DIR.resolve():
+        return _managed_cover_reference(path.name)
+    return _store_cover_bytes(path.read_bytes(), preferred_filename=filename or "")
 
 
 @route("POST", "/eaglePromptPresets/upload_cover")
@@ -973,25 +1385,39 @@ async def upload_template_cover(request):
         content = await field.read(decode=False)
         if not content:
             return web.json_response({"success": False, "error": "封面文件为空"}, status=400)
-        if len(content) > 8 * 1024 * 1024:
+        if len(content) > _COVER_MAX_UPLOAD_BYTES:
             return web.json_response({"success": False, "error": "封面不能超过 8 MB"}, status=413)
 
-        image = Image.open(io.BytesIO(content))
-        image.verify()
-        image_format = str(image.format or "").upper()
-        extensions = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".gif"}
-        extension = extensions.get(image_format)
-        if not extension:
-            return web.json_response({"success": False, "error": f"不支持的封面格式: {image_format or 'unknown'}"}, status=415)
-
-        filename = f"cover_{uuid.uuid4().hex}{extension}"
-        destination = COVERS_DIR / filename
-        destination.write_bytes(content)
-        relative_path = destination.relative_to(BASE_DIR).as_posix()
-        return web.json_response({"success": True, "path": relative_path})
+        reference = _store_cover_bytes(content)
+        return web.json_response(_cover_response(reference))
+    except ValueError as error:
+        logger.warning(f"upload_template_cover 已拒绝: {error}")
+        return web.json_response({"success": False, "error": str(error)}, status=415)
     except Exception as error:
         logger.error(f"upload_template_cover 错误: {error}")
         return web.json_response({"success": False, "error": str(error)}, status=400)
+
+
+@route("POST", "/eaglePromptPresets/import_cover")
+async def import_template_cover(request):
+    """Copy a registered local cover or data URL into update-safe storage."""
+    body, request_error = await _read_json_request(request, "导入封面")
+    if request_error:
+        return web.json_response({"success": False, "error": request_error}, status=400)
+    try:
+        reference = _persist_cover_source(
+            body.get("source", ""),
+            source_file=body.get("source_file", ""),
+            allow_external=False,
+        )
+        if not reference:
+            raise ValueError("封面来源为空")
+        return web.json_response(_cover_response(reference))
+    except ValueError as error:
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+    except Exception as error:
+        logger.error(f"import_template_cover 错误: {error}")
+        return web.json_response({"success": False, "error": str(error)}, status=500)
 
 
 @route("GET", "/eaglePromptPresets/cover")
@@ -999,11 +1425,22 @@ async def get_template_cover(request):
     """获取模板封面"""
     path = _allowed_cover_path(request.query.get("path", ""))
     if not path:
-        return web.Response(status=404, text="cover not found or outside configured template paths")
+        return web.Response(
+            status=404,
+            text="cover not found or outside configured template paths",
+            headers={"Cache-Control": "no-store"},
+        )
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     if not content_type.startswith("image/"):
-        return web.Response(status=415, text="cover must be an image")
-    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=3600"})
+        return web.Response(
+            status=415,
+            text="cover must be an image",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+    return web.FileResponse(path, headers={
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @route("POST", "/eaglePromptPresets/export")

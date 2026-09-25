@@ -6,7 +6,7 @@ import { app } from "../../../scripts/app.js";
 
 // ── CSS ────────────────────────────────────────────────────
 var CSS = `
-.umb-root{display:flex;flex-direction:column;width:100%;min-width:0;height:100%;box-sizing:border-box;background:#121216;color:#bbb;font:13px/1.5 system-ui;overflow:hidden;border-radius:0 0 8px 8px}
+.umb-root{display:flex;flex-direction:column;width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;background:#121216;color:#bbb;font:13px/1.5 system-ui;overflow:hidden;border-radius:0 0 8px 8px}
 .umb-bar{display:flex;gap:6px;padding:6px 8px;background:#1a1a22;border-bottom:1px solid #2a2a32;align-items:center;flex-wrap:wrap}
 .umb-search{flex:1;min-width:100px;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:12px}
 .umb-search:focus{outline:none;border-color:#4a7de0}
@@ -24,15 +24,15 @@ var CSS = `
 .umb-mode-toggle span{padding:3px 10px;cursor:pointer;background:#1c1c26;color:#aaa;transition:.15s;font-size:10px}
 .umb-mode-toggle span.active{background:#4a7de0;color:#fff}
 .umb-mode-toggle span:hover:not(.active){background:#2a2a36}
-.umb-body{flex:1;display:flex;overflow:hidden}
-.umb-side{width:180px;background:#16161e;border-right:1px solid #2a2a32;overflow-y:auto;flex-shrink:0;padding:8px 0}
+.umb-body{flex:1;display:flex;min-height:0;overflow:hidden}
+.umb-side{width:180px;min-width:90px;max-width:none;background:#16161e;border-right:1px solid #2a2a32;overflow-y:auto;flex:0 0 auto;padding:8px 0;box-sizing:border-box}
 .umb-side::-webkit-scrollbar{width:4px}
 .umb-side::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
 .umb-folder-hd{padding:8px 10px;border-bottom:1px solid #2a2a32}
 .umb-folder-srch{width:100%;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:11px;box-sizing:border-box}
 .umb-folder-srch:focus{outline:none;border-color:#4a7de0}
-.umb-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:200px;background:#0f0f14}
-.umb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:120px;gap:8px;padding:10px;overflow-y:auto;flex:1;align-content:start}
+.umb-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:180px;min-height:0;background:#0f0f14}
+.umb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:120px;gap:8px;padding:10px;overflow-y:auto;flex:1;min-height:0;align-content:start}
 .umb-grid::-webkit-scrollbar{width:8px}
 .umb-grid::-webkit-scrollbar-track{background:transparent}
 .umb-grid::-webkit-scrollbar-thumb{background:#3a3a45;border-radius:4px}
@@ -62,10 +62,12 @@ var CSS = `
 .umb-play-btn{width:34px;height:34px;border-radius:50%;border:none;background:#4a7de0;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,0.4)}
 .umb-check{position:absolute;inset:0;background:rgba(74,125,224,0.25);display:flex;align-items:center;justify-content:center;z-index:6;pointer-events:none}
 .umb-check::after{content:'✔';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}
-.umb-selected{width:200px;border-left:1px solid #2a2a32;background:#16161e;overflow:hidden;display:flex;flex-direction:column;flex-shrink:0}
+.umb-selected{width:200px;min-width:120px;max-width:none;border-left:1px solid #2a2a32;background:#16161e;overflow:hidden;display:flex;flex-direction:column;flex:0 0 auto;min-height:0;box-sizing:border-box}
+.umb-splitter{width:7px;flex:0 0 7px;align-self:stretch;z-index:30;cursor:col-resize;background:transparent;touch-action:none;user-select:none;outline:none}
+.umb-splitter:hover,.umb-splitter:focus-visible{background:rgba(74,125,224,.42)}
 .umb-sel-hd{padding:8px 10px;font-weight:600;border-bottom:1px solid #2a2a32;background:#1a1a22;color:#ddd}
 .umb-sel-empty{padding:20px 10px;color:#666;text-align:center;font-size:11px}
-.umb-sel-list{flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+.umb-sel-list{flex:1;min-height:0;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
 .umb-sel-item{display:flex;align-items:center;gap:8px;padding:6px;background:#1a1a24;border-radius:6px;border:1px solid #2a2a32}
 .umb-sel-thumb{width:40px;height:40px;border-radius:4px;object-fit:cover;background:#000;flex-shrink:0}
 .umb-sel-info{flex:1;min-width:0}
@@ -102,12 +104,14 @@ function formatDuration(seconds) {
 
 function debounce(fn, delay) {
   var timer = null;
-  return function() {
+  var debounced = function() {
     var args = arguments;
     var self = this;
     clearTimeout(timer);
     timer = setTimeout(function() { fn.apply(self, args); }, delay);
   };
+  debounced.cancel = function() { clearTimeout(timer); timer = null; };
+  return debounced;
 }
 
 function escapeHtml(value) {
@@ -125,6 +129,15 @@ class AudioBrowser {
     this.container = container;
     this.node = node;
     this.apiPrefix = "/EagleAudioList";
+    this._disposed = false;
+    this._timers = new Set();
+    this._restoreRetries = 0;
+    this._eventController = null;
+    this._debouncedHandlers = new Set();
+    this._splitDragCleanup = null;
+    this._layoutResizeObserver = null;
+    this._sideRatio = 0.19;
+    this._selectedRatio = 0.22;
 
     this.state = {
       directory: "",
@@ -146,12 +159,169 @@ class AudioBrowser {
       playingPath: "",
     };
 
-    setTimeout(function(self) {
-      return function() {
-        self.restoreStateFromNode();
-        self.init();
-      };
-    }(this), 0);
+    this.schedule(() => {
+      this.restoreStateFromNode();
+      this.init();
+    }, 0);
+  }
+
+  schedule(callback, delay) {
+    if (this._disposed) return null;
+    var timer = setTimeout(() => {
+      this._timers.delete(timer);
+      if (!this._disposed) callback();
+    }, delay || 0);
+    this._timers.add(timer);
+    return timer;
+  }
+
+  destroy() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this._eventController?.abort();
+    this._eventController = null;
+    this._debouncedHandlers.forEach(function(handler) { handler.cancel?.(); });
+    this._debouncedHandlers.clear();
+    this._splitDragCleanup?.();
+    this._splitDragCleanup = null;
+    this._layoutResizeObserver?.disconnect();
+    this._layoutResizeObserver = null;
+    this._timers.forEach(function(timer) { clearTimeout(timer); });
+    this._timers.clear();
+    this._stateReloadTimer = null;
+    var player = this.container.querySelector?.("audio.umb-player");
+    if (player) {
+      player.pause?.();
+      player.removeAttribute("src");
+      player.load?.();
+    }
+  }
+
+  clampLayoutValue(value, min, max) {
+    return Math.max(min, Math.min(max, Number(value) || min));
+  }
+
+  availableLayoutWidth() {
+    var bodyWidth = Number(this.container.querySelector?.(".umb-body")?.clientWidth);
+    var mountedWidth = bodyWidth || Number(this.container.clientWidth);
+    return Math.max(380, (mountedWidth || (Number(this.node.size?.[0]) || 960) - 20) - 14);
+  }
+
+  currentPaneWidth(kind) {
+    var selector = kind === "side" ? ".umb-side" : ".umb-selected";
+    var width = Number(this.container.querySelector?.(selector)?.getBoundingClientRect?.().width);
+    var total = this.availableLayoutWidth();
+    return width || total * (kind === "side" ? this._sideRatio : this._selectedRatio);
+  }
+
+  applySplitLayout() {
+    var total = this.availableLayoutWidth();
+    var mainMin = 180;
+    var sideWidth = this.clampLayoutValue(total * this._sideRatio, 90, Math.max(90, total - 120 - mainMin));
+    var selectedWidth = this.clampLayoutValue(total * this._selectedRatio, 120, Math.max(120, total - sideWidth - mainMin));
+    sideWidth = this.clampLayoutValue(sideWidth, 90, Math.max(90, total - selectedWidth - mainMin));
+    var side = this.container.querySelector?.(".umb-side");
+    var selected = this.container.querySelector?.(".umb-selected");
+    if (side) side.style.width = sideWidth + "px";
+    if (selected) selected.style.width = selectedWidth + "px";
+  }
+
+  persistSplitLayout(notifyGraph) {
+    var total = this.availableLayoutWidth();
+    this._sideRatio = this.clampLayoutValue(this.currentPaneWidth("side") / total, 0.10, 0.46);
+    this._selectedRatio = this.clampLayoutValue(this.currentPaneWidth("selected") / total, 0.13, 0.50);
+    this.node.properties ||= {};
+    this.node.properties.eagle_audio_browser_split_layout = {
+      version: 1,
+      side_ratio: Number(this._sideRatio.toFixed(5)),
+      selected_ratio: Number(this._selectedRatio.toFixed(5)),
+    };
+    this.node.setDirtyCanvas?.(true, true);
+    if (notifyGraph) this.node.graph?.change?.();
+  }
+
+  restoreSplitLayout() {
+    var saved = this.node.properties?.eagle_audio_browser_split_layout;
+    if (saved && Number(saved.version) >= 1) {
+      if (Number.isFinite(Number(saved.side_ratio))) {
+        this._sideRatio = this.clampLayoutValue(saved.side_ratio, 0.10, 0.46);
+      }
+      if (Number.isFinite(Number(saved.selected_ratio))) {
+        this._selectedRatio = this.clampLayoutValue(saved.selected_ratio, 0.13, 0.50);
+      }
+    }
+    this.applySplitLayout();
+  }
+
+  resizePane(kind, requestedWidth, notifyGraph) {
+    var total = this.availableLayoutWidth();
+    var mainMin = 180;
+    var otherWidth = this.currentPaneWidth(kind === "side" ? "selected" : "side");
+    var min = kind === "side" ? 90 : 120;
+    var width = this.clampLayoutValue(requestedWidth, min, Math.max(min, total - otherWidth - mainMin));
+    if (kind === "side") this._sideRatio = width / total;
+    else this._selectedRatio = width / total;
+    this.applySplitLayout();
+    this.persistSplitLayout(notifyGraph);
+  }
+
+  beginSplitDrag(event, kind) {
+    if (event.pointerType !== "touch" && event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this._splitDragCleanup?.();
+    var target = event.currentTarget;
+    var pointerId = event.pointerId;
+    var startX = event.clientX;
+    var startWidth = this.currentPaneWidth(kind);
+    var previousCursor = document.body.style.cursor;
+    var previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    target.setPointerCapture?.(pointerId);
+    var onMove = moveEvent => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      moveEvent.stopPropagation();
+      var physicalDelta = moveEvent.clientX - startX;
+      this.resizePane(kind, startWidth + (kind === "side" ? physicalDelta : -physicalDelta), false);
+    };
+    var finish = finishEvent => {
+      if (finishEvent && finishEvent.pointerId !== pointerId) return;
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", finish);
+      target.removeEventListener("pointercancel", finish);
+      target.removeEventListener("lostpointercapture", finish);
+      if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      if (this._splitDragCleanup === finish) this._splitDragCleanup = null;
+      this.persistSplitLayout(true);
+    };
+    this._splitDragCleanup = finish;
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", finish);
+    target.addEventListener("pointercancel", finish);
+    target.addEventListener("lostpointercapture", finish);
+  }
+
+  nudgeSplitter(event, kind) {
+    var physicalDelta = 0;
+    if (event.key === "ArrowLeft") physicalDelta = -16;
+    else if (event.key === "ArrowRight") physicalDelta = 16;
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+    var widthDelta = kind === "side" ? physicalDelta : -physicalDelta;
+    this.resizePane(kind, this.currentPaneWidth(kind) + widthDelta, true);
+  }
+
+  observeLayout() {
+    if (this._layoutResizeObserver || typeof ResizeObserver !== "function") return;
+    this._layoutResizeObserver = new ResizeObserver(() => {
+      if (!this._splitDragCleanup) this.applySplitLayout();
+    });
+    this._layoutResizeObserver.observe(this.container);
   }
 
   getWidget(name) {
@@ -159,10 +329,14 @@ class AudioBrowser {
   }
 
   restoreStateFromNode() {
+    if (this._disposed) return false;
     if (!this.node.widgets || !this.node.widgets.length) {
-      setTimeout(function(self) { return function() { self.restoreStateFromNode(); }; }(this), 50);
-      return;
+      if (this._restoreRetries >= 20) return false;
+      this._restoreRetries += 1;
+      this.schedule(() => this.restoreStateFromNode(), 50);
+      return false;
     }
+    this._restoreRetries = 0;
 
     var directory = String(this.getWidget("directory")?.value || "").trim();
     var activeDirectory = String(this.getWidget("active_directory")?.value || "").trim();
@@ -185,6 +359,7 @@ class AudioBrowser {
     } catch (error) {
       console.warn("[AudioBrowser] 恢复选择数据失败:", error);
     }
+    return true;
   }
 
   syncBrowserSettings() {
@@ -202,10 +377,15 @@ class AudioBrowser {
   }
 
   reloadStateFromNode() {
-    clearTimeout(this._stateReloadTimer);
-    this._stateReloadTimer = setTimeout(() => {
+    if (this._stateReloadTimer != null) {
+      clearTimeout(this._stateReloadTimer);
+      this._timers.delete(this._stateReloadTimer);
+    }
+    this._stateReloadTimer = this.schedule(() => {
+      this._stateReloadTimer = null;
       this.restoreStateFromNode();
       this.render();
+      this.restoreSplitLayout();
       this.renderSelected();
       this.updateCounts();
       this.attachEvents();
@@ -214,19 +394,18 @@ class AudioBrowser {
 
   init() {
     this.render();
+    this.restoreSplitLayout();
+    this.observeLayout();
     this.renderSelected();
     this.updateCounts();
-    setTimeout(function(self) {
-      return function() {
-        self.attachEvents();
-        if (self.state.directory) {
-          self.authorizeAndLoadDirectory();
-        }
-      };
-    }(this), 100);
+    this.schedule(() => {
+      this.attachEvents();
+      if (this.state.directory) this.authorizeAndLoadDirectory();
+    }, 100);
   }
 
   render() {
+    this._splitDragCleanup?.();
     this.container.innerHTML = `
       <div class="umb-root">
         <div class="umb-bar">
@@ -263,11 +442,13 @@ class AudioBrowser {
               </div>
             </div>
           </div>
+          <div class="umb-splitter" data-splitter="side" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整目录栏宽度"></div>
           <div class="umb-main">
             <div class="umb-grid" data-container="grid">
               <div class="umb-empty">请先选择目录</div>
             </div>
           </div>
+          <div class="umb-splitter" data-splitter="selected" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整已选栏宽度"></div>
           <div class="umb-selected">
             <div class="umb-sel-hd">已选 <span data-display="selected-count">0</span></div>
             <div class="umb-sel-list" data-container="selected"></div>
@@ -275,16 +456,31 @@ class AudioBrowser {
         </div>
       </div>
     `;
+    this.applySplitLayout();
   }
 
   attachEvents() {
+    if (this._disposed) return;
     var root = this.container.querySelector(".umb-root");
     if (!root) {
-      setTimeout(function(self) { return function() { self.attachEvents(); }; }(this), 100);
+      this.schedule(() => this.attachEvents(), 100);
       return;
     }
 
+    this._eventController?.abort();
+    this._debouncedHandlers.forEach(function(handler) { handler.cancel?.(); });
+    this._debouncedHandlers.clear();
+    this._eventController = new AbortController();
     var self = this;
+    var listen = function(target, type, handler) {
+      if (typeof handler?.cancel === "function") self._debouncedHandlers.add(handler);
+      target?.addEventListener(type, handler, { signal: self._eventController.signal });
+    };
+    root.querySelectorAll("[data-splitter]").forEach(function(splitter) {
+      var kind = splitter.dataset.splitter;
+      listen(splitter, "pointerdown", function(event) { self.beginSplitDrag(event, kind); });
+      listen(splitter, "keydown", function(event) { self.nudgeSplitter(event, kind); });
+    });
     var directoryInput = root.querySelector('[data-input="directory"]');
     var applyDirectory = function() {
       var directory = String(directoryInput?.value || "").trim().replace(/^['"]|['"]$/g, "");
@@ -297,14 +493,14 @@ class AudioBrowser {
       self.syncBrowserSettings();
       self.authorizeAndLoadDirectory();
     };
-    root.querySelector('[data-action="load-dir"]')?.addEventListener("click", applyDirectory);
-    directoryInput?.addEventListener("keydown", function(event) {
+    listen(root.querySelector('[data-action="load-dir"]'), "click", applyDirectory);
+    listen(directoryInput, "keydown", function(event) {
       if (event.key === "Enter") applyDirectory();
     });
 
     var recursiveBtn = root.querySelector('[data-action="recursive"]');
     if (recursiveBtn) {
-      recursiveBtn.addEventListener("click", function() {
+      listen(recursiveBtn, "click", function() {
         self.state.recursive = !self.state.recursive;
         recursiveBtn.classList.toggle("active", self.state.recursive);
         recursiveBtn.textContent = self.state.recursive ? "✅ 递归子文件夹" : "⬜ 递归子文件夹";
@@ -317,7 +513,7 @@ class AudioBrowser {
 
     var viewModeBtn = root.querySelector('[data-action="view-mode"]');
     if (viewModeBtn) {
-      viewModeBtn.addEventListener("click", function() {
+      listen(viewModeBtn, "click", function() {
         self.state.viewMode = self.state.viewMode === "grid" ? "list" : "grid";
         viewModeBtn.textContent = self.state.viewMode === "grid" ? "📋 列表（省资源）" : "🖼️ 缩略图";
         self.syncBrowserSettings();
@@ -327,7 +523,7 @@ class AudioBrowser {
 
     var searchInput = root.querySelector('[data-input="search"]');
     if (searchInput) {
-      searchInput.addEventListener("input", debounce(function(e) {
+      listen(searchInput, "input", debounce(function(e) {
         self.state.keyword = e.target.value.trim();
         self.state.offset = 0;
         self.state.items = [];
@@ -337,7 +533,7 @@ class AudioBrowser {
 
     var folderSearch = root.querySelector('[data-input="folder-search"]');
     if (folderSearch) {
-      folderSearch.addEventListener("input", debounce(function(event) {
+      listen(folderSearch, "input", debounce(function(event) {
         var keyword = event.target.value.trim().toLowerCase();
         root.querySelectorAll('.ft-r:not([data-action="show-all-files"])').forEach(function(row) {
           row.style.display = !keyword || row.textContent.toLowerCase().includes(keyword) ? "flex" : "none";
@@ -347,7 +543,7 @@ class AudioBrowser {
 
     var sortSelect = root.querySelector('[data-input="sort"]');
     if (sortSelect) {
-      sortSelect.addEventListener("change", function(e) {
+      listen(sortSelect, "change", function(e) {
         var parts = e.target.value.split(":");
         self.state.sortBy = parts[0];
         self.state.sortDir = parts[1];
@@ -359,7 +555,7 @@ class AudioBrowser {
 
     var grid = root.querySelector('[data-container="grid"]');
     if (grid) {
-      grid.addEventListener("scroll", debounce(function() {
+      listen(grid, "scroll", debounce(function() {
         if (self.state.loading || !self.state.hasMore) return;
         if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 200) {
           self.loadItems(true);
@@ -729,14 +925,30 @@ app.registerExtension({
       "directory", "active_directory", "recursive", "view_mode", "selection_data", "audio_path"
     ];
 
+    var inputDefs = nodeData && (nodeData.input || nodeData.inputs);
+    ["required", "optional"].forEach(function(groupName) {
+      var group = inputDefs && inputDefs[groupName];
+      HIDDEN_WIDGETS.forEach(function(name) {
+        var definition = group && group[name];
+        if (!Array.isArray(definition)) return;
+        definition[1] = Object.assign({}, definition[1] || {}, {
+          hidden: true, vueNode: "never", hideInPanel: true
+        });
+      });
+    });
+
     var hideWidgets = function(node) {
       if (!node.widgets) return false;
       var found = false;
-      node.widgets.forEach(function(w) {
+      node.widgets.forEach(function(w, index) {
         if (HIDDEN_WIDGETS.includes(w.name)) {
           w.type = "hidden";
+          w.hidden = true;
+          w.options = w.options || {};
+          Object.assign(w.options, { hidden: true, vueNode: "never", hideInPanel: true });
           w.computeSize = function() { return [0, -4]; };
           w.draw = function() {};
+          node.widgets.splice(index, 1, w);
           found = true;
         }
       });
@@ -750,12 +962,14 @@ app.registerExtension({
       if (this._abInit) return;
       this._abInit = true;
 
-      this.setSize([960, 640]);
-      setTimeout(function(node) {
-        return function() {
-          if (!hideWidgets(node)) setTimeout(function() { hideWidgets(node); }, 500);
-        };
-      }(this), 300);
+      if (!this.size || Number(this.size[0]) < 480 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
+      hideWidgets(this);
+      var nodeRefForHide = this;
+      setTimeout(function() { hideWidgets(nodeRefForHide); }, 0);
+      setTimeout(function() { hideWidgets(nodeRefForHide); }, 250);
+      setTimeout(function() { hideWidgets(nodeRefForHide); }, 500);
 
       if (!document.getElementById("eagle-audio-browser-style")) {
         var style = document.createElement("style");
@@ -766,17 +980,41 @@ app.registerExtension({
 
       var el = document.createElement("div");
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
-      var widget = this.addDOMWidget("audio_browser", "div", el, { serialize: false, canvasOnly: true });
+      // Nodes 2.0 的 DOMWidget.computeLayoutSize 使用显式高度约束；固定像素避免
+      // 文件树内容或节点自身高度参与测量形成正反馈。
+      var INITIAL_VIEWPORT_HEIGHT = 640;
+      var MIN_VIEWPORT_HEIGHT = 300;
+      var currentViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+      var MAX_VIEWPORT_HEIGHT = 4096;
+      var widget = this.addDOMWidget("audio_browser", "div", el, {
+        serialize: false,
+        hideInPanel: true,
+        getMinHeight: function() { return MIN_VIEWPORT_HEIGHT; },
+        getMaxHeight: function() { return MAX_VIEWPORT_HEIGHT; },
+        getHeight: function() { return currentViewportHeight; },
+      });
       widget.width = undefined;
+      widget._eagleViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+      // No instance computeSize override: it would classify the full browser as
+      // a fixed-height widget and clip the user-resized surface at the minimum.
 
       var nodeRef = this;
       var applyFrame = function(size) {
         var nodeWidth = Number(size && size[0]) || 960;
-        var nodeHeight = Number(size && size[1]) || 640;
+        var nodeHeight = Number(size && size[1]) || 720;
         var w = Math.max(320, nodeWidth - 20);
-        var h = Math.max(300, nodeHeight - 80);
+        var h = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, nodeHeight - 80));
+        currentViewportHeight = h;
+        widget._eagleViewportHeight = h;
         el.style.width = w + "px";
         el.style.height = h + "px";
+        var host = el.parentElement;
+        if (host) {
+          host.style.width = w + "px";
+          host.style.maxWidth = "none";
+          host.style.overflow = "hidden";
+        }
+        nodeRef._abApp?.applySplitLayout();
         return [w, h];
       };
       this._abApplyFrame = applyFrame;
@@ -785,6 +1023,7 @@ app.registerExtension({
       try {
         this._abApp = new AudioBrowser(el, this);
         this._eagleRestoreUiState = () => this._abApp?.reloadStateFromNode();
+        this._eagleRestoreSplitLayout = () => this._abApp?.restoreSplitLayout();
       } catch (e) {
         console.error("[AudioBrowser] 初始化失败:", e);
         el.replaceChildren();
@@ -808,19 +1047,24 @@ app.registerExtension({
     var onConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function() {
       var result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+      hideWidgets(this);
       var nodeRef = this;
       setTimeout(function() {
+        hideWidgets(nodeRef);
         if (nodeRef._abApplyFrame) nodeRef._abApplyFrame(nodeRef.size);
+        nodeRef._eagleRestoreSplitLayout?.();
         nodeRef._eagleRestoreUiState?.();
       }, 0);
+      setTimeout(function() { hideWidgets(nodeRef); }, 250);
       return result;
     };
 
     var onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function() {
-      if (this._abApp) { this._abApp = null; }
+      if (this._abApp) { this._abApp.destroy(); this._abApp = null; }
       this._abApplyFrame = null;
       this._eagleRestoreUiState = null;
+      this._eagleRestoreSplitLayout = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

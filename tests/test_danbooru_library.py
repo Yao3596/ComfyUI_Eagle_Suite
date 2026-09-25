@@ -95,6 +95,60 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(self.lib.search("坐姿")[0]["name"], "sitting")
         self.assertEqual(len(self.lib.sample_pool(["pose.posture"])), 1)
 
+    def test_targeted_candidates_include_explicit_official_types_without_expanding_automatic_pool(self):
+        rows = [tag("artist_alias", 9, category=1),
+                tag("copyright_title", 8, category=3),
+                tag("character_name", 7, category=4),
+                tag("meta_marker", 6, category=5)]
+        self.lib.save_page("tags", rows, {})
+        automatic = {row["name"] for row in self.lib.candidates(20)}
+        self.assertNotIn("artist_alias", automatic)
+        self.assertNotIn("copyright_title", automatic)
+        self.assertNotIn("meta_marker", automatic)
+        targeted = self.lib.candidates(20, names=[row["name"] for row in rows])
+        self.assertEqual([row["name"] for row in targeted], [row["name"] for row in rows])
+        self.assertEqual([row["category"] for row in targeted], [1, 3, 4, 5])
+
+    def test_reviewed_translation_purpose_rating_and_body_facets_survive_reopen(self):
+        item = draft(kind="body", facets=["body.anatomy", "body.proportions"], cn_name="身体比例")
+        self.lib.save_drafts([item], [tag()], "connected-api-model")
+        self.assertEqual(self.lib.lookup(["sitting"])["sitting"]["kind"], "general")
+        self.assertEqual(self.lib.pending()[0]["kind"], "body")
+        self.lib.review("sitting", True)
+        reopened = mod.Library(self.lib.path)
+        result = reopened.search("身体比例")[0]
+        self.assertEqual(result["kind"], "body")
+        self.assertEqual(result["facets"], ["body.anatomy", "body.proportions"])
+        self.assertEqual(result["rating"], "safe")
+        self.assertEqual(result["nsfw"], 0)
+        self.assertEqual(reopened.translation_map()["sitting"], "身体比例")
+
+    def test_legacy_reviewed_annotation_without_kind_gets_facet_purpose(self):
+        self.lib.save_drafts([draft(facets=["face.eyes"])], [tag()], "legacy")
+        with self.lib.connect() as db:
+            row = db.execute("SELECT payload FROM annotations WHERE name='sitting'").fetchone()
+            payload = json.loads(row["payload"])
+            payload.pop("kind")
+            db.execute("UPDATE annotations SET payload=? WHERE name='sitting'", (json.dumps(payload),))
+        self.lib.review("sitting", True)
+        self.assertEqual(self.lib.lookup(["sitting"])["sitting"]["kind"], "face")
+
+    def test_person_safety_facets_require_consistent_rating_without_partial_write(self):
+        invalid = [
+            draft(kind="identity", facets=["identity.person_sfw"], rating="unknown"),
+            draft(kind="identity", facets=["identity.person_nsfw"], rating="safe"),
+            draft(kind="identity", facets=["identity.person_sfw", "identity.person_nsfw"], rating="safe"),
+            draft(kind="made_up"),
+        ]
+        for item in invalid:
+            with self.assertRaises(ValueError):
+                self.lib.save_drafts([item], [tag()], "connected-api-model")
+        self.assertEqual(self.lib.pending(), [])
+        self.lib.save_drafts([draft(kind="identity", facets=["identity.person_nsfw"], rating="explicit")], [tag()], "connected-api-model")
+        self.lib.review("sitting", True)
+        self.assertEqual(self.lib.lookup(["sitting"])["sitting"]["nsfw"], 1)
+        self.assertEqual(self.lib.search("sitting"), [])
+
     def test_official_refresh_preserves_reviewed_annotation(self):
         self.lib.save_drafts([draft()], [tag()], "test-model")
         self.lib.review("sitting", True)

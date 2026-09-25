@@ -4,7 +4,7 @@ import { app } from "../../../scripts/app.js";
 const MAX_INPUTS = 9;
 const PREFIX = "latent_";
 
-function syncInputs(node) {
+function syncInputs(node, options = {}) {
   const countWidget = node.widgets?.find((widget) => widget.name === "输入数量");
   const count = countWidget
     ? Math.max(1, Math.min(MAX_INPUTS, Number.parseInt(countWidget.value, 10) || 1))
@@ -27,8 +27,10 @@ function syncInputs(node) {
     }
   }
 
-  const computed = node.computeSize();
-  node.setSize([Math.max(node.size[0], computed[0]), computed[1]]);
+  if (!options.preserveSize) {
+    const computed = node.computeSize();
+    node.setSize([Math.max(node.size[0], computed[0]), computed[1]]);
+  }
   node.graph?.change?.();
   node.setDirtyCanvas(true, true);
 }
@@ -42,8 +44,16 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       originalCreated?.apply(this, arguments);
       const node = this;
-      setTimeout(() => syncInputs(node), 30);
+      setTimeout(() => syncInputs(node, { preserveSize: Boolean(node._eagleLatentSwitchConfigured) }), 30);
       node.addWidget("button", "更新输入", null, () => syncInputs(node));
+    };
+
+    const originalConfigured = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      const result = originalConfigured?.apply(this, arguments);
+      this._eagleLatentSwitchConfigured = true;
+      setTimeout(() => syncInputs(this, { preserveSize: true }), 0);
+      return result;
     };
   },
 });

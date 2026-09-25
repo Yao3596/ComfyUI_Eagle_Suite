@@ -8,7 +8,8 @@ import { app } from "../../../scripts/app.js";
 var MAX_INPUTS = 9;
 var PREFIX = "字符串_";
 
-function syncInputs(node) {
+function syncInputs(node, options) {
+  options = options || {};
   var countWidget = node.widgets && node.widgets.find(function (w) { return w.name === "输入数量"; });
   var count = countWidget ? Math.max(1, Math.min(MAX_INPUTS, parseInt(countWidget.value) || 1)) : 4;
 
@@ -36,8 +37,10 @@ function syncInputs(node) {
   // 修复：裁掉多余端口之后节点不会自动收缩——LiteGraph 只会自动"长大"以容纳
   // 内容，内容变少时不会自己缩回去，得手动重新计算一次尺寸，不然会留一大截
   // 空白（节点创建瞬间先按 32 个端口撑到最大，裁到 4 个之后空出来的那部分）。
-  var newSize = node.computeSize();
-  node.setSize([Math.max(node.size[0], newSize[0]), newSize[1]]);
+  if (!options.preserveSize) {
+    var newSize = node.computeSize();
+    node.setSize([Math.max(node.size[0], newSize[0]), newSize[1]]);
+  }
   node.graph?.change?.();
   node.setDirtyCanvas(true, true);
 }
@@ -53,11 +56,20 @@ app.registerExtension({
       var node = this;
       // 等 ComfyUI 把 INPUT_TYPES 里声明的全部 9 个 optional 输入端口都建好之后，
       // 再裁到「输入数量」widget 的默认值（4）。
-      setTimeout(function () { syncInputs(node); }, 30);
+      setTimeout(function () { syncInputs(node, { preserveSize: Boolean(node._eagleTextSwitchConfigured) }); }, 30);
 
       // 「更新输入」是纯前端按钮，Python 的 INPUT_TYPES 里不会有这个 widget
       // （按钮不对应任何执行时输入），要在这里自己加。
       node.addWidget("button", "更新输入", null, function () { syncInputs(node); });
+    };
+
+    var onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      var result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+      this._eagleTextSwitchConfigured = true;
+      var node = this;
+      setTimeout(function () { syncInputs(node, { preserveSize: true }); }, 0);
+      return result;
     };
   },
 });

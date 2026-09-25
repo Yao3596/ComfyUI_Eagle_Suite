@@ -70,3 +70,4 @@ input/
 
 # ── Local browser diagnostics / deploy backups ──
 .tmp_edge_*/
+deployment_backups/

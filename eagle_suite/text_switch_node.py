@@ -29,7 +29,7 @@ class EagleTextSwitchMulti:
         return {
             "required": {
                 "输入数量": ("INT", {"default": 4, "min": 1, "max": MAX_INPUTS, "step": 1}),
-                "模式": (["随机输出一个", "输出全部"], {"default": "随机输出一个"}),
+                "模式": (["输出全部", "随机输出一个"], {"default": "输出全部"}),
                 "分隔符": ("STRING", {"default": ", ", "multiline": False}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
             },

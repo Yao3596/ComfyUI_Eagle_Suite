@@ -6,7 +6,7 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import {
     createApp, defineComponent, reactive, computed, watch,
-    ref, nextTick, provide, inject
+    ref, nextTick, provide, inject, onBeforeUnmount
 } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 import { EAGLE_SETTING_IDS, getEagleSetting } from "./eagle_settings.js";
@@ -52,8 +52,13 @@ var H3D_CSS = `
 .h3d-btn.primary:hover{background:var(--h3d-primaryh);}
 .h3d-btn.danger:hover{border-color:var(--h3d-danger);color:var(--h3d-danger);}
 .h3d-btn.sm{padding:2px 7px;font-size:11px;}
-.h3d-body{display:flex;flex:1;min-height:0;overflow:hidden;}
-.h3d-col{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--h3d-bd);}
+.h3d-body{display:grid;flex:1;min-height:0;min-width:0;overflow:hidden;}
+.h3d-col{display:flex;flex-direction:column;min-height:0;min-width:0;border-right:1px solid var(--h3d-bd);}
+.h3d-splitter{position:relative;width:8px;min-width:8px;min-height:0;cursor:col-resize;touch-action:none;outline:none;background:color-mix(in srgb,var(--h3d-bg2) 84%,var(--h3d-bd) 16%);transition:background .12s;z-index:4;}
+.h3d-splitter:after{content:"";position:absolute;left:3px;top:12px;bottom:12px;width:2px;border-radius:2px;background:var(--h3d-bd);transition:background .12s,box-shadow .12s;}
+.h3d-splitter:hover,.h3d-splitter:focus-visible,.h3d-splitter.active{background:color-mix(in srgb,var(--h3d-primary) 22%,var(--h3d-bg2) 78%);}
+.h3d-splitter:hover:after,.h3d-splitter:focus-visible:after,.h3d-splitter.active:after{background:var(--h3d-primary);box-shadow:0 0 0 1px color-mix(in srgb,var(--h3d-primary) 30%,transparent);}
+.h3d-root.h3d-columns-resizing,.h3d-root.h3d-columns-resizing *{cursor:col-resize!important;user-select:none!important;}
 .h3d-col:last-child{border-right:none;}
 .h3d-col-hd{padding:7px 10px;font-size:12px;font-weight:600;color:#fff;background:var(--h3d-bg2);border-bottom:1px solid var(--h3d-bd);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
 .h3d-col-body{flex:1;min-height:0;padding:10px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;overflow-x:hidden;}
@@ -1031,6 +1036,214 @@ var H3DirectorApp = defineComponent({
             }
         });
 
+        // Three-column editor layout.  Ratios, rather than absolute pixels,
+        // keep the user's arrangement useful when the H3 node itself is
+        // resized or opened by the other ComfyUI renderer.
+        var H3_COLUMN_LAYOUT_PROPERTY = 'eagle_h3_column_layout';
+        var H3_COLUMN_LAYOUT_VERSION = 1;
+        var H3_COLUMN_SPLITTER_WIDTH = 8;
+        var H3_DEFAULT_COLUMN_RATIOS = [300 / 1280, 640 / 1280, 340 / 1280];
+        var H3_MIN_COLUMN_RATIOS = [0.14, 0.30, 0.16];
+        var bodyRef = ref(null);
+        var columnResizeActive = ref('');
+        var activeColumnDrag = null;
+
+        function normalizeColumnRatios(value) {
+            var source = Array.isArray(value) ? value : H3_DEFAULT_COLUMN_RATIOS;
+            var ratios = source.slice(0, 3).map(function(item) {
+                var number = Number(item);
+                return Number.isFinite(number) && number > 0 ? number : 0;
+            });
+            if (ratios.length !== 3 || ratios.some(function(item) { return item <= 0; })) {
+                ratios = H3_DEFAULT_COLUMN_RATIOS.slice();
+            }
+            var total = ratios.reduce(function(sum, item) { return sum + item; }, 0) || 1;
+            ratios = ratios.map(function(item) { return item / total; });
+
+            // Invalid or hand-edited properties must never collapse a column.
+            // Project the remaining share above the three minimums; a plain
+            // clamp followed by normalisation could push a minimum below its
+            // bound again.
+            var minimumTotal = H3_MIN_COLUMN_RATIOS.reduce(function(sum, item) { return sum + item; }, 0);
+            var extraBudget = Math.max(0, 1 - minimumTotal);
+            var weights = ratios.map(function(item, index) {
+                return Math.max(0, item - H3_MIN_COLUMN_RATIOS[index]);
+            });
+            var weightTotal = weights.reduce(function(sum, item) { return sum + item; }, 0);
+            if (!(weightTotal > 0)) {
+                weights = H3_DEFAULT_COLUMN_RATIOS.map(function(item, index) {
+                    return Math.max(0, item - H3_MIN_COLUMN_RATIOS[index]);
+                });
+                weightTotal = weights.reduce(function(sum, item) { return sum + item; }, 0) || 1;
+            }
+            return H3_MIN_COLUMN_RATIOS.map(function(minimum, index) {
+                return minimum + extraBudget * weights[index] / weightTotal;
+            });
+        }
+
+        function savedColumnRatios() {
+            var saved = props.node.properties && props.node.properties[H3_COLUMN_LAYOUT_PROPERTY];
+            return normalizeColumnRatios(saved && (saved.ratios || saved.column_ratios || saved));
+        }
+
+        var columnRatios = ref(savedColumnRatios());
+        var columnGridStyle = computed(function() {
+            var ratios = normalizeColumnRatios(columnRatios.value);
+            return {
+                gridTemplateColumns:
+                    'minmax(180px,' + ratios[0].toFixed(6) + 'fr) ' +
+                    H3_COLUMN_SPLITTER_WIDTH + 'px ' +
+                    'minmax(260px,' + ratios[1].toFixed(6) + 'fr) ' +
+                    H3_COLUMN_SPLITTER_WIDTH + 'px ' +
+                    'minmax(200px,' + ratios[2].toFixed(6) + 'fr)'
+            };
+        });
+
+        function persistColumnLayout(commit) {
+            var ratios = normalizeColumnRatios(columnRatios.value);
+            columnRatios.value = ratios;
+            props.node.properties = props.node.properties || {};
+            props.node.properties[H3_COLUMN_LAYOUT_PROPERTY] = {
+                version: H3_COLUMN_LAYOUT_VERSION,
+                ratios: ratios.map(function(item) { return Number(item.toFixed(6)); })
+            };
+            props.node.setDirtyCanvas?.(true, true);
+            if (commit) props.node.graph?.change?.();
+        }
+
+        function reloadColumnLayout() {
+            columnRatios.value = savedColumnRatios();
+        }
+        props.node._h3ReloadColumnLayout = reloadColumnLayout;
+
+        function stopColumnResize(commit, restoreStart) {
+            if (!activeColumnDrag) return;
+            var drag = activeColumnDrag;
+            activeColumnDrag = null;
+            drag.target.removeEventListener('pointermove', drag.move);
+            drag.target.removeEventListener('pointerup', drag.finish);
+            drag.target.removeEventListener('pointercancel', drag.cancel);
+            drag.target.removeEventListener('lostpointercapture', drag.cancel);
+            if (drag.target.hasPointerCapture?.(drag.pointerId)) {
+                drag.target.releasePointerCapture(drag.pointerId);
+            }
+            document.body.style.cursor = drag.oldCursor;
+            document.body.style.userSelect = drag.oldUserSelect;
+            columnResizeActive.value = '';
+            if (restoreStart) columnRatios.value = drag.startRatios.slice();
+            if (commit) persistColumnLayout(true);
+            else if (restoreStart) persistColumnLayout(false);
+        }
+
+        function beginColumnResize(boundary, event) {
+            if (event.pointerType !== 'touch' && event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            stopColumnResize(false, false);
+
+            var target = event.currentTarget;
+            var layout = bodyRef.value;
+            if (!target || !layout || !layout.getBoundingClientRect) return;
+            var plan = layout.querySelector('.h3d-column-plan');
+            var editor = layout.querySelector('.h3d-column-editor');
+            var right = layout.querySelector('.h3d-column-right');
+            if (!plan || !editor || !right) return;
+            var widths = [plan, editor, right].map(function(element) {
+                return Math.max(1, element.getBoundingClientRect().width);
+            });
+            var total = widths.reduce(function(sum, width) { return sum + width; }, 0);
+            if (!(total > 0)) return;
+
+            var pointerId = event.pointerId;
+            var startX = event.clientX;
+            var startRatios = normalizeColumnRatios(columnRatios.value);
+            var oldCursor = document.body.style.cursor;
+            var oldUserSelect = document.body.style.userSelect;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            columnResizeActive.value = boundary;
+            target.setPointerCapture?.(pointerId);
+
+            function move(moveEvent) {
+                if (moveEvent.pointerId !== pointerId) return;
+                moveEvent.preventDefault();
+                moveEvent.stopPropagation();
+                var delta = moveEvent.clientX - startX;
+                var next = widths.slice();
+                if (boundary === 'left') {
+                    var leftAndCenter = widths[0] + widths[1];
+                    var minLeft = total * H3_MIN_COLUMN_RATIOS[0];
+                    var minCenter = total * H3_MIN_COLUMN_RATIOS[1];
+                    next[0] = Math.max(minLeft, Math.min(leftAndCenter - minCenter, widths[0] + delta));
+                    next[1] = leftAndCenter - next[0];
+                } else {
+                    var centerAndRight = widths[1] + widths[2];
+                    var minimumCenter = total * H3_MIN_COLUMN_RATIOS[1];
+                    var minRight = total * H3_MIN_COLUMN_RATIOS[2];
+                    next[1] = Math.max(minimumCenter, Math.min(centerAndRight - minRight, widths[1] + delta));
+                    next[2] = centerAndRight - next[1];
+                }
+                columnRatios.value = normalizeColumnRatios(next.map(function(width) { return width / total; }));
+                persistColumnLayout(false);
+            }
+
+            function finish(finishEvent) {
+                if (finishEvent && finishEvent.pointerId != null && finishEvent.pointerId !== pointerId) return;
+                stopColumnResize(true, false);
+            }
+
+            function cancel(cancelEvent) {
+                if (cancelEvent && cancelEvent.pointerId != null && cancelEvent.pointerId !== pointerId) return;
+                stopColumnResize(false, true);
+            }
+
+            activeColumnDrag = {
+                boundary: boundary,
+                pointerId: pointerId,
+                target: target,
+                move: move,
+                finish: finish,
+                cancel: cancel,
+                startRatios: startRatios,
+                oldCursor: oldCursor,
+                oldUserSelect: oldUserSelect
+            };
+            target.addEventListener('pointermove', move);
+            target.addEventListener('pointerup', finish);
+            target.addEventListener('pointercancel', cancel);
+            target.addEventListener('lostpointercapture', cancel);
+        }
+
+        function nudgeColumnResize(boundary, event) {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            event.stopPropagation();
+            var direction = event.key === 'ArrowLeft' ? -0.02 : 0.02;
+            var ratios = normalizeColumnRatios(columnRatios.value);
+            if (boundary === 'left') {
+                var nextLeft = Math.max(H3_MIN_COLUMN_RATIOS[0], ratios[0] + direction);
+                var nextCenter = ratios[0] + ratios[1] - nextLeft;
+                if (nextCenter < H3_MIN_COLUMN_RATIOS[1]) return;
+                ratios[0] = nextLeft;
+                ratios[1] = nextCenter;
+            } else {
+                var center = ratios[1] + direction;
+                var nextRight = ratios[1] + ratios[2] - center;
+                if (center < H3_MIN_COLUMN_RATIOS[1] || nextRight < H3_MIN_COLUMN_RATIOS[2]) return;
+                ratios[1] = center;
+                ratios[2] = nextRight;
+            }
+            columnRatios.value = normalizeColumnRatios(ratios);
+            persistColumnLayout(true);
+        }
+
+        onBeforeUnmount(function() {
+            stopColumnResize(false, false);
+            if (props.node._h3ReloadColumnLayout === reloadColumnLayout) {
+                delete props.node._h3ReloadColumnLayout;
+            }
+        });
+
         // 分辨率预设联动（提取宽高写回project）
         function onSizePreset() {
             var val = store.project.sizePreset || '';
@@ -1967,11 +2180,15 @@ var H3DirectorApp = defineComponent({
             fileInput: fileInput, onFileChange: onFileChange,
             copyCompiled: copyCompiled, copyParams: copyParams,
             onSizePreset: onSizePreset, onCustomDimension: onCustomDimension,
-            toggleSizeLock: toggleSizeLock, onWorkflowType: onWorkflowType
+            toggleSizeLock: toggleSizeLock, onWorkflowType: onWorkflowType,
+            bodyRef: bodyRef, columnGridStyle: columnGridStyle,
+            columnResizeActive: columnResizeActive,
+            beginColumnResize: beginColumnResize,
+            nudgeColumnResize: nudgeColumnResize
         };
     },
     template: `
-<div class="h3d-root">
+<div class="h3d-root" :class="{'h3d-columns-resizing':!!columnResizeActive}">
   <div style="display:flex;gap:8px;align-items:center;padding:5px 12px;background:var(--h3d-bg2);border-bottom:1px solid var(--h3d-bd);font-size:11px">
     <span style="color:var(--h3d-muted)">导演风格</span>
     <select class="h3d-sel" v-model="store.project.skill.profile" style="width:auto">
@@ -2059,10 +2276,18 @@ var H3DirectorApp = defineComponent({
     <button class="h3d-btn" @click="copyParams">📤 参数</button>
     <button class="h3d-btn primary" @click="copyCompiled">📋 复制提示词</button>
   </div>
-  <div class="h3d-body">
-    <plan-panel style="flex:0 0 300px"></plan-panel>
-    <editor-panel style="flex:1;min-width:0"></editor-panel>
-    <right-panel style="flex:0 0 340px"></right-panel>
+  <div ref="bodyRef" class="h3d-body" :style="columnGridStyle">
+    <plan-panel class="h3d-column-plan"></plan-panel>
+    <div class="h3d-splitter" :class="{active:columnResizeActive==='left'}"
+         role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整规划栏与编辑栏宽度"
+         title="拖拽调整规划栏与编辑栏比例"
+         @pointerdown="beginColumnResize('left',$event)" @keydown="nudgeColumnResize('left',$event)"></div>
+    <editor-panel class="h3d-column-editor"></editor-panel>
+    <div class="h3d-splitter" :class="{active:columnResizeActive==='right'}"
+         role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整编辑栏与镜头栏宽度"
+         title="拖拽调整编辑栏与镜头栏比例"
+         @pointerdown="beginColumnResize('right',$event)" @keydown="nudgeColumnResize('right',$event)"></div>
+    <right-panel class="h3d-column-right"></right-panel>
   </div>
   <div class="h3d-statusbar">
     <span v-if="flashMsg" style="color:var(--h3d-primary)">{{ flashMsg }}</span>
@@ -3422,21 +3647,67 @@ app.registerExtension({
         if (nodeData.name !== 'EagleH3DirectorNode') return;
         console.log('[EagleH3Director] matched EagleH3DirectorNode, mounting...');
 
+        var hiddenStateNames = new Set(['h3_state', 'scene_index', 'LLM_HINT', 'skill_request']);
+        // Preview-oriented Eagle nodes share a predictable 960x720 starting
+        // frame.  The three columns scroll internally and their split ratios
+        // remain user controlled after creation.
+        var H3_DEFAULT_NODE_SIZE = [960, 720];
+        var H3_MIN_NODE_SIZE = [760, 560];
+        var H3_NODE_CHROME_HEIGHT = 150;
+        var H3_MIN_VIEWPORT_HEIGHT = 220;
+        var H3_LAYOUT_VERSION = 4;
+        var MAX_VIEWPORT_HEIGHT = 4096;
+        var inputDefs = (nodeData && (nodeData.input || nodeData.inputs)) || {};
+        ['required', 'optional'].forEach(function(groupName) {
+            var group = inputDefs[groupName] || {};
+            hiddenStateNames.forEach(function(name) {
+                var definition = group[name];
+                if (!Array.isArray(definition)) return;
+                definition[1] = {
+                    ...(definition[1] || {}),
+                    hidden: true,
+                    vueNode: 'never',
+                    hideInPanel: true
+                };
+            });
+        });
+
         var hideWidgets = function(node) {
             if (!node.widgets || !node.widgets.length) return false;
             var found = false;
             for (var i = 0; i < node.widgets.length; i++) {
                 var w = node.widgets[i];
-                if (w.name === 'h3_state' || w.name === 'scene_index' || w.name === 'LLM_HINT' || w.name === 'skill_request') {
+                if (hiddenStateNames.has(w.name)) {
                     w.type = 'hidden';
+                    w.options = w.options || {};
+                    Object.assign(w.options, { hidden: true, vueNode: "never", hideInPanel: true });
                     w.computeSize = function() { return [0, -4]; };
                     w.hidden = true;
                     w.draw = function() {};
                     found = true;
                 }
             }
-            if (found) node.setDirtyCanvas(true, true);
+            if (found) {
+                // Nodes 2.0 stores widgets in a shallow-reactive array. Nested
+                // option mutations alone do not invalidate its parameter rows;
+                // replacing the entries in-place makes visibility recalculate.
+                if (typeof node.widgets.splice === 'function') {
+                    var sameWidgets = node.widgets.slice();
+                    node.widgets.splice.apply(node.widgets, [0, node.widgets.length].concat(sameWidgets));
+                }
+                node.setDirtyCanvas(true, true);
+            }
             return found;
+        };
+
+        var scheduleHideWidgets = function(node) {
+            (node._h3HideWidgetTimers || []).forEach(function(timer) { clearTimeout(timer); });
+            hideWidgets(node);
+            node._h3HideWidgetTimers = [0, 250, 500].map(function(delay) {
+                return setTimeout(function() {
+                    if (node._h3Init !== false) hideWidgets(node);
+                }, delay);
+            });
         };
 
         var orig = nodeType.prototype.onNodeCreated;
@@ -3446,12 +3717,15 @@ app.registerExtension({
             this._h3Init = true;
 
             // 新节点默认落在左栏首个场景卡片下方；已有工作流尺寸由 onConfigure 恢复。
-            if (!this.size || this.size[0] < 760 || this.size[1] < 560) {
-                this.setSize([1300, 1080]);
+            if (!this.size || this.size[0] < H3_MIN_NODE_SIZE[0] || this.size[1] < H3_MIN_NODE_SIZE[1]) {
+                this.setSize(H3_DEFAULT_NODE_SIZE.slice());
             }
 
             var node = this;
-            setTimeout(function() { if (!hideWidgets(node)) setTimeout(function() { hideWidgets(node); }, 500); }, 300);
+            // Hide the serialized transport widgets before Nodes 2.0 creates
+            // parameter rows for them.  ComfyUI may append widgets in more than
+            // one pass, so repeat after both microtask and restore-time delays.
+            scheduleHideWidgets(node);
 
             if (!document.getElementById('h3d-global-style')) {
                 var s = document.createElement('style');
@@ -3462,27 +3736,42 @@ app.registerExtension({
 
             var el = document.createElement('div');
             el.style.cssText = 'display:block;min-width:0;max-width:100%;overflow:hidden;position:relative;box-sizing:border-box;';
+            var currentViewportHeight = H3_MIN_VIEWPORT_HEIGHT;
 
-            var widget = this.addDOMWidget('h3_director_ui', 'div', el, { serialize: false, canvasOnly: true });
+            var widget = this.addDOMWidget('h3_director_ui', 'div', el, {
+                serialize: false,
+                hideInPanel: true,
+                // Nodes 2.0 measures DOM widgets independently of LiteGraph's
+                // computeSize. Bound the viewport without feeding node height
+                // back into the layout pass.
+                getMinHeight: function() { return H3_MIN_VIEWPORT_HEIGHT; },
+                getMaxHeight: function() { return MAX_VIEWPORT_HEIGHT; },
+                getHeight: function() { return currentViewportHeight; }
+            });
             widget.width = undefined;
 
             var applySize = function(size) {
-                size = size || node.size || [1300, 1080];
-                var w = Math.max(700, Number(size[0] || 1300) - 20);
+                size = size || node.size || H3_DEFAULT_NODE_SIZE;
+                var w = Math.max(700, Number(size[0] || H3_DEFAULT_NODE_SIZE[0]) - 20);
                 // 内容区域可以缩小并在三栏内部滚动，不再反向把 LiteGraph 节点撑高。
-                var h = Math.max(220, Number(size[1] || 1080) - 150);
+                var h = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(
+                    H3_MIN_VIEWPORT_HEIGHT,
+                    Number(size[1] || H3_DEFAULT_NODE_SIZE[1]) - H3_NODE_CHROME_HEIGHT
+                ));
+                currentViewportHeight = h;
                 el.style.width = w + 'px';
                 el.style.maxWidth = w + 'px';
+                // Classic LiteGraph does not consistently resize the DOM host
+                // when only a percentage height is used.  Keep the actual DOM
+                // surface in lock-step with the measured widget height.
                 el.style.height = h + 'px';
-                widget.lastHeight = h;
-                widget.computedHeight = h;
                 return [w, h];
             };
-            widget.computeSize = function(width) {
-                var current = node.size || [width || 1300, 1080];
-                // 这里只声明最小占位；实际高度始终由用户的节点尺寸与 onResize 决定。
-                return [Math.max(700, Number(width || current[0]) - 20), 220];
-            };
+            // Do not install an instance computeSize here.  ComfyUI's
+            // DOMWidgetImpl supplies computeLayoutSize from getMin/MaxHeight;
+            // leaving that contract intact makes this the growable widget in
+            // both Classic and Nodes 2.0.  A fixed computeSize turns it into a
+            // fixed-height slot and clips the node after the user stretches it.
             applySize(this.size);
 
             console.log('[EagleH3Director] mounting Vue on node', this.id);
@@ -3534,6 +3823,7 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function(info) {
             if (onConfigure) onConfigure.apply(this, arguments);
             var node = this;
+            scheduleHideWidgets(node);
             // onNodeCreated 中 Vue 已挂载并暴露 _h3ReloadState；
             // 但 configure 在此之后才会把 workflow 保存的 widgets_values 写回 widget，
             // 因此必须在这里重新加载一次，否则刷新后节点会显示默认空状态。
@@ -3541,6 +3831,7 @@ app.registerExtension({
                 attempts = attempts || 0;
                 if (node._h3ReloadState) {
                     node._h3ReloadState();
+                    node._h3ReloadColumnLayout?.();
                 } else if (attempts < 20) {
                     setTimeout(function() { doReload(attempts + 1); }, 50);
                 } else {
@@ -3553,11 +3844,31 @@ app.registerExtension({
             });
         };
 
+        // Mark freshly saved nodes as using the compact layout.  The shared
+        // workflow migration sets the same marker while loading old nodes;
+        // setting it at serialization time means a user can enlarge a newly
+        // created H3 node before the first save without that deliberate size
+        // being mistaken for an old oversized default on the next load.
+        var onSerialize = nodeType.prototype.onSerialize;
+        nodeType.prototype.onSerialize = function(info) {
+            if (onSerialize) onSerialize.apply(this, arguments);
+            this.properties = this.properties || {};
+            this.properties.eagle_layout_size_version = H3_LAYOUT_VERSION;
+            if (info) {
+                info.properties = info.properties || {};
+                info.properties.eagle_layout_size_version = H3_LAYOUT_VERSION;
+            }
+        };
+
         var onRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function() {
             if (this._h3SaveTimer) { clearTimeout(this._h3SaveTimer); this._h3SaveTimer = null; }
+            (this._h3HideWidgetTimers || []).forEach(function(timer) { clearTimeout(timer); });
+            this._h3HideWidgetTimers = [];
+            this._h3Init = false;
             if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
             this._h3ReloadState = null;
+            this._h3ReloadColumnLayout = null;
             this._h3ApplyNodeSize = null;
             this._h3ContextLoopPlanJson = null;
             this._h3FlushState = null;

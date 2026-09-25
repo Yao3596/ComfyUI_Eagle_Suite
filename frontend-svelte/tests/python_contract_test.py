@@ -88,3 +88,65 @@ except ValueError:
     pass
 else:
     raise AssertionError("Python node accepted retry_length=125")
+
+
+review_runtime = load_module(
+    "eagle_suite.h3_pipeline.review_runtime",
+    PACKAGE_DIR / "h3_pipeline" / "review_runtime.py",
+)
+
+
+async def exercise_pending_review_recovery():
+    token_a, future_a = review_runtime.open_review("29.0.0.86", run_name="run-a")
+    token_b, _ = review_runtime.open_review("30.0.0.86", run_name="run-b")
+    try:
+        assert review_runtime.publish_review(token_a, {
+            "token": token_a,
+            "run_name": "run-a",
+            "node_id": "29.0.0.86",
+            "awaiting_review": True,
+        })
+        assert review_runtime.publish_review(token_b, {
+            "token": token_b,
+            "run_name": "run-b",
+            "node_id": "30.0.0.86",
+            "awaiting_review": True,
+        })
+
+        status, payload = review_runtime.lookup_pending_review("run-a", "86")
+        assert status == "ok"
+        assert payload["token"] == token_a
+        assert payload["node_id"] == "29.0.0.86"
+        assert review_runtime.lookup_pending_review("run-b", "86")[1]["token"] == token_b
+        assert review_runtime.lookup_pending_review("run-a", "28") == ("not_found", None)
+        assert review_runtime.lookup_pending_review("missing", "86") == ("not_found", None)
+
+        token_c, _ = review_runtime.open_review("31.0.0.86", run_name="run-a")
+        try:
+            assert review_runtime.lookup_pending_review("run-a", "86") == ("ambiguous", None)
+        finally:
+            review_runtime.close_review(token_c)
+
+        assert not review_runtime.publish_review(token_a, {
+            "run_name": "another-run",
+            "node_id": "29.0.0.86",
+        })
+        assert not review_runtime.publish_review(token_a, {
+            "run_name": "run-a",
+            "node_id": "29.0.0.28",
+        })
+        assert not review_runtime.resolve_review(token_a, {
+            "run_name": "run-b",
+            "decision": "approve",
+        })
+        assert review_runtime.resolve_review(token_a, {
+            "run_name": "run-a",
+            "decision": "approve",
+        })
+        assert (await future_a)["decision"] == "approve"
+    finally:
+        review_runtime.close_review(token_a)
+        review_runtime.close_review(token_b)
+
+
+asyncio.run(exercise_pending_review_recovery())

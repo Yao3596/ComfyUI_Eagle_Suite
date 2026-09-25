@@ -11,10 +11,13 @@ VIDEO 类型使用 ComfyUI 原生对象；内部仅在调用 ffmpeg 时解析为
 """
 
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -159,6 +162,50 @@ def _probe_frame_count(video_path):
     return 0
 
 
+def probe_decoded_frame_count(video_path):
+    """Count decodable video frames, not just container duration or advertised frames."""
+    path = _resolve_video_path(video_path)
+    if not path or os.path.getsize(path) == 0:
+        return 0
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        ffmpeg = get_cached_ffmpeg()
+        if ffmpeg:
+            sibling = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+            if sibling.is_file():
+                ffprobe = str(sibling)
+    if ffprobe:
+        try:
+            result = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "v:0", "-count_frames",
+                 "-show_entries", "stream=nb_read_frames", "-of", "json", path],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                streams = json.loads(result.stdout).get("streams") or []
+                count = (streams[0] if streams else {}).get("nb_read_frames")
+                if count and str(count).isdigit():
+                    return int(count)
+        except Exception as error:
+            logger.debug(f"[H3Chain] ffprobe 实际计帧失败: {error}")
+    try:
+        import cv2
+        capture = cv2.VideoCapture(path)
+        if not capture.isOpened():
+            return 0
+        count = 0
+        while True:
+            readable, _frame = capture.read()
+            if not readable:
+                break
+            count += 1
+        capture.release()
+        return count
+    except Exception as error:
+        logger.debug(f"[H3Chain] 视频解码计帧失败: {error}")
+        return 0
+
+
 def extract_frames(video_path, fps=None, last=None, limit=None):
     """
     从视频抽取帧。
@@ -277,33 +324,180 @@ def trim_video(in_path, out_path, start, end, unit="sec", fps=24):
     return str(out_path)
 
 
-def concat_videos(clip_paths, out_path, fps=None):
-    """用 ffmpeg concat demuxer 无损拼接多个视频。"""
-    ffmpeg = _check_ffmpeg()
-    out_path = Path(out_path)
-    ensure_dir(str(out_path.parent))
+def _concat_probe_path(ffmpeg):
+    """Prefer ffprobe, including one bundled next to the selected ffmpeg."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        return ffprobe
+    sibling = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+    return str(sibling) if sibling.is_file() else None
 
-    list_file = out_path.with_suffix(out_path.suffix + ".concat.txt")
-    abs_paths = [str(Path(p).resolve()) for p in clip_paths if p and os.path.isfile(p)]
-    if not abs_paths:
-        raise ValueError("[H3Chain] 没有可拼接的视频")
-    with open(list_file, "w", encoding="utf-8") as f:
-        for p in abs_paths:
-            f.write(f"file '{p}'\n")
 
-    cmd = [
-        ffmpeg, "-y", "-f", "concat", "-safe", "0",
-        "-i", str(list_file), "-c", "copy", str(out_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True)
+def _parse_rate(value):
     try:
-        list_file.unlink(missing_ok=True)
-    except Exception:
-        pass
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"[H3Chain] 拼接失败: {result.stderr.decode('utf-8', errors='ignore')[:400]}"
+        rate = float(Fraction(str(value)))
+        return rate if math.isfinite(rate) and rate > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _probe_concat_streams(path, ffmpeg, ffprobe):
+    """Probe every media stream; reject unknown layouts instead of copying blindly."""
+    if ffprobe:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name,profile,width,height,pix_fmt,avg_frame_rate,"
+             "r_frame_rate,sample_rate,channels,channel_layout", "-of", "json", path],
+            capture_output=True, text=True, timeout=30,
         )
+        if result.returncode != 0:
+            raise RuntimeError(f"[H3Chain] 无法探测拼接输入 {path}: {result.stderr[:300]}")
+        try:
+            return json.loads(result.stdout).get("streams") or []
+        except (ValueError, TypeError) as error:
+            raise RuntimeError(f"[H3Chain] 无法解析拼接输入 {path} 的流信息") from error
+
+    # Some ComfyUI distributions ship ffmpeg without ffprobe. The input banner
+    # still describes streams; incomplete banners are rejected by preflight.
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", path],
+        capture_output=True, text=True, errors="replace", timeout=30,
+    )
+    streams = []
+    for line in result.stderr.splitlines():
+        if not re.match(r"\s*Stream #0:\d+", line):
+            continue
+        if "Video: " in line:
+            details = line.split("Video: ", 1)[1]
+            fields = [field.strip() for field in details.split(",")]
+            # Avoid matching codec tags such as "0x31637661" as a dimension.
+            size = re.search(r"(?<!\w)([1-9]\d{1,4})x([1-9]\d{1,4})(?!\w)", details)
+            rate = re.search(r"\b(\d+(?:\.\d+)?(?:/\d+)?) fps\b", details)
+            streams.append({
+                "codec_type": "video", "codec_name": fields[0].split()[0],
+                "profile": re.search(r"\(([^)]+)\)", fields[0]).group(1)
+                           if re.search(r"\(([^)]+)\)", fields[0]) else None,
+                "pix_fmt": fields[1].split("(")[0].strip() if len(fields) > 1 else None,
+                "width": int(size.group(1)) if size else None,
+                "height": int(size.group(2)) if size else None,
+                "avg_frame_rate": rate.group(1) if rate else None,
+            })
+        elif "Audio: " in line:
+            details = line.split("Audio: ", 1)[1]
+            fields = [field.strip() for field in details.split(",")]
+            sample_rate = re.search(r"\b(\d+) Hz\b", details)
+            layout = next((name for name in ("mono", "stereo", "5.1", "7.1")
+                           if re.search(rf"\b{re.escape(name)}\b", details)), None)
+            channels = {"mono": 1, "stereo": 2, "5.1": 6, "7.1": 8}.get(layout)
+            streams.append({
+                "codec_type": "audio", "codec_name": fields[0].split()[0],
+                "profile": re.search(r"\(([^)]+)\)", fields[0]).group(1)
+                           if re.search(r"\(([^)]+)\)", fields[0]) else None,
+                "sample_rate": int(sample_rate.group(1)) if sample_rate else None,
+                "channels": channels, "channel_layout": layout,
+            })
+        else:
+            streams.append({"codec_type": "other"})
+    return streams
+
+
+def _concat_stream_signature(path, ffmpeg, ffprobe):
+    streams = _probe_concat_streams(path, ffmpeg, ffprobe)
+    video = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if len(video) != 1 or len(audio) > 1 or len(video) + len(audio) != len(streams):
+        raise ValueError(
+            f"[H3Chain] 无法安全无损拼接 {path}: 仅支持单视频流和最多单音轨"
+        )
+    v = video[0]
+    rate = _parse_rate(v.get("avg_frame_rate")) or _parse_rate(v.get("r_frame_rate"))
+    v_signature = (v.get("codec_name"), v.get("profile"), v.get("pix_fmt"),
+                   v.get("width"), v.get("height"))
+    if not rate or any(value in (None, "", 0) for value in
+                       (v_signature[0], *v_signature[2:])):
+        raise ValueError(f"[H3Chain] 无法确认 {path} 的视频编码、尺寸或 fps，拒绝无损拼接")
+    a_signature = None
+    if audio:
+        a = audio[0]
+        a_signature = (a.get("codec_name"), a.get("profile"),
+                       a.get("sample_rate"), a.get("channels"),
+                       a.get("channel_layout"))
+        if any(value in (None, "", 0) for value in a_signature[:1] + a_signature[2:4]):
+            raise ValueError(f"[H3Chain] 无法确认 {path} 的音轨编码，拒绝无损拼接")
+    return v_signature, rate, a_signature
+
+
+def concat_videos(clip_paths, out_path, fps=None):
+    """Preflight media streams, then use ffmpeg concat demuxer for lossless copy."""
+    if not clip_paths or any(not p or not os.path.isfile(p) for p in clip_paths):
+        raise ValueError("[H3Chain] 拼接输入包含缺失视频")
+    requested_fps = _parse_rate(fps) if fps is not None else None
+    if fps is not None and requested_fps is None:
+        raise ValueError("[H3Chain] 拼接 fps 必须是正数")
+    ffmpeg = _check_ffmpeg()
+    ffprobe = _concat_probe_path(ffmpeg)
+    abs_paths = [str(Path(p).resolve()) for p in clip_paths]
+    out_path = Path(out_path)
+    if os.path.normcase(str(out_path.resolve())) in map(os.path.normcase, abs_paths):
+        raise ValueError("[H3Chain] 拼接输出不能覆盖输入视频")
+    first_signature = None
+    for index, path in enumerate(abs_paths, start=1):
+        signature = _concat_stream_signature(path, ffmpeg, ffprobe)
+        if requested_fps is not None and not math.isclose(
+            signature[1], requested_fps, rel_tol=0.0005, abs_tol=0.001
+        ):
+            raise ValueError(
+                f"[H3Chain] 第 {index} 段 fps={signature[1]:g} 与请求的 fps={requested_fps:g} 不符；"
+                "无损拼接不能改变帧率"
+            )
+        if first_signature is not None:
+            first_video, first_rate, first_audio = first_signature
+            video, rate, audio = signature
+            if video != first_video or not math.isclose(
+                rate, first_rate, rel_tol=0.0005, abs_tol=0.001
+            ) or audio != first_audio:
+                raise ValueError(
+                    f"[H3Chain] 第 {index} 段与第 1 段的视频编码/尺寸/fps 或音轨结构/编码不兼容；"
+                    "拒绝无损拼接以免输出缺帧或丢音"
+                )
+        else:
+            first_signature = signature
+
+    ensure_dir(str(out_path.parent))
+    list_path = None
+    staged_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=out_path.stem + "_",
+            suffix=".concat.txt", dir=out_path.parent, delete=False,
+        ) as list_file:
+            list_path = Path(list_file.name)
+            for path in abs_paths:
+                list_file.write("file '" + path.replace("'", "'\\''") + "'\n")
+        with tempfile.NamedTemporaryFile(
+            prefix=out_path.stem + "_", suffix=out_path.suffix,
+            dir=out_path.parent, delete=False,
+        ) as staged_file:
+            staged_path = Path(staged_file.name)
+        cmd = [
+            ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+            "-map", "0:v:0",
+        ]
+        if first_signature[2] is not None:
+            cmd += ["-map", "0:a:0"]
+        cmd += ["-c", "copy", str(staged_path)]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0 or staged_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"[H3Chain] 拼接失败: {result.stderr.decode('utf-8', errors='ignore')[:400]}"
+            )
+        os.replace(staged_path, out_path)
+        staged_path = None
+    finally:
+        if list_path:
+            list_path.unlink(missing_ok=True)
+        if staged_path:
+            staged_path.unlink(missing_ok=True)
     return str(out_path)
 
 

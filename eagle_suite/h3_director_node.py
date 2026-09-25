@@ -526,15 +526,26 @@ def _build_plan_preflight(project, plan, source_scenes=None):
         previous_start = start
 
     compatibility = plan.get("compatibility") or {}
+    interaction = _safe_get(project, "interaction", {}) or {}
+    if (
+        len(plan.get("shots") or []) > 1
+        and _safe_get(project, "workflowType", "") == "character_interaction"
+        and _safe_get(interaction, "outputMode", "single_loop") == "single_loop"
+    ):
+        warnings.append(
+            "[H3-W202] 多场角色交互当前选择“单段无缝循环”：每段会优先让首尾帧闭合，"
+            "而非承接上一段动作、镜头与声音。若目标是连续接力，请改选“连续链”；"
+            "若目标是独立循环片段，可保留当前模式。"
+        )
     width = int(compatibility.get("width", 0) or 0)
     height = int(compatibility.get("height", 0) or 0)
     max_raw_frames = max(
         [int(shot.get("raw_frames", 0) or 0) for shot in plan.get("shots") or []]
         or [0]
     )
-    # 960x544 x 124f is the conservative 0.5MP/roughly-five-second baseline
-    # used by the bundled 16GB workflow.  This is a warning rather than a hard
-    # gate because quantization, offload and patch nodes change the real limit.
+    # This measures the director's first sampling canvas only. The downstream
+    # latent upscaler and video super-resolution are separate workflow nodes;
+    # they must not be silently counted as part of the displayed 0.5MP preset.
     baseline_volume = 960 * 544 * 124
     workload_ratio = (
         (width * height * max_raw_frames) / float(baseline_volume)
@@ -542,9 +553,11 @@ def _build_plan_preflight(project, plan, source_scenes=None):
     )
     if workload_ratio > 1.5:
         warnings.append(
-            f"[H3-W201] 单段峰值工作量约为 0.5MP/124帧基线的 {workload_ratio:.1f}× "
+            f"[H3-W201] 首次采样工作量约为 0.5MP/124帧基线的 {workload_ratio:.1f}× "
             f"({width}×{height}, {max_raw_frames}帧)。16GB 显存建议使用 "
-            "MiniMax Chunk FeedForward，必要时缩短单场景时长。"
+            "MiniMax Chunk FeedForward，必要时缩短单场景时长。此数值未计入工作流中"
+            "可能存在的 latent 放大、第二次采样和 RTX 超分；最终显存峰值需要"
+            "按实际连接的下游节点另行核对。"
         )
 
     # Knowledge-backed prompt contract checks. These run before any sampler or
@@ -630,6 +643,120 @@ def _build_plan_preflight(project, plan, source_scenes=None):
         "checked_shots": len(plan.get("shots") or []),
         "issues": issues,
     }
+
+
+def _connected_stage_workload(prompt, source_node_id, plan):
+    """Describe only generation stages downstream of this director in PROMPT.
+
+    The displayed resolution preset is the *first* H3 canvas. A connected
+    latent upscaler, second sampler or RTX frame upscaler may work on a much
+    larger canvas. This is a pixels-times-frames warning, not a VRAM forecast.
+    """
+    if not isinstance(prompt, dict) or not source_node_id:
+        return None
+    source = str(source_node_id)
+    children = {}
+    for node_id, info in prompt.items():
+        if not isinstance(info, dict):
+            continue
+        for value in (info.get("inputs") or {}).values():
+            if (isinstance(value, (list, tuple)) and len(value) == 2
+                    and isinstance(value[1], int)):
+                children.setdefault(str(value[0]), set()).add(str(node_id))
+    reachable, queue = set(), [source]
+    while queue:
+        parent = queue.pop(0)
+        for child in children.get(parent, ()):
+            if child not in reachable:
+                reachable.add(child)
+                queue.append(child)
+    if not reachable:
+        return None
+
+    compat = plan.get("compatibility") or {}
+    width = int(compat.get("width", 0) or 0)
+    height = int(compat.get("height", 0) or 0)
+    shots = plan.get("shots") or []
+    raw_frames = max((int(s.get("raw_frames", 0) or 0) for s in shots), default=0)
+    delivered_frames = max(
+        (int(s.get("delivered_frames", 0) or 0) for s in shots), default=0
+    )
+    if not (width and height and raw_frames):
+        return None
+
+    def _scalar_scale(inputs, key):
+        value = inputs.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = float(value)
+            return value if 0 < value <= 8 else None
+        return None
+
+    latent_scale = None
+    rtx_scale = None
+    sampler_count = 0
+    for node_id in reachable:
+        info = prompt.get(node_id)
+        if info is None and node_id.isdigit():
+            info = prompt.get(int(node_id))
+        if not isinstance(info, dict):
+            continue
+        node_type = str(info.get("class_type") or "")
+        inputs = info.get("inputs") or {}
+        if node_type == "SamplerCustomAdvanced":
+            sampler_count += 1
+        elif node_type == "MinimaxH3LatentUpscaler3D":
+            latent_scale = _scalar_scale(inputs, "mode.scale")
+        elif node_type == "RTXVideoSuperResolution":
+            rtx_scale = _scalar_scale(inputs, "resize_type.scale")
+    if latent_scale is None and rtx_scale is None and sampler_count < 2:
+        return None
+
+    stages = [{"name": "H3 首采", "width": width, "height": height,
+               "frames": raw_frames, "relative_pixels": 1.0}]
+    current_scale = 1.0
+    if latent_scale is not None:
+        current_scale *= latent_scale
+        stages.append({
+            "name": "latent 放大/二采",
+            "width": int(round(width * current_scale)),
+            "height": int(round(height * current_scale)),
+            "frames": raw_frames,
+            "relative_pixels": round(current_scale * current_scale, 2),
+        })
+    if rtx_scale is not None:
+        current_scale *= rtx_scale
+        stages.append({
+            "name": "RTX 成片",
+            "width": int(round(width * current_scale)),
+            "height": int(round(height * current_scale)),
+            "frames": delivered_frames or raw_frames,
+            "relative_pixels": round(current_scale * current_scale, 2),
+        })
+    return {"stages": stages, "sampler_count": sampler_count,
+            "latent_scale": latent_scale, "rtx_scale": rtx_scale}
+
+
+def _attach_connected_stage_preflight(plan, prompt, source_node_id):
+    estimate = _connected_stage_workload(prompt, source_node_id, plan)
+    if not estimate:
+        return
+    preflight = plan.setdefault("preflight", {})
+    stages = estimate["stages"]
+    stage_text = " → ".join(
+        f"{stage['name']} {stage['width']}×{stage['height']}/{stage['frames']}帧"
+        for stage in stages
+    )
+    warning = (
+        f"[H3-W203] 当前连接链：{stage_text}；可达采样器 {estimate['sampler_count']} 个。"
+        "输入尺寸预设只描述首采；下游像素量和显存需求可能显著增加。"
+        "这里是尺寸/帧数提示，并非显存容量保证。"
+    )
+    preflight.setdefault("warnings", []).append(warning)
+    preflight.setdefault("issues", []).append({
+        "severity": "warning", "code": "H3-W203",
+        "message": warning.removeprefix("[H3-W203] "),
+    })
+    preflight["connected_stage_workload"] = estimate
 
 
 def _used_ref_indices(project):
@@ -2574,6 +2701,14 @@ def _probe_media_duration(path, media_type):
     return 0.0
 
 
+# A ref_videos.ref_video_* input is a float32 NHWC IMAGE batch, not a native
+# VIDEO handle. Bound the materialized batch before decoding: three official
+# slots can otherwise retain several GB of reference frames in the director.
+H3_REF_VIDEO_MAX_FRAMES = 96
+H3_REF_VIDEO_MAX_PIXELS = 250_000
+H3_REF_VIDEO_MAX_TENSOR_BYTES = 192 * 1024 * 1024
+
+
 def _load_video_tensor(filename, trim_start=0.0, trim_end=0.0, target_fps=24):
     path = _media_path(filename)
     if not path:
@@ -2596,20 +2731,65 @@ def _load_video_tensor(filename, trim_start=0.0, trim_end=0.0, target_fps=24):
             end = duration
         start_frame = max(0, int(round(start * source_fps)))
         end_frame = total_frames if end <= 0 else min(total_frames, int(round(end * source_fps)))
-        step = max(1, int(round(source_fps / max(1, int(target_fps or 24)))))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        frames = []
-        frame_index = start_frame
-        max_frames = H3_MAX_FRAMES
-        while frame_index < end_frame and len(frames) < max_frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if (frame_index - start_frame) % step == 0:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(torch.from_numpy(np.ascontiguousarray(rgb)).float() / 255.0)
-            frame_index += 1
-        return torch.stack(frames) if frames else None
+        if end_frame <= start_frame or not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame):
+            return None
+        # Read only one frame to learn the real dimensions; container metadata
+        # can be absent or stale. A fixed output size also tolerates streams
+        # whose decoded frame dimensions vary unexpectedly.
+        ok, first_frame = cap.read()
+        if not ok:
+            return None
+        source_h, source_w = first_frame.shape[:2]
+        if source_h <= 0 or source_w <= 0:
+            return None
+        scale = min(1.0, (H3_REF_VIDEO_MAX_PIXELS / float(source_w * source_h)) ** 0.5)
+        output_w = max(1, int(source_w * scale))
+        output_h = max(1, int(source_h * scale))
+        # int rounding can only reduce pixels, never breach the ceiling.
+        frame_budget = H3_REF_VIDEO_MAX_TENSOR_BYTES // (output_w * output_h * 3 * 4)
+        max_frames = max(1, min(H3_REF_VIDEO_MAX_FRAMES, frame_budget))
+        span = end_frame - start_frame
+        fps_step = max(1, int(round(source_fps / max(1, int(target_fps or 24)))))
+        sample_count = min(max_frames, (span + fps_step - 1) // fps_step)
+        if sample_count <= 0:
+            return None
+        # Uniform coverage matters for long motion references: truncating at
+        # max_frames would silently discard the end of the requested trim.
+        positions = [
+            start_frame + (round(i * (span - 1) / (sample_count - 1))
+                           if sample_count > 1 else 0)
+            for i in range(sample_count)
+        ]
+        result = torch.empty((sample_count, output_h, output_w, 3), dtype=torch.float32)
+        loaded = 0
+        for position in positions:
+            if position == start_frame and loaded == 0:
+                frame = first_frame
+            else:
+                # Seeking skips unselected frames rather than reading every
+                # source frame into Python before Ref2VA selects the reference.
+                if not cap.set(cv2.CAP_PROP_POS_FRAMES, position):
+                    break
+                ok, frame = cap.read()
+                if not ok:
+                    break
+            if frame.shape[1] != output_w or frame.shape[0] != output_h:
+                frame = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            result[loaded].copy_(
+                torch.from_numpy(np.ascontiguousarray(rgb)).to(dtype=torch.float32).div_(255.0)
+            )
+            loaded += 1
+        if loaded < sample_count:
+            logger.warning(
+                f"[EagleH3Director] 参考视频 {filename} 只读取 {loaded}/{sample_count} 帧"
+            )
+        if loaded:
+            logger.info(
+                f"[EagleH3Director] 参考视频 {filename} 解码 {loaded} 帧，"
+                f"每帧 {output_w}x{output_h}，张量 <= {H3_REF_VIDEO_MAX_TENSOR_BYTES // (1024 * 1024)} MiB"
+            )
+        return result[:loaded] if loaded else None
     except Exception as e:
         logger.warning(f"[EagleH3Director] 参考视频加载失败 {filename}: {e}")
         return None
@@ -2767,6 +2947,7 @@ class EagleH3DirectorNode:
             },
             "hidden": {
                 "node_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
             },
         }
 
@@ -2812,6 +2993,7 @@ class EagleH3DirectorNode:
         api_config = kwargs.get("api_config", None)
         local_model = kwargs.get("local_model", None)
         node_id = kwargs.get("node_id", "")
+        prompt = kwargs.get("prompt")
 
         # 解析状态
         try:
@@ -2881,6 +3063,7 @@ class EagleH3DirectorNode:
 
         # plan dict — ethanfel H3_CHAIN_PLAN 对象
         plan_data = compile_h3_params(project, scenes, LLM_HINT or "")
+        _attach_connected_stage_preflight(plan_data, prompt, node_id)
 
         # 参考图：按槽位占位，确保 REF_IMAGES[i] 严格对应 @ref(i+1)
         import torch
@@ -2904,6 +3087,10 @@ class EagleH3DirectorNode:
         for item in media_refs:
             if item.get("type") != "video":
                 continue
+            # The stock Ref2VA interface has exactly three video slots. Do
+            # not decode overflow references that media_bundle later drops.
+            if len(ref_videos) >= 3:
+                break
             trim_start = float(item.get("trimStart", 0.0) or 0.0)
             trim_end = float(item.get("trimEnd", item.get("duration", 0.0)) or 0.0)
             tensor = _load_video_tensor(

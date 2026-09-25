@@ -16,6 +16,23 @@ from .eagle_client import eagle_client
 from .utils import generate_unique_filename, parse_tags
 from .logger import logger
 
+STAR_OPTIONS = [
+    "0 ☆☆☆☆☆",
+    "1 ★☆☆☆☆",
+    "2 ★★☆☆☆",
+    "3 ★★★☆☆",
+    "4 ★★★★☆",
+    "5 ★★★★★",
+]
+
+
+def _parse_star(value) -> int:
+    """兼容旧工作流的整数评分与新的“数字 + 星级”选项。"""
+    try:
+        return max(0, min(5, int(str(value).strip().split()[0])))
+    except (TypeError, ValueError, IndexError):
+        return 0
+
 class EagleSaver:
     """Eagle 图片保存器 - 将 ComfyUI 图像保存到 Eagle 软件或本地"""
 
@@ -72,14 +89,11 @@ class EagleSaver:
                 "overwrite": ("BOOLEAN", {"default": False}),
                 "save_metadata_in_png": ("BOOLEAN", {"default": True, "tooltip": "将 prompt/workflow 元数据嵌入 PNG 文件内部，与 ComfyUI 默认保存方式一致"}),
                 "save_metadata_json": ("BOOLEAN", {"default": False, "tooltip": "额外输出同名 .png.json 元数据文件"}),
+                "star": (STAR_OPTIONS, {"default": STAR_OPTIONS[0]}),
                 "tags": ("STRING", {
                     "default": "",
                     "multiline": True,
                     "placeholder": "Eagle 标签：用逗号或换行分隔"
-                }),
-                "star": ("INT", {
-                    "default": 0,
-                    "min": 0, "max": 5, "step": 1,
                 }),
                 "annotation": ("STRING", {
                     "default": "",
@@ -112,6 +126,7 @@ class EagleSaver:
                     tags="", star=0, annotation="",
                     prompt=None, extra_pnginfo=None):
 
+        star = _parse_star(star)
         filename_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_prefix or "ComfyUI")).strip(" .") or "ComfyUI"
         filename_separator = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_separator or "_"))
 

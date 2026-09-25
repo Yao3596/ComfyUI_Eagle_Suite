@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -15,8 +16,10 @@ import torch
 
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-COMFY_ROOT = pathlib.Path(os.environ.get("COMFYUI_ROOT", r"E:\ComfyUI-AKI\ComfyUI"))
-sys.path.insert(0, str(COMFY_ROOT))
+COMFY_ROOT = os.environ.get("COMFYUI_ROOT")
+if COMFY_ROOT:
+    COMFY_ROOT = pathlib.Path(COMFY_ROOT).expanduser()
+    sys.path.insert(0, str(COMFY_ROOT))
 SPEC = importlib.util.spec_from_file_location(
     "eagle_suite_test_package",
     REPO / "__init__.py",
@@ -28,6 +31,33 @@ SPEC.loader.exec_module(PACKAGE)
 
 
 class RegressionTests(unittest.TestCase):
+    def test_eagle_gallery_first_run_restores_mode_and_sequence_index(self):
+        from PIL import Image
+        from eagle_suite_test_package.eagle_suite import eagle_gallery
+
+        selection_data = json.dumps({
+            "selections": [
+                {"id": "first", "filePath": "first.png", "tags": ["first"]},
+                {"id": "second", "filePath": "second.png", "tags": ["second"]},
+            ],
+            "output_mode": "rgba",
+            "sequence_index": 1,
+        })
+        with mock.patch.object(eagle_gallery, "_get_cached_selection", return_value={}), \
+             mock.patch.object(eagle_gallery, "_selection_cache", {}), \
+             mock.patch.object(
+                 eagle_gallery, "_resolve_image_path",
+                 side_effect=lambda selection: (Image.new("RGBA", (2, 2)), selection["id"]),
+             ):
+            images, tags, restored, next_index = eagle_gallery.EagleGalleryNode().load_images(
+                selection_data=selection_data, node_id="restore-test"
+            )
+
+        self.assertEqual(4, images[0].shape[-1])
+        self.assertEqual("second", tags[0])
+        self.assertEqual(0, next_index)
+        self.assertEqual("rgba", json.loads(restored)["output_mode"])
+
     def test_eagle_tags_use_reviewed_danbooru_bilingual_taxonomy(self):
         from eagle_suite_test_package.eagle_suite import eagle_gallery
         from eagle_suite_test_package.eagle_suite.danbooru_library import Library
@@ -321,6 +351,36 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertEqual("api", kind)
         self.assertEqual("", transport["key"])
+        with self.assertRaisesRegex(ValueError, "本地模型端口"):
+            search._select_library_port_transport(
+                ("billing-key", "https://example.invalid/v1", "paid-model"),
+                {"path": ""},
+            )
+
+    def test_danbooru_connected_api_transport_is_offline_mocked_and_key_decoded(self):
+        from eagle_suite_test_package.eagle_suite import danbooru_search as search
+        from eagle_suite_test_package.eagle_suite import api_config_manager as manager
+
+        rows = [{"name": "sitting", "category": 0, "post_count": 10000,
+                 "groups": [], "official_wiki": None}]
+        payload = [{"name": "sitting", "cn_name": "坐姿", "kind": "action",
+                    "facets": ["pose.posture"], "confidence": .95,
+                    "rating": "unknown", "note": "待人工核定"}]
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"choices": [{"finish_reason": "stop",
+            "message": {"content": json.dumps(payload, ensure_ascii=False)}}]}
+        with mock.patch.object(manager, "decode_api_key", return_value="decoded-key"), \
+             mock.patch("requests.post", return_value=response) as post:
+            result, label = search._library_model_from_ports(rows, api_config={
+                "api_key": "encoded-key", "base_url": "https://example.invalid/v1",
+                "model": "paid-model",
+            })
+        self.assertEqual(payload, result)
+        self.assertEqual("api:paid-model", label)
+        self.assertEqual("https://example.invalid/v1/chat/completions", post.call_args.args[0])
+        self.assertEqual("Bearer decoded-key", post.call_args.kwargs["headers"]["Authorization"])
+        self.assertEqual("paid-model", post.call_args.kwargs["json"]["model"])
+        self.assertEqual(rows[0]["name"], json.loads(post.call_args.kwargs["json"]["messages"][1]["content"])[0]["name"])
 
     def test_danbooru_library_canvas_fill_is_one_shot(self):
         from eagle_suite_test_package.eagle_suite import danbooru_search as search
@@ -347,6 +407,107 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(1, generate.call_count)
             self.assertEqual(1, library.status()["annotations"]["pending"])
             self.assertEqual("request-1", library.checkpoint("port_fill:42")["request_id"])
+
+    def test_danbooru_selected_tags_fill_is_targeted_pending_and_one_shot(self):
+        from eagle_suite_test_package.eagle_suite import danbooru_search as search
+        from eagle_suite_test_package.eagle_suite.danbooru_library import Library
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(pathlib.Path(directory) / "tags.sqlite3")
+            library = Library(db_path)
+            library.save_page("tags", [{"id": 1, "name": "sitting", "category": 0,
+                "post_count": 90000}], {})
+            catalog = [{"tag": "blue_eyes", "category": "general", "post_count": 25000,
+                "cn_name": "", "wiki": "", "nsfw": False}]
+            selected = [{"tag": "blue eyes", "enabled": True},
+                {"tag": "not_a_real_tag", "enabled": True},
+                {"tag": "sitting", "enabled": False}]
+            generated = []
+            def model(rows, api_config, local_model):
+                generated.append([row["name"] for row in rows])
+                return ([{"name": "blue_eyes", "cn_name": "蓝眼睛", "kind": "face",
+                    "facets": ["face.eyes"], "confidence": .95, "rating": "safe", "note": "test"}], "api:mock")
+            with search._library_job_lock:
+                search._library_job.update(running=False, message="test")
+            with mock.patch.object(search, "LIBRARY_PATH", db_path), \
+                 mock.patch.object(search, "_tag_catalog", catalog), \
+                 mock.patch.object(search, "_library_model_from_ports", side_effect=model):
+                request = {"id": "target-1", "node_id": "42", "selected_only": True,
+                    "batch": 10, "tags": ["blue_eyes", "sitting"]}
+                search._run_library_port_fill(request, "42", api_config={"model": "mock"}, selected_tags=selected)
+                search._run_library_port_fill(request, "42", api_config={"model": "mock"}, selected_tags=selected)
+            self.assertEqual(generated, [["blue_eyes"]])
+            self.assertEqual(library.status()["annotations"], {"pending": 1})
+            self.assertEqual(library.lookup(["blue_eyes"])["blue_eyes"]["source"], "selected_catalog")
+            self.assertEqual(library.checkpoint("selected_tag_fill:42")["request_id"], "target-1")
+            self.assertNotIn("not_a_real_tag", library.lookup(["not_a_real_tag"]))
+            self.assertNotIn("sitting", library.approved())
+            with self.assertRaisesRegex(ValueError, "显式发起"):
+                search._run_library_port_fill({"id": "bad", "selected_only": True, "continuous": True}, "42", selected_tags=selected)
+
+    def test_danbooru_selected_fill_model_failure_keeps_drafts_and_checkpoint_empty(self):
+        from eagle_suite_test_package.eagle_suite import danbooru_search as search
+        from eagle_suite_test_package.eagle_suite.danbooru_library import Library
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(pathlib.Path(directory) / "tags.sqlite3")
+            library = Library(db_path)
+            library.save_page("tags", [{"id": 1, "name": "blue_eyes", "category": 0,
+                "post_count": 10000}], {})
+            request = {"id": "failed-target", "node_id": "42", "selected_only": True,
+                "tags": ["blue_eyes"], "batch": 1}
+            with search._library_job_lock:
+                search._library_job.update(running=False, message="test")
+            with mock.patch.object(search, "LIBRARY_PATH", db_path), \
+                 mock.patch.object(search, "_tag_catalog", []), \
+                 mock.patch.object(search, "_library_model_from_ports",
+                                   side_effect=ValueError("模型输出被截断；本批未写入")):
+                with self.assertRaisesRegex(ValueError, "本批未写入"):
+                    search._run_library_port_fill(request, "42", local_model={"path": "mock.gguf"},
+                        selected_tags=[{"tag": "blue_eyes", "enabled": True}])
+            self.assertEqual([], library.pending())
+            self.assertEqual({}, library.checkpoint("selected_tag_fill:42"))
+            self.assertEqual("unknown", library.lookup(["blue_eyes"])["blue_eyes"]["rating"])
+
+    def test_danbooru_metadata_route_returns_only_approved_purpose(self):
+        from eagle_suite_test_package.eagle_suite import danbooru_search as search
+        from eagle_suite_test_package.eagle_suite.danbooru_library import Library
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(pathlib.Path(directory) / "tags.sqlite3")
+            library = Library(db_path)
+            row = {"id": 1, "name": "blue_eyes", "category": 0, "post_count": 10000}
+            library.save_page("tags", [row], {})
+            library.save_drafts([{"name": "blue_eyes", "cn_name": "蓝眼睛", "kind": "face",
+                "facets": ["face.eyes"], "confidence": .95, "rating": "safe", "note": "test"}], [row], "api:mock")
+            request = mock.Mock(json=mock.AsyncMock(return_value={"tags": ["blue_eyes"]}))
+            with mock.patch.object(search, "LIBRARY_PATH", db_path), mock.patch.object(search, "_tag_translations", None):
+                pending = json.loads(asyncio.run(search.route_translate_batch(request)).text)
+                self.assertEqual(pending["metadata"], {})
+                library.review("blue_eyes", True)
+                search._tag_translations = None
+                approved = json.loads(asyncio.run(search.route_translate_batch(request)).text)
+            self.assertEqual(approved["translations"]["blue_eyes"], "蓝眼睛")
+            self.assertEqual(approved["metadata"]["blue_eyes"]["kind"], "face")
+            self.assertEqual(approved["metadata"]["blue_eyes"]["rating"], "safe")
+            self.assertEqual(approved["metadata"]["blue_eyes"]["nsfw"], 0)
+
+    def test_danbooru_catalog_unknown_safety_is_not_sfw(self):
+        from eagle_suite_test_package.eagle_suite import danbooru_search as search
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = [
+                {"tag": "safe_foo", "cn_name": "", "wiki": "", "category": "general",
+                 "post_count": 100, "nsfw": False},
+                {"tag": "unknown_foo", "cn_name": "", "wiki": "", "category": "general",
+                 "post_count": 100, "nsfw": None},
+            ]
+            with mock.patch.object(search, "_tag_catalog", catalog), \
+                 mock.patch.object(search, "LIBRARY_PATH", str(pathlib.Path(directory) / "absent.sqlite3")):
+                sfw = search._direct_catalog_search("foo")
+                all_levels = search._direct_catalog_search("foo", show_nsfw=True)
+            self.assertEqual([item["tag"] for item in sfw], ["safe_foo"])
+            self.assertEqual(next(item for item in all_levels if item["tag"] == "unknown_foo")["nsfw"], None)
+            self.assertEqual(next(item for item in all_levels if item["tag"] == "unknown_foo")["rating"], "unknown")
 
     def test_danbooru_library_fill_toggle_runs_one_batch_per_queue(self):
         from eagle_suite_test_package.eagle_suite import danbooru_search as search
@@ -523,6 +684,176 @@ class RegressionTests(unittest.TestCase):
             self.assertTrue(status["fallback_reason"])
             self.assertEqual(str(default_file.resolve()), status["storage_path"])
 
+    def test_prompt_preset_cover_storage_uses_stable_user_reference(self):
+        from PIL import Image
+        from eagle_suite_test_package.nodes import prompt_presets
+
+        buffer = __import__("io").BytesIO()
+        Image.new("RGBA", (3, 2), (20, 40, 60, 255)).save(buffer, format="PNG")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            covers = root / "user-data" / "prompt_presets" / "covers"
+            with mock.patch.object(prompt_presets, "COVERS_DIR", covers):
+                reference = prompt_presets._store_cover_bytes(buffer.getvalue())
+                self.assertRegex(
+                    reference,
+                    r"^eagle-user://prompt-presets/covers/cover_[0-9a-f]{32}\.png$",
+                )
+                filename = prompt_presets._managed_cover_filename(reference)
+                self.assertTrue((covers / filename).is_file())
+                self.assertEqual((covers / filename).resolve(), prompt_presets._allowed_cover_path(reference))
+
+                response = prompt_presets._cover_response(reference)
+                self.assertEqual(reference, response["cover"])
+                self.assertEqual(reference, response["path"])
+                self.assertIn("eagle-user%3A%2F%2Fprompt-presets%2Fcovers%2F", response["url"])
+
+            with mock.patch.dict(
+                os.environ, {"EAGLE_SUITE_USER_DATA_DIR": str(root / "configured")}, clear=False
+            ):
+                self.assertEqual(
+                    (root / "configured" / "prompt_presets").resolve(),
+                    prompt_presets._default_persistent_data_dir(),
+                )
+
+    def test_prompt_preset_multiple_preview_images_are_ordered_and_backward_compatible(self):
+        from eagle_suite_test_package.nodes import prompt_presets
+
+        self.assertEqual(
+            ["covers/legacy.png"],
+            prompt_presets._preview_image_sources({"cover": "covers/legacy.png"}),
+        )
+        self.assertEqual(
+            [],
+            prompt_presets._preview_image_sources({
+                "cover": "covers/legacy.png",
+                "preview_images": [],
+            }),
+        )
+
+        template = {
+            "cover": "covers/stale.png",
+            "preview_images": ["https://example.invalid/first.png", "https://example.invalid/second.png"],
+        }
+        prompt_presets._normalize_loaded_preview_images(template)
+        self.assertEqual("https://example.invalid/first.png", template["cover"])
+        self.assertEqual([
+            "https://example.invalid/first.png",
+            "https://example.invalid/second.png",
+        ], template["preview_images"])
+
+        too_many = {"preview_images": [f"https://example.invalid/{index}.png" for index in range(13)]}
+        with self.assertRaisesRegex(ValueError, "最多 12 张"):
+            prompt_presets._persist_template_preview_images(too_many, allow_external=True)
+
+    def test_prompt_preset_preview_images_round_trip_through_markdown(self):
+        from eagle_suite_test_package.nodes import prompt_presets
+
+        original = {
+            "id": "multi-preview",
+            "Label": "多效果预设",
+            "Instruction": "apply {{style}}",
+            "example": "apply watercolor",
+            "category": "风格转换",
+            "tags": ["style"],
+            "cover": "https://example.invalid/stale.png",
+            "preview_images": [
+                "https://example.invalid/one.png",
+                "https://example.invalid/two.png",
+            ],
+        }
+        markdown = prompt_presets.template_to_markdown(original)
+        parsed = prompt_presets.parse_markdown_templates(markdown, "multi.md", source="user")
+        self.assertEqual(1, len(parsed))
+        self.assertEqual(original["preview_images"], parsed[0]["preview_images"])
+        self.assertEqual(original["preview_images"][0], parsed[0]["cover"])
+
+        legacy_markdown = """---
+label: Legacy
+cover: https://example.invalid/legacy.png
+---
+
+## 指令
+legacy prompt
+"""
+        legacy = prompt_presets.parse_markdown_templates(legacy_markdown, "legacy.md", source="user")
+        self.assertEqual(["https://example.invalid/legacy.png"], legacy[0]["preview_images"])
+        self.assertEqual("https://example.invalid/legacy.png", legacy[0]["cover"])
+
+    def test_prompt_preset_legacy_cover_is_lazily_migrated(self):
+        from PIL import Image
+        from eagle_suite_test_package.nodes import prompt_presets
+
+        buffer = __import__("io").BytesIO()
+        Image.new("RGB", (2, 2), (200, 100, 50)).save(buffer, format="PNG")
+        filename = "cover_" + ("a" * 32) + ".png"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            legacy = root / "plugin" / "prompts" / "covers"
+            persistent = root / "user" / "__eagle_suite" / "prompt_presets" / "covers"
+            legacy.mkdir(parents=True)
+            (legacy / filename).write_bytes(buffer.getvalue())
+            with mock.patch.object(prompt_presets, "LEGACY_COVERS_DIR", legacy), mock.patch.object(
+                prompt_presets, "COVERS_DIR", persistent
+            ):
+                resolved = prompt_presets._allowed_cover_path("covers/" + filename)
+
+            self.assertEqual((persistent / filename).resolve(), resolved)
+            self.assertTrue((persistent / filename).is_file())
+            # Migration is deliberately non-destructive so an older plugin can
+            # still read the same workflow if the user rolls back.
+            self.assertTrue((legacy / filename).is_file())
+
+    def test_prompt_preset_cover_path_traversal_and_remote_import_are_rejected(self):
+        from PIL import Image
+        from eagle_suite_test_package.nodes import prompt_presets
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            base = root / "plugin" / "prompts"
+            skill = root / "plugin" / "skills"
+            covers = root / "user" / "covers"
+            legacy = base / "covers"
+            for folder in (base, skill, covers, legacy):
+                folder.mkdir(parents=True, exist_ok=True)
+
+            buffer = __import__("io").BytesIO()
+            Image.new("RGB", (1, 1), (1, 2, 3)).save(buffer, format="PNG")
+            (base / "inside.png").write_bytes(buffer.getvalue())
+            outside = root / "outside.png"
+            outside.write_bytes(buffer.getvalue())
+
+            patches = (
+                mock.patch.object(prompt_presets, "BASE_DIR", base),
+                mock.patch.object(prompt_presets, "SKILL_DIR", skill),
+                mock.patch.object(prompt_presets, "COVERS_DIR", covers),
+                mock.patch.object(prompt_presets, "LEGACY_COVERS_DIR", legacy),
+                mock.patch.object(
+                    prompt_presets,
+                    "load_config",
+                    return_value={"local_paths": [], "obsidian": {}},
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                for malicious in (
+                    "../../outside.png",
+                    "%2e%2e/%2e%2e/outside.png",
+                    "covers/../inside.png",
+                    "eagle-user://prompt-presets/covers/../inside.png",
+                    "eagle-user://prompt-presets/covers/%2e%2e%2finside.png",
+                ):
+                    self.assertIsNone(
+                        prompt_presets._allowed_cover_path(malicious),
+                        msg=f"traversal unexpectedly resolved: {malicious}",
+                    )
+                self.assertIsNone(prompt_presets._allowed_cover_path(str(outside)))
+                with self.assertRaisesRegex(ValueError, "请先下载"):
+                    prompt_presets._persist_cover_source("https://example.invalid/cover.png")
+                with self.assertRaisesRegex(ValueError, "blob"):
+                    prompt_presets._persist_cover_source("blob:https://example.invalid/id")
+
     def test_director_skill_obsidian_markdown_matches_vault_contract_and_round_trips(self):
         from eagle_suite_test_package.nodes.prompt_presets import (
             _director_skills_from_markdown,
@@ -613,6 +944,8 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("EagleText", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleTextStudio", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertIn("EagleLatentSwitchMulti", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertIn("EagleSvelteCharacterInteractionNode", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertIn("EagleSvelteCharacterPVNode", PACKAGE.NODE_CLASS_MAPPINGS)
         hidden_implementation_nodes = {
             "EagleH3PreflightNode", "EagleH3StartNode",
             "EagleH3PlanNode",
@@ -628,6 +961,7 @@ class RegressionTests(unittest.TestCase):
             "EagleH3CheckpointReviewNode", "EagleH3NativeLoopEndNode",
             "EagleH3LoadManifestNode", "EagleH3ManifestAssembleNode",
             "EagleH3ExportPNGSequenceNode", "EagleH3SeamProbeNode", "EagleH3SmartSplitNode",
+            "EagleSvelteCharacterInteractionNode", "EagleSvelteCharacterPVNode",
         )
         for name in h3_nodes:
             self.assertEqual("🦅 Eagle Suite/H3 导演台", PACKAGE.NODE_CLASS_MAPPINGS[name].CATEGORY, name)
@@ -702,13 +1036,19 @@ class RegressionTests(unittest.TestCase):
             "EagleText", "EagleTextStudio", "EagleStringRows",
             "EagleTextSwitchMulti", "EaglePromptVariablesNode", "EaglePromptPresets",
             "EagleSaveString", "EagleLoadTextFiles", "EagleSplitString",
-            "EagleRandomLine", "EagleTextSwitch",
+            "EagleRandomLine",
         )
         for name in text_nodes:
             self.assertEqual("🦅 Eagle Suite/文本", PACKAGE.NODE_CLASS_MAPPINGS[name].CATEGORY, name)
         self.assertNotIn("EagleConcatStrings", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertNotIn("EagleTemplateReplace", PACKAGE.NODE_CLASS_MAPPINGS)
         self.assertNotIn("EaglePromptPreset", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("EagleTextSwitch", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("EagleConditioningPresetSelector", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("EaglePVPostProductionNode", PACKAGE.NODE_CLASS_MAPPINGS)
+        self.assertNotIn("EagleTextSwitch", PACKAGE.NODE_DISPLAY_NAME_MAPPINGS)
+        self.assertNotIn("EagleConditioningPresetSelector", PACKAGE.NODE_DISPLAY_NAME_MAPPINGS)
+        self.assertNotIn("EaglePVPostProductionNode", PACKAGE.NODE_DISPLAY_NAME_MAPPINGS)
         self.assertNotIn(EaglePromptPreset, PACKAGE.NODE_CLASS_MAPPINGS.values())
 
     def test_text_studio_prefers_external_text_and_processes_lines(self):
@@ -847,6 +1187,39 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual("外接模型结果", result[0])
         self.assertIn("来源:外部加载器(llama.cpp)", result[1])
 
+    def test_eagle_local_llm_accepts_current_qwen_te_handle_contract(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        external_llm = object()
+
+        class QwenHandle:
+            llm = external_llm
+            settings = {
+                "family": "Qwen3.5-VL",
+                "model": "qwen3.5llm/Qwen3.5-4B-Q4_K_M.gguf",
+                "mmproj": "qwen3.5llm/3.5mmproj-BF16.gguf",
+                "think": False,
+                "thinking_budget": 4096,
+            }
+
+        with mock.patch.object(
+            local_llm_node, "_run_llamacpp_inference",
+            return_value=("外部 TE 结果", "", 0.02),
+        ) as inference:
+            result = local_llm_node.EagleLocalLLMNode().process(
+                model_path="", device="cpu", dtype="fp32",
+                prompt_model_type="自然语言", system_template="image_expert",
+                system_prompt="", user_prompt="测试", filter_intro=False,
+                max_new_tokens=32, temperature=0.1, top_p=1.0,
+                do_sample=False, repetition_penalty=1.0,
+                batch_mode="first", max_image_size=512, seed=-1,
+                output_think=False, qwen_model=QwenHandle(),
+            )
+
+        self.assertIs(inference.call_args.args[0], external_llm)
+        self.assertEqual("外部 TE 结果", result[0])
+        self.assertIn("来源:TE加载器(QWENLLAMA)", result[1])
+
     def test_eagle_local_llm_does_not_silently_fallback_from_invalid_external_handle(self):
         from eagle_suite_test_package.eagle_suite import local_llm_node
 
@@ -885,6 +1258,7 @@ class RegressionTests(unittest.TestCase):
 
         handle = {"backend": "llama.cpp", "llm": object(), "path": "model.gguf", "mmproj": None}
         with mock.patch.object(local_llm_node, "_resolve_model_path_by_name", return_value="model.gguf"), \
+             mock.patch.object(local_llm_node.os.path, "exists", return_value=True), \
              mock.patch.object(local_llm_node, "_create_llamacpp_handle", return_value=handle), \
              mock.patch.object(local_llm_node, "_probe_local_model_handle", return_value={
                  "passed": True, "kind": "text", "elapsed": 0.02, "sample": "OK",
@@ -899,6 +1273,46 @@ class RegressionTests(unittest.TestCase):
         self.assertIn("推理校验=通过", result[1])
         self.assertIn("视觉=未绑定（仅文本）", result[1])
 
+    def test_local_llm_loader_gguf_call_matches_real_handle_signature(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        captured = {}
+
+        # Keep an explicit signature here.  A generic Mock accepts arbitrary
+        # keywords and previously hid the production-only ``enable_thinking``
+        # TypeError that made the loader return an empty handle in ~0.1 s.
+        def create_handle(
+            gguf_path, mmproj_path, n_ctx=8192, n_gpu_layers=-1,
+            kv_cache_type_k="默认(F16)", kv_cache_type_v="默认(F16)",
+            thinking=False, thinking_budget=4096, model_series="Auto",
+            keep_history_think=False, moe_experts_on_cpu=False,
+            first_n_layers_on_cpu=0, qwen38_reasoning_effort="xhigh",
+        ):
+            captured.update(locals())
+            return {
+                "backend": "llama.cpp", "llm": object(), "path": gguf_path,
+                "mmproj": mmproj_path, "model_series": model_series,
+            }
+
+        with mock.patch.object(
+            local_llm_node, "_resolve_model_path_by_name",
+            side_effect=lambda value: str(value),
+        ), mock.patch.object(
+            local_llm_node, "_create_llamacpp_handle", side_effect=create_handle,
+        ), mock.patch.object(
+            local_llm_node.os.path, "exists", return_value=True,
+        ):
+            handle, status = local_llm_node.EagleLocalLLMLoader().load(
+                "自动探测", "Qwen3.5-4B-Q8_K_XL.gguf", "3.5mmproj-BF16.gguf",
+                False, False, 8192, -1, "默认(F16)", "默认(F16)", False, 0,
+                "xhigh", validation_mode="仅加载",
+            )
+
+        self.assertIsNotNone(handle["llm"])
+        self.assertEqual("Qwen3.5-VL", captured["model_series"])
+        self.assertFalse(captured["thinking"])
+        self.assertIn("已加载", status)
+
     def test_local_llm_loader_rejects_missing_selected_mmproj(self):
         from eagle_suite_test_package.eagle_suite import local_llm_node
 
@@ -906,14 +1320,214 @@ class RegressionTests(unittest.TestCase):
             return "model.gguf" if value == "model.gguf" else ""
 
         with mock.patch.object(local_llm_node, "_resolve_model_path_by_name", side_effect=resolve), \
-             mock.patch.object(local_llm_node, "_create_llamacpp_handle") as create:
-            result = local_llm_node.EagleLocalLLMLoader().load(
+             mock.patch.object(local_llm_node.os.path, "exists", side_effect=lambda value: value == "model.gguf"), \
+             mock.patch.object(local_llm_node, "_create_llamacpp_handle") as create, \
+             self.assertRaisesRegex(RuntimeError, "已选择 mmproj"):
+            local_llm_node.EagleLocalLLMLoader().load(
                 "自动探测", "model.gguf", "missing-mmproj.gguf", False, False,
                 8192, -1, "默认(F16)", "默认(F16)", False, 0, "xhigh",
             )
-        self.assertEqual({}, result[0])
-        self.assertIn("已选择 mmproj", result[1])
         create.assert_not_called()
+
+    def test_local_llm_loader_reports_stale_workflow_selection_with_candidates(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        with mock.patch.object(
+            local_llm_node, "_resolve_model_path_by_name",
+            return_value="Qwen3.5-4B-UD-Q8_K_XL.gguf",
+        ), mock.patch.object(
+            local_llm_node, "_list_loader_model_entries",
+            return_value=(
+                ["qwen3.5llm/Qwen3.5-4B-Q4_K_M.gguf", "gemma4/gemma4-12b.gguf"],
+                ["D:/models/qwen.gguf", "D:/models/gemma.gguf"],
+            ),
+        ), self.assertRaisesRegex(
+            RuntimeError, "模型选项已失效.*Qwen3.5-4B-Q4_K_M"
+        ):
+            local_llm_node.EagleLocalLLMLoader().load(
+                "自动探测", "Qwen3.5-4B-UD-Q8_K_XL.gguf", "无", False, False,
+                8192, -1, "默认(F16)", "默认(F16)", False, 0, "xhigh",
+            )
+
+    def test_local_llm_resolves_unique_model_basename_after_folder_move(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        moved = os.path.normpath("D:/models/LLM/qwen/Qwen3.5-4B-Q4_K_M.gguf")
+        with mock.patch.object(local_llm_node, "_get_model_search_roots", return_value=[]), \
+             mock.patch.object(local_llm_node, "_scan_local_models", return_value=[]), \
+             mock.patch.object(local_llm_node, "_scan_gguf_models", return_value=[(moved, "D:/models/LLM")]), \
+             mock.patch.object(local_llm_node, "_scan_mmproj_models", return_value=[]), \
+             mock.patch.object(local_llm_node.os.path, "isfile", return_value=False), \
+             mock.patch.object(local_llm_node.os.path, "isdir", return_value=False), \
+             mock.patch.object(local_llm_node.os.path, "exists", return_value=False):
+            resolved = local_llm_node._resolve_model_path_by_name("Qwen3.5-4B-Q4_K_M.gguf")
+
+        self.assertEqual(moved, resolved)
+
+    def test_local_llm_auto_detects_gemma_from_model_or_mmproj_name(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        self.assertEqual(
+            "Gemma4",
+            local_llm_node._infer_llamacpp_model_series(
+                "gemma-4-12b-it-Q8_0.gguf", "mmproj-model-f16.gguf"
+            ),
+        )
+
+    def test_local_llm_detects_compact_qwen_mmproj_names_and_rejects_mismatch(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        self.assertEqual(
+            "Qwen3.5-VL",
+            local_llm_node._infer_series_hint("qwen3.5llm/3.5mmproj-BF16.gguf"),
+        )
+        actual, error = local_llm_node._resolve_model_series(
+            "Qwen3.6-VL",
+            "Qwen3.5-4B-Q4_K_M.gguf",
+            "3.5mmproj-BF16.gguf",
+        )
+        self.assertEqual("Qwen3.6-VL", actual)
+        self.assertIn("自动识别为 Qwen3.5-VL", error)
+
+        _actual, conflict = local_llm_node._resolve_model_series(
+            "Auto",
+            "Qwen3.5-4B-Q4_K_M.gguf",
+            "qwen3.6-mmproj-BF16.gguf",
+        )
+        self.assertIn("主模型识别为 Qwen3.5-VL", conflict)
+        self.assertIn("mmproj 识别为 Qwen3.6-VL", conflict)
+
+    def test_local_llm_auto_matches_only_unambiguous_projection(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        main = os.path.normpath("D:/models/qwen/Qwen3.5-4B-Q4_K_M.gguf")
+        projection = os.path.normpath("D:/models/qwen/3.5mmproj-BF16.gguf")
+        elsewhere = os.path.normpath("D:/models/other/qwen3.5-mmproj-f16.gguf")
+        with mock.patch.object(
+            local_llm_node,
+            "_scan_mmproj_models",
+            return_value=[(projection, "D:/models"), (elsewhere, "D:/models")],
+        ):
+            matched, note = local_llm_node._auto_match_mmproj(main)
+        self.assertEqual(projection, matched)
+        self.assertEqual("自动匹配", note)
+
+        with mock.patch.object(
+            local_llm_node,
+            "_scan_mmproj_models",
+            return_value=[
+                (projection, "D:/models"),
+                (os.path.normpath("D:/models/qwen/qwen3.5-mmproj-f32.gguf"), "D:/models"),
+            ],
+        ):
+            matched, note = local_llm_node._auto_match_mmproj(main)
+        self.assertEqual("", matched)
+        self.assertIn("多个 Qwen3.5-VL mmproj", note)
+
+    def test_local_llm_loader_defaults_to_auto_projection_matching(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        choices, options = local_llm_node.EagleLocalLLMLoader.INPUT_TYPES()["required"]["mmproj_path"]
+        self.assertEqual(local_llm_node._MMPROJ_AUTO, choices[0])
+        self.assertEqual(local_llm_node._MMPROJ_AUTO, options["default"])
+
+    def test_local_llm_rejects_mismatched_te_handle_before_inference(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        class QwenHandle:
+            llm = object()
+            settings = {
+                "family": "Qwen3.6-VL",
+                "model": "Qwen3.5-4B-Q4_K_M.gguf",
+                "mmproj": "3.5mmproj-BF16.gguf",
+            }
+
+        result = local_llm_node.EagleLocalLLMNode().process(
+            model_path="", device="cpu", dtype="fp32",
+            prompt_model_type="自然语言", system_template="image_expert",
+            system_prompt="", user_prompt="测试", filter_intro=False,
+            max_new_tokens=32, temperature=0.1, top_p=1.0,
+            do_sample=False, repetition_penalty=1.0,
+            batch_mode="first", max_image_size=512, seed=-1,
+            output_think=False, qwen_model=QwenHandle(),
+        )
+        self.assertEqual("", result[0])
+        self.assertIn("TE qwen_model 配置不一致", result[1])
+        self.assertEqual(
+            "Gemma3",
+            local_llm_node._infer_llamacpp_model_series(
+                "vision-model.gguf", "gemma-3-mmproj-f16.gguf"
+            ),
+        )
+
+    def test_local_llm_gemma4_builds_model_specific_vision_handler(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        calls = {}
+
+        class FakeGemma4Handler:
+            def __init__(self, mmproj_path=None, **kwargs):
+                calls["mmproj_path"] = mmproj_path
+                calls.update(kwargs)
+
+        with tempfile.NamedTemporaryFile(suffix=".gguf") as projection, \
+             mock.patch.object(local_llm_node, "Gemma4ChatHandler", FakeGemma4Handler):
+            handler = local_llm_node._create_chat_handler(
+                projection.name, "Gemma4", False, False
+            )
+
+        self.assertIsInstance(handler, FakeGemma4Handler)
+        self.assertEqual(projection.name, calls["mmproj_path"])
+        self.assertFalse(calls["enable_thinking"])
+
+    def test_local_llm_generic_mmproj_uses_supported_parameter_name(self):
+        from eagle_suite_test_package.eagle_suite import local_llm_node
+
+        captured = {}
+        fake_module = types.ModuleType("llama_cpp")
+
+        class FakeLlama:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake_module.Llama = FakeLlama
+        with tempfile.NamedTemporaryFile(suffix=".gguf") as model_file, \
+             tempfile.NamedTemporaryFile(suffix=".gguf") as projection, \
+             mock.patch.dict(sys.modules, {"llama_cpp": fake_module}), \
+             mock.patch.object(local_llm_node, "_resolve_model_path_by_name", return_value=projection.name), \
+             mock.patch.object(local_llm_node, "_create_chat_handler", return_value=None):
+            handle = local_llm_node._create_llamacpp_handle(
+                model_file.name, projection.name, model_series="Other"
+            )
+
+        self.assertEqual(projection.name, captured["mmproj_path"])
+        self.assertNotIn("mmproj", captured)
+        self.assertEqual(projection.name, handle["mmproj"])
+
+    def test_save_nodes_share_multiline_metadata_and_star_choices(self):
+        from eagle_suite_test_package.eagle_suite.eagle_saver import EagleSaver
+        from eagle_suite_test_package.eagle_suite.video_nodes import (
+            EagleImagesToVideo,
+            EagleVideoConverter,
+        )
+
+        for node_class in (EagleSaver, EagleImagesToVideo, EagleVideoConverter):
+            optional = node_class.INPUT_TYPES()["optional"]
+            self.assertTrue(optional["tags"][1]["multiline"])
+            self.assertTrue(optional["annotation"][1]["multiline"])
+            choices, options = optional["star"]
+            self.assertEqual("0 ☆☆☆☆☆", options["default"])
+            self.assertEqual("5 ★★★★★", choices[-1])
+        image_order = list(EagleSaver.INPUT_TYPES()["optional"])
+        self.assertLess(image_order.index("star"), image_order.index("tags"))
+        self.assertLess(image_order.index("tags"), image_order.index("annotation"))
+
+    def test_multi_text_switch_defaults_to_all_output(self):
+        from eagle_suite_test_package.eagle_suite.text_switch_node import EagleTextSwitchMulti
+
+        choices, options = EagleTextSwitchMulti.INPUT_TYPES()["required"]["模式"]
+        self.assertEqual("输出全部", choices[0])
+        self.assertEqual("输出全部", options["default"])
 
     def test_local_llm_frontend_disables_internal_model_controls_when_linked(self):
         source = (REPO / "web" / "js" / "local_llm_source_state.js").read_text(encoding="utf-8")

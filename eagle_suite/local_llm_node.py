@@ -18,6 +18,7 @@ import gc
 import shutil
 import math
 import glob
+import difflib
 import tempfile
 import subprocess
 import requests
@@ -31,15 +32,26 @@ from PIL import Image
 from .utils import decode_api_key
 from .logger import logger
 
-# llama.cpp 可选依赖：聊天处理器（多模态支持）
+# llama.cpp 可选依赖：聊天处理器（多模态支持）。
+# 不同 llama-cpp-python 版本可用的 handler 不完全一致，因此统一用
+# getattr 取得；旧整合包缺少某个类时仍能正常导入节点。
 try:
-    from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+    import llama_cpp.llama_chat_format as _llama_chat_format
 except Exception:
-    Qwen3VLChatHandler = None
-try:
-    from llama_cpp.llama_chat_format import Qwen35ChatHandler
-except Exception:
-    Qwen35ChatHandler = None
+    _llama_chat_format = None
+
+
+def _llama_handler(name: str):
+    return getattr(_llama_chat_format, name, None) if _llama_chat_format is not None else None
+
+
+Qwen3VLChatHandler = _llama_handler("Qwen3VLChatHandler")
+Qwen35ChatHandler = _llama_handler("Qwen35ChatHandler")
+Gemma3ChatHandler = _llama_handler("Gemma3ChatHandler")
+Gemma4ChatHandler = _llama_handler("Gemma4ChatHandler")
+Llava15ChatHandler = _llama_handler("Llava15ChatHandler")
+Llava16ChatHandler = _llama_handler("Llava16ChatHandler")
+MTMDChatHandler = _llama_handler("MTMDChatHandler")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -424,7 +436,22 @@ def _resolve_model_path_by_name(name_or_path: str) -> str:
         except Exception:
             continue
 
-    # 3) 最后回退到 models_dir
+    # 3) 工作流会保存下拉框的显示名。用户后来只是把模型移入了
+    # 子目录时，尽量按完整显示名/唯一文件名自动找回；若有重名则绝不
+    # 随机选择，留给加载器报出明确的失效选项。
+    normalized = s.replace("\\", "/").casefold()
+    requested_basename = os.path.basename(normalized)
+    recursive_matches = []
+    for path, root_path in (_scan_local_models() + _scan_gguf_models() + _scan_mmproj_models()):
+        display_name = _model_dir_name(path, root_path).replace("\\", "/").casefold()
+        if display_name == normalized or os.path.basename(display_name) == requested_basename:
+            recursive_matches.append(os.path.normpath(path))
+    recursive_matches = list(dict.fromkeys(recursive_matches))
+    if len(recursive_matches) == 1:
+        return recursive_matches[0]
+
+    # 4) 最后回退到 models_dir。保留原输入是为了让调用方可以展示用户
+    # 实际选中的失效值，但调用方必须再做 exists 检查。
     models_dir = _get_comfy_models_dir()
     p = os.path.join(models_dir, s)
     if os.path.exists(p):
@@ -773,7 +800,123 @@ def _create_chat_handler(mmproj_path: str, model_series: str, thinking: bool, ke
                 continue
         return None
 
+    if model_series == "Gemma4" and Gemma4ChatHandler is not None:
+        for kw in ({"enable_thinking": thinking, "verbose": False}, {"verbose": False}):
+            try:
+                return _try_handler(Gemma4ChatHandler, **kw)
+            except TypeError:
+                continue
+        return None
+
+    if model_series == "Gemma3" and Gemma3ChatHandler is not None:
+        try:
+            return _try_handler(Gemma3ChatHandler, verbose=False)
+        except TypeError:
+            return None
+
+    if model_series == "LLaVA":
+        for handler_cls in (Llava16ChatHandler, Llava15ChatHandler):
+            if handler_cls is None:
+                continue
+            try:
+                return _try_handler(handler_cls, verbose=False)
+            except TypeError:
+                continue
+        return None
+
     return None
+
+
+def _infer_series_hint(path: str) -> str:
+    """从单个主模型或 mmproj 文件名推断家族。
+
+    不少社区 mmproj 只叫 ``3.5mmproj-BF16.gguf``，因此不能只匹配
+    ``qwen3.5`` 这种完整前缀。单文件分别推断也让调用方可以发现
+    “Qwen3.5 主模型 + Qwen3.6 mmproj”这种原来会被合并字符串掩盖的冲突。
+    """
+    name = os.path.basename(str(path or "")).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", name)
+    for version, family in (
+        ("38", "Qwen3.8-VL"),
+        ("36", "Qwen3.6-VL"),
+        ("35", "Qwen3.5-VL"),
+    ):
+        if (
+            f"qwen{version}" in compact
+            or f"{version}mmproj" in compact
+            or f"mmproj{version}" in compact
+        ):
+            return family
+    if "qwen3" in compact:
+        return "Qwen3-VL"
+    if "gemma4" in compact:
+        return "Gemma4"
+    if "gemma3" in compact:
+        return "Gemma3"
+    if "llava" in compact:
+        return "LLaVA"
+    return "Other"
+
+
+def _infer_llamacpp_model_series(gguf_path: str, mmproj_path: str = "") -> str:
+    """从主模型和 mmproj 文件名推断多模态家族。"""
+    model_hint = _infer_series_hint(gguf_path)
+    projection_hint = _infer_series_hint(mmproj_path)
+    return model_hint if model_hint != "Other" else projection_hint
+
+
+def _resolve_model_series(model_series: str, gguf_path: str, mmproj_path: str = "") -> tuple[str, str]:
+    """返回 (实际系列, 错误)，并严格拒绝已知的系列冲突。"""
+    selected = str(model_series or "Auto")
+    model_hint = _infer_series_hint(gguf_path)
+    projection_hint = _infer_series_hint(mmproj_path)
+    if model_hint != "Other" and projection_hint != "Other" and model_hint != projection_hint:
+        return selected, (
+            f"主模型识别为 {model_hint}，但 mmproj 识别为 {projection_hint}；"
+            "请选择同一系列的视觉投影文件。"
+        )
+    detected = model_hint if model_hint != "Other" else projection_hint
+    if selected != "Auto" and detected != "Other" and selected != detected:
+        return selected, (
+            f"手动选择的模型系列是 {selected}，文件名自动识别为 {detected}；"
+            "请改为“自动探测”或选择正确系列。"
+        )
+    return (detected if selected == "Auto" and detected != "Other" else selected), ""
+
+
+def _auto_match_mmproj(gguf_path: str) -> tuple[str, str]:
+    """为 GGUF 自动匹配唯一可信的 mmproj，返回 (路径, 说明/错误)。"""
+    family = _infer_series_hint(gguf_path)
+    if family == "Other":
+        return "", "无法从主模型文件名识别系列"
+    candidates = [path for path, _root in _scan_mmproj_models() if _infer_series_hint(path) == family]
+    if not candidates:
+        return "", f"未找到 {family} 对应的 mmproj"
+    same_dir = [path for path in candidates if os.path.dirname(path) == os.path.dirname(gguf_path)]
+    pool = same_dir or candidates
+    if len(pool) == 1:
+        return pool[0], "自动匹配"
+    names = "、".join(os.path.basename(path) for path in pool[:4])
+    return "", f"找到多个 {family} mmproj（{names}），请手动选择"
+
+
+def _available_model_hint(missing_selection: str, limit: int = 4) -> str:
+    """为工作流中已失效的模型选项给出当前磁盘候选。"""
+    names, _paths = _list_loader_model_entries()
+    if not names:
+        return "当前未扫描到可用模型"
+
+    requested = str(missing_selection or "").replace("\\", "/")
+    family = _infer_series_hint(requested)
+    family_matches = [name for name in names if _infer_series_hint(name) == family] if family != "Other" else []
+    fuzzy_matches = difflib.get_close_matches(requested, names, n=max(1, int(limit)), cutoff=0.15)
+    ordered = []
+    for name in family_matches + fuzzy_matches + names:
+        if name not in ordered:
+            ordered.append(name)
+        if len(ordered) >= max(1, int(limit)):
+            break
+    return "当前可用候选: " + "、".join(ordered)
 
 
 def _create_local_llm_handle(model_path: str, device: str, dtype: str,
@@ -850,7 +993,11 @@ def _create_llamacpp_handle(gguf_path: str, mmproj_path: str,
         if chat_handler is not None:
             load_kwargs["chat_handler"] = chat_handler
         else:
-            load_kwargs["mmproj"] = mmproj_resolved
+            # llama-cpp-python 的正式参数名是 mmproj_path。旧代码传入
+            # mmproj 会被 **kwargs 吞掉，模型看似加载成功，但图像从未进入
+            # 视觉编码器。通用 MTMD 路径由 Llama 根据模型 chat template
+            # 创建处理器，同时兼容新增的视觉架构。
+            load_kwargs["mmproj_path"] = mmproj_resolved
 
     # MoE 参数：在 Qwen3.5/3.6/3.8（MoE 架构）且 llama-cpp 支持时传入
     if model_series in ("Qwen3.5-VL", "Qwen3.6-VL", "Qwen3.8-VL"):
@@ -945,12 +1092,15 @@ _MODEL_SERIES_LABELS = {
     "通义千问3.5-VL": "Qwen3.5-VL",
     "通义千问3.6-VL": "Qwen3.6-VL",
     "通义千问3.8-VL(社区/自定义)": "Qwen3.8-VL",
+    "Gemma 4 视觉": "Gemma4",
+    "Gemma 3 视觉": "Gemma3",
     "LLaVA": "LLaVA",
     "其他": "Other",
 }
 
 # mmproj 下拉“不使用视觉投影”的哨兵值
 _MMPROJ_NONE = "无"
+_MMPROJ_AUTO = "自动匹配（推荐）"
 
 class EagleLocalLLMLoader:
     """🦅 本地大模型加载器（双模式：transformers 非量化 / llama.cpp GGUF）
@@ -977,10 +1127,10 @@ class EagleLocalLLMLoader:
                     "multiline": False,
                     "placeholder": "选择模型：transformers 目录 或 .gguf 主模型"
                 }),
-                "mmproj_path": ([_MMPROJ_NONE] + mmproj_names, {
-                    "default": _MMPROJ_NONE,
+                "mmproj_path": ([_MMPROJ_AUTO, _MMPROJ_NONE] + mmproj_names, {
+                    "default": _MMPROJ_AUTO,
                     "multiline": False,
-                    "placeholder": "视觉投影 mmproj（选“无”则不绑定 mmproj，可加载纯文本/音频等非 VLM 模型）"
+                    "placeholder": "自动匹配同系列 mmproj；选“无”可强制仅文本加载"
                 }),
                 "enable_thinking": ("BOOLEAN", {"default": False, "label_on": "思考", "label_off": "直接回答"}),
                 "keep_history_think": ("BOOLEAN", {"default": False, "label_on": "保留", "label_off": "不保留"}),
@@ -1020,36 +1170,35 @@ class EagleLocalLLMLoader:
 
             resolved = _resolve_model_path_by_name(model_path)
             if not resolved:
-                return ({}, "❌ 未选择模型")
+                raise ValueError("未选择模型")
+            if not os.path.exists(resolved):
+                raise FileNotFoundError(
+                    f"工作流中保存的模型选项已失效: {model_path}。"
+                    f"{_available_model_hint(model_path)}。请在下拉框重新选择后再执行"
+                )
             is_gguf = resolved.lower().endswith(".gguf")
-
-            # 模型系列自动推断（仅用于 llama.cpp 选择 chat handler / MoE 参数）
-            inferred_series = model_series
-            if inferred_series == "Auto" and is_gguf:
-                base = os.path.basename(resolved).lower()
-                if "qwen3.8" in base:
-                    inferred_series = "Qwen3.8-VL"
-                elif "qwen3.6" in base:
-                    inferred_series = "Qwen3.6-VL"
-                elif "qwen3.5" in base:
-                    inferred_series = "Qwen3.5-VL"
-                elif "qwen3" in base:
-                    inferred_series = "Qwen3-VL"
-                elif "llava" in base:
-                    inferred_series = "LLaVA"
-
-            common_kwargs = {
-                "model_series": inferred_series,
-                "enable_thinking": enable_thinking,
-                "keep_history_think": keep_history_think,
-                "qwen38_reasoning_effort": qwen38_reasoning_effort,
-            }
 
             # 自动根据文件类型选择后端：.gguf -> llama.cpp，目录 -> transformers
             if is_gguf:
-                mmproj = _resolve_model_path_by_name(mmproj_path) if mmproj_path and mmproj_path != _MMPROJ_NONE else ""
-                if mmproj_path and mmproj_path != _MMPROJ_NONE and not mmproj:
-                    return ({}, f"❌ 已选择 mmproj，但文件不存在或不在允许的模型目录中: {mmproj_path}")
+                match_note = ""
+                if mmproj_path == _MMPROJ_AUTO:
+                    mmproj, match_note = _auto_match_mmproj(resolved)
+                    if not mmproj and "多个" in match_note:
+                        raise ValueError(match_note)
+                else:
+                    mmproj = _resolve_model_path_by_name(mmproj_path) if mmproj_path and mmproj_path != _MMPROJ_NONE else ""
+                if mmproj_path not in (_MMPROJ_AUTO, _MMPROJ_NONE, "") and not mmproj:
+                    raise ValueError(
+                        f"已选择 mmproj，但文件不存在或不在允许的模型目录中: {mmproj_path}"
+                    )
+                inferred_series, series_error = _resolve_model_series(model_series, resolved, mmproj)
+                if series_error:
+                    raise ValueError(f"模型/mmproj 匹配检查失败: {series_error}")
+                common_kwargs = {
+                    "model_series": inferred_series,
+                    "keep_history_think": keep_history_think,
+                    "qwen38_reasoning_effort": qwen38_reasoning_effort,
+                }
                 handle = _create_llamacpp_handle(
                     resolved, mmproj,
                     n_ctx=n_ctx, n_gpu_layers=n_gpu_layers,
@@ -1063,8 +1212,17 @@ class EagleLocalLLMLoader:
                 vision_status = "已绑定" if handle.get("mmproj") else "未绑定（仅文本）"
                 status = (f"✅ [llama.cpp] 已加载: {rel} | n_gpu_layers={n_gpu_layers} "
                           f"| kv={kv_cache_type_k}/{kv_cache_type_v} | 视觉={vision_status} "
-                          f"| 思考={enable_thinking}")
+                          f"| 系列={inferred_series} | 思考={enable_thinking}")
+                if mmproj_path == _MMPROJ_AUTO:
+                    status += f" | mmproj={os.path.basename(mmproj) if mmproj else match_note}"
             else:
+                inferred_series = _infer_series_hint(resolved) if model_series == "Auto" else model_series
+                common_kwargs = {
+                    "model_series": inferred_series,
+                    "enable_thinking": enable_thinking,
+                    "keep_history_think": keep_history_think,
+                    "qwen38_reasoning_effort": qwen38_reasoning_effort,
+                }
                 handle = _create_local_llm_handle(resolved, device, dtype, **common_kwargs)
                 rel = os.path.basename(handle["path"])
                 status = (f"✅ [transformers] 已加载: {rel} | device={handle['device']} "
@@ -1078,7 +1236,10 @@ class EagleLocalLLMLoader:
                 handle["validation"] = probe
                 if not probe.get("passed"):
                     release_local_model_handle(handle)
-                    return ({}, "❌ 模型已加载但最小推理失败: " + str(probe.get("error") or "未知错误"))
+                    raise RuntimeError(
+                        "模型已加载但最小推理失败: "
+                        + str(probe.get("error") or "未知错误")
+                    )
                 status += (
                     f" | 推理校验=通过({probe.get('kind', 'text')}, "
                     f"{float(probe.get('elapsed', 0.0)):.2f}s)"
@@ -1087,7 +1248,12 @@ class EagleLocalLLMLoader:
                 status += " | 推理校验=未执行"
             return (handle, status)
         except Exception as e:
-            return ({}, f"❌ 模型加载失败: {e}")
+            # 这个节点的第一输出是一个真实的模型句柄。返回空字典会让
+            # ComfyUI 把加载节点标记为“成功”，错误只留在未连接的状态端口，
+            # 下游则只能看到“未加载模型/空输出”。让异常显式失败，保证
+            # EAGLE_LOCAL_LLM_MODEL 端口永远不会输出伪句柄。
+            logger.exception(f"[LocalLLM] 模型加载失败: {e}")
+            raise RuntimeError(f"本地大模型加载失败: {e}") from e
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1207,6 +1373,18 @@ class EagleLocalLLMNode:
             backend = "llama.cpp"
             model_obj = qwen_model.llm
             settings = getattr(qwen_model, "settings", {}) or {}
+            external_series = str(settings.get("family") or "Auto")
+            external_model = str(settings.get("model") or getattr(qwen_model, "path", "") or "")
+            external_mmproj = str(settings.get("mmproj") or "")
+            _resolved_series, external_error = _resolve_model_series(
+                external_series, external_model, external_mmproj
+            )
+            if external_error:
+                return (
+                    "",
+                    "❌ TE qwen_model 配置不一致: " + external_error,
+                    history,
+                )
             thinking = bool(settings.get("think", False))
             thinking_budget = int(settings.get("thinking_budget", 4096) or 4096)
             resolved = getattr(qwen_model, "path", "") or settings.get("model", "")

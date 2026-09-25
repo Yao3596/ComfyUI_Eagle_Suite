@@ -63,7 +63,7 @@ const libraryFacetLabels = reactive({});
 const TAG_KIND_LABELS = {
   semantic: "语义", detail: "图片", manual: "手动", gacha: "抽卡",
   outfit: "服装", action: "动作", expression: "表情", scene: "场景", environment: "环境", composition: "构图",
-  lighting: "光照", quality: "质量", appearance: "外观", general: "通用",
+  lighting: "光照", quality: "质量", identity: "身份/角色", appearance: "外观", body: "身体", face: "面部", general: "通用",
 };
 const PROMPT_KIND_LABELS = {
   outfit: "服装", action: "动作", expression: "表情", scene: "场景",
@@ -94,7 +94,7 @@ const TAG_MAJOR_GROUPS = [
 ];
 
 const TAG_SUBGROUP_LABELS = {
-  artist: "艺术家", copyright: "版权", character: "角色", appearance: "外观特征",
+  artist: "艺术家", copyright: "版权", character: "角色", identity: "身份", appearance: "外观特征", body: "身体特征", face: "面部特征",
   clothing: "服装", footwear: "鞋袜", accessory: "配饰",
   expression: "表情", gaze: "视线", pose: "姿势", interaction: "动作/交互",
   place: "地点", weather: "天气/时间", object: "物件/背景",
@@ -127,6 +127,24 @@ async function readJsonResponse(response, label = "服务") {
 
 function inferTagTaxonomy(value) {
   const item = typeof value === "string" ? { tag: value } : (value || {});
+  // Explicit user-assigned purpose wins over imported facet suggestions. The
+  // previous facet-first branch made a saved "kind" appear to reset on reload.
+  const explicitKind = String(item.kind || "").toLowerCase();
+  const purposes = {
+    identity: { major: "character", sub: "identity" },
+    appearance: { major: "character", sub: "appearance" },
+    body: { major: "character", sub: "body" },
+    face: { major: "character", sub: "face" },
+    outfit: { major: "styling", sub: "clothing" },
+    expression: { major: "action", sub: "expression" },
+    action: { major: "action", sub: "pose" },
+    scene: { major: "world", sub: "place" },
+    environment: { major: "world", sub: "object" },
+    composition: { major: "visual", sub: "composition" },
+    lighting: { major: "visual", sub: "lighting" },
+    quality: { major: "visual", sub: "quality" },
+  };
+  if (purposes[explicitKind]) return purposes[explicitKind];
   if (Array.isArray(item.facets) && item.facets.length) {
     const facet = item.facets[0];
     Object.assign(TAG_SUBGROUP_LABELS, item.facet_labels || libraryFacetLabels);
@@ -219,6 +237,12 @@ function resolveTranslation(tag, value = "") {
   return validTranslation(value) ? value : (translationCache[tag] || "");
 }
 
+function normalizeNsfwTriState(value) {
+  if (value === 0 || value === 1) return value;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  return null; // Missing, unknown and explicit null remain unknown.
+}
+
 function normalizeTagItem(value, defaults = {}) {
   const raw = typeof value === "string" ? { tag: value } : (value || {});
   let sourceTag = String(raw.tag || "").trim();
@@ -233,6 +257,12 @@ function normalizeTagItem(value, defaults = {}) {
     translation: resolveTranslation(tag, raw.translation),
     category: raw.category || defaults.category || "general",
     kind: raw.kind || defaults.kind || "general",
+    kind_manual: raw.kind_manual === true,
+    translation_manual: raw.translation_manual === true,
+    // Safety is independent from purpose. Missing/unknown rating must not be
+    // displayed as SFW; preserve backend review data across workflow saves.
+    rating: raw.rating || defaults.rating || "unknown",
+    nsfw: normalizeNsfwTriState(Object.prototype.hasOwnProperty.call(raw, "nsfw") ? raw.nsfw : defaults.nsfw),
     facets: Array.isArray(raw.facets) ? raw.facets.slice() : [],
     facet_labels: raw.facet_labels || {},
     source: raw.source || defaults.source || "manual",
@@ -302,13 +332,14 @@ function parseOriginalTags(post) {
 
 // ── 全局翻译缓存 ──────────────────────────────────────────────────────────
 const translationCache = reactive({});   // { tag: cn_name }
+const approvedMetadataCache = reactive({}); // Only approved taxonomy.
 let _pendingTranslate = new Set();
 let _translateTimer = null;
 
-function requestTranslations(tags) {
+function requestTranslations(tags, force = false) {
   let need = false;
   tags.forEach(t => {
-    if (t && !(t in translationCache) && !_pendingTranslate.has(t)) {
+    if (t && (force || !(t in translationCache)) && !_pendingTranslate.has(t)) {
       _pendingTranslate.add(t);
       need = true;
     }
@@ -329,6 +360,9 @@ function requestTranslations(tags) {
       const data = await res.json();
       if (data.success && data.translations) {
         Object.assign(translationCache, data.translations);
+      }
+      if (data.success && data.metadata && typeof data.metadata === "object") {
+        Object.assign(approvedMetadataCache, data.metadata);
       }
       // 未命中的也标记为空串，避免重复请求
       batch.forEach(t => {
@@ -474,6 +508,8 @@ const TagSearchPanel = {
           cn_name: item.cn_name,
           category: item.category,
           kind: item.kind,
+          rating: item.rating,
+          nsfw: item.nsfw,
           facets: item.facets, facet_labels: item.facet_labels,
           score: item.score,
         });
@@ -487,8 +523,11 @@ const TagSearchPanel = {
     }
 
     function clearSelected() {
+      clearTimeout(_relatedTimer);
+      _relatedTimer = null;
       selected.value = [];
       related.value = [];
+      relatedLoading.value = false;
     }
 
     let _relatedTimer = null;
@@ -500,6 +539,7 @@ const TagSearchPanel = {
       }
 
       _relatedTimer = setTimeout(async () => {
+        _relatedTimer = null;
         relatedLoading.value = true;
         const tags = selected.value.map(s => s.tag);
 
@@ -529,6 +569,8 @@ const TagSearchPanel = {
         cn_name: item.cn_name,
         category: item.category,
         kind: item.kind,
+        rating: item.rating,
+        nsfw: item.nsfw,
         facets: item.facets, facet_labels: item.facet_labels,
         score: item.cooc_score,
       });
@@ -541,6 +583,8 @@ const TagSearchPanel = {
           translation: s.cn_name || "",
           category: String(s.category || "general").toLowerCase(),
           kind: s.kind || "semantic",
+          rating: s.rating || "unknown",
+          nsfw: normalizeNsfwTriState(s.nsfw),
           facets: s.facets, facet_labels: s.facet_labels,
           source: "semantic",
           weight: 1,
@@ -559,6 +603,11 @@ const TagSearchPanel = {
         props.onSearchGallery(selectedItems());
       }
     }
+
+    onBeforeUnmount(() => {
+      clearTimeout(_relatedTimer);
+      _relatedTimer = null;
+    });
 
     return () => {
       return h("div", { class: "dbs-panel" }, [
@@ -1241,7 +1290,7 @@ const GalleryPanel = {
                   class: ["dbg-card", isSelected ? "selected" : ""],
                   key: id,
                   onClick: () => toggleSelect(post),
-                  onContextmenu: e => { e.preventDefault(); openDetail(post, e); },
+                  onContextmenu: e => { e.preventDefault(); e.stopPropagation(); openDetail(post, e); },
                 }, [
                   edited ? h("div", { class: "dbs-edited-badge" }, "已编辑") : null,
 
@@ -1308,6 +1357,27 @@ const GalleryPanel = {
 // 子组件：已选预览条
 // ════════════════════════════════════════════════════════════════════════════
 
+// ComfyUI registers a graph-wide Delete shortcut. A tag strip's bubbling
+// keydown arrives too late in Nodes 2.0, so only the most recently selected
+// tag strip may claim the shortcut during the window capture phase.
+let activeTagDeleteOwner = null;
+
+function shouldConsumeTagDelete(event, selectionCount, owner, region) {
+  if (!region?.isConnected || owner !== region || !selectionCount) return false;
+  if (event.key !== "Delete" && event.key !== "Backspace") return false;
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return false;
+  const target = event.target;
+  if (target?.isContentEditable || target?.closest?.("input, textarea, select, [contenteditable]")) return false;
+  return true;
+}
+
+function shouldProtectDanbooruEditing(event, root) {
+  if (!root?.isConnected || (event.key !== "Delete" && event.key !== "Backspace")) return false;
+  const target = event.target;
+  if (!target || !root.contains(target)) return false;
+  return !!(target.isContentEditable || target.closest?.("input, textarea, select, [contenteditable]"));
+}
+
 const TagEditor = {
   name: "TagEditor",
   props: {
@@ -1315,6 +1385,8 @@ const TagEditor = {
     onToggleCollapse: Function, onGacha: Function, onClearGacha: Function,
     onOpenSettings: Function, gachaName: String, gachaLoading: Boolean,
     autoGacha: Boolean, onAutoGacha: Function, onClearAll: Function,
+    onEnrichSelected: Function, enrichmentBusy: Boolean, enrichmentStatus: String,
+    onRefreshApproved: Function,
   },
   setup(props) {
     const input = ref("");
@@ -1325,6 +1397,7 @@ const TagEditor = {
     const selectedKeys = ref(new Set());
     const selectionAnchor = ref(-1);
     const listElement = ref(null);
+    const editorElement = ref(null);
     const marquee = ref(null);
     const activeMajor = ref("");
     const activeSub = ref("");
@@ -1345,13 +1418,17 @@ const TagEditor = {
         next.clear(); next.add(key); selectionAnchor.value = index;
       }
       setSelected(next);
+      activeTagDeleteOwner = next.size ? listElement.value : null;
     }
     function startMarquee(event) {
       if (event.button !== 0 || event.target.closest?.(".dbte-chip")) return;
       const el = listElement.value;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      if (!event.ctrlKey && !event.metaKey) setSelected([]);
+      if (!event.ctrlKey && !event.metaKey) {
+        setSelected([]);
+        if (activeTagDeleteOwner === listElement.value) activeTagDeleteOwner = null;
+      }
       marquee.value = { startX: event.clientX - rect.left, startY: event.clientY - rect.top, x: event.clientX - rect.left, y: event.clientY - rect.top, w: 0, h: 0, additive: event.ctrlKey || event.metaKey, base: new Set(selectedKeys.value) };
       event.currentTarget.setPointerCapture?.(event.pointerId);
       event.preventDefault();
@@ -1376,6 +1453,7 @@ const TagEditor = {
         if (relative.right >= box.x && relative.left <= box.x + box.w && relative.bottom >= box.y && relative.top <= box.y + box.h) next.add(chip.dataset.tagKey);
       });
       setSelected(next);
+      activeTagDeleteOwner = next.size ? listElement.value : null;
     }
     function finishMarquee(event) {
       if (!marquee.value) return;
@@ -1392,6 +1470,31 @@ const TagEditor = {
       emit((props.tags || []).map((item, i) => i === index ? { ...item, ...patch } : item));
     }
     function removeAt(index) { emit((props.tags || []).filter((_, i) => i !== index)); }
+    function deleteSelectedTags(event) {
+      if (!shouldConsumeTagDelete(event, selectedKeys.value.size, activeTagDeleteOwner, listElement.value)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation?.();
+      event.stopPropagation(); // ComfyUI must not delete the node itself.
+      emit((props.tags || []).filter(item => !selectedKeys.value.has(itemKey(item))));
+      setSelected([]);
+      activeTagDeleteOwner = null;
+      editingIndex.value = -1;
+      hoverIndex.value = -1;
+    }
+    function releaseDeleteOwner(event) {
+      if (activeTagDeleteOwner === listElement.value && !editorElement.value?.contains(event.target)) activeTagDeleteOwner = null;
+    }
+    onMounted(() => {
+      window.addEventListener("keydown", deleteSelectedTags, true);
+      window.addEventListener("pointerdown", releaseDeleteOwner, true);
+      window.addEventListener("focusin", releaseDeleteOwner, true);
+    });
+    onBeforeUnmount(() => {
+      window.removeEventListener("keydown", deleteSelectedTags, true);
+      window.removeEventListener("pointerdown", releaseDeleteOwner, true);
+      window.removeEventListener("focusin", releaseDeleteOwner, true);
+      if (activeTagDeleteOwner === listElement.value) activeTagDeleteOwner = null;
+    });
     function reorder(from, target) {
       if (from < 0 || target < 0 || from === target || from >= (props.tags || []).length || target >= (props.tags || []).length) return;
       const items = (props.tags || []).slice();
@@ -1428,7 +1531,7 @@ const TagEditor = {
       const inspectorCn = inspectorItem ? resolveTranslation(inspectorItem.tag, inspectorItem.translation) : "";
       const inspectorWeight = inspectorItem ? Number(inspectorItem.weight == null ? 1 : inspectorItem.weight) : 1;
       const inspectorWeightText = Number.isInteger(inspectorWeight) ? inspectorWeight.toFixed(1) : String(Math.round(inspectorWeight * 100) / 100);
-      return h("div", { class: ["dbte", props.collapsed ? "expanded" : ""] }, [
+      return h("div", { class: ["dbte", props.collapsed ? "expanded" : ""], ref: editorElement }, [
       h("div", { class: "dbte-head" }, [
         h("strong", {}, "🏷️ 输出标签 " + (props.tags || []).filter(item => item.enabled !== false).length + " / " + (props.tags || []).length),
         h("span", { class: "dbte-spacer" }),
@@ -1444,6 +1547,14 @@ const TagEditor = {
         props.gachaName ? h("span", { class: "dbs-gacha-name" }, props.gachaName) : null,
         props.gachaName ? h("button", { class: "dbs-btn small", onClick: props.onClearGacha }, "清除抽卡") : null,
         selectedKeys.value.size ? h("span", { class: "dbte-selection-count" }, "已框选 " + selectedKeys.value.size) : null,
+        selectedKeys.value.size ? h("button", { class: "dbs-btn small primary", disabled: props.enrichmentBusy,
+          title: "通过节点已连接的 local_model 或 api_config 填充当前框选标签；结果进入待审核，不会自动改写手工分类",
+          onClick: () => props.onEnrichSelected?.((props.tags || []).filter(item => selectedKeys.value.has(itemKey(item)) && item.enabled !== false)) },
+          props.enrichmentBusy ? "模型填充提交中…" : "模型填充框选标签") : null,
+        (props.tags || []).length ? h("button", { class: "dbs-btn small",
+          title: "从本地已审核词库回读翻译和用途；待审核结果不会采用，也不会覆盖手动设置",
+          onClick: props.onRefreshApproved }, "回读已审核") : null,
+        props.enrichmentStatus ? h("span", { class: "dbte-selection-count", title: props.enrichmentStatus }, props.enrichmentStatus) : null,
         selectedKeys.value.size ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => selectedKeys.value.has(itemKey(item)) && item.enabled !== false).map(item => item.tag.replace(/_/g, " ")).join(", ")).catch(() => {}) }, "复制框选") : null,
         (props.tags || []).length ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => item.enabled !== false).map(item => {
           const tag = item.tag.replace(/_/g, " ");
@@ -1474,6 +1585,9 @@ const TagEditor = {
       h("div", {
         class: "dbte-list",
         ref: listElement,
+        tabindex: 0,
+        title: "选中标签后按 Delete 删除；这里可独立滚动",
+        onKeydown: deleteSelectedTags,
         onPointerdown: startMarquee,
         onPointermove: moveMarquee,
         onPointerup: finishMarquee,
@@ -1489,9 +1603,9 @@ const TagEditor = {
           "data-tag-key": key,
           draggable: true,
           title: "空白处拖框多选；Ctrl/Shift 追加；拖动任一已选标签可整组移动",
-          onPointerdown: e => selectChip(index, e),
+          onPointerdown: e => { listElement.value?.focus?.({ preventScroll: true }); selectChip(index, e); },
           onMouseenter: () => { if (editingIndex.value < 0) hoverIndex.value = index; },
-          onContextmenu: e => { e.preventDefault(); editingIndex.value = editingIndex.value === index ? -1 : index; },
+          onContextmenu: e => { e.preventDefault(); e.stopPropagation(); editingIndex.value = editingIndex.value === index ? -1 : index; },
           onDblclick: () => updateAt(index, { enabled: item.enabled === false }),
           onDragstart: e => {
             e.stopPropagation();
@@ -1522,8 +1636,8 @@ const TagEditor = {
           editingIndex.value >= 0 ? h("button", { class: "dbte-toggle", onClick: () => { editingIndex.value = -1; } }, "取消固定") : h("span", { class: "dbte-source" }, "右键标签可固定"),
         ]),
         h("div", { class: "dbte-pop-row" }, [
-          h("label", {}, ["用途 ", h("select", { class: "dbte-kind-select", value: inspectorItem.kind || "general", onChange: e => updateAt(inspectorIndex, { kind: e.target.value }) },
-            ["general", "outfit", "action", "expression", "scene", "environment", "composition", "lighting", "quality", "manual", "semantic", "detail"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))
+          h("label", {}, ["用途 ", h("select", { class: "dbte-kind-select", value: inspectorItem.kind || "general", onChange: e => updateAt(inspectorIndex, { kind: e.target.value, kind_manual: true }) },
+            ["general", "identity", "appearance", "body", "face", "outfit", "action", "expression", "scene", "environment", "composition", "lighting", "quality", "manual", "semantic", "detail"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))
           )]),
           h("label", {}, ["Danbooru 类型 ", h("select", { class: "dbte-kind-select", value: inspectorItem.category || "general", onChange: e => updateAt(inspectorIndex, { category: e.target.value }) },
             ["general", "character", "copyright", "artist", "meta"].map(kind => h("option", { value: kind }, kind))
@@ -1535,7 +1649,7 @@ const TagEditor = {
               updateAt(inspectorIndex, { weight: Number.isFinite(value) ? value : 1 });
             } })]),
         ]),
-        h("label", { class: "dbte-translation" }, ["译名 ", h("input", { value: inspectorCn, placeholder: "可选中文说明", onChange: e => updateAt(inspectorIndex, { translation: e.target.value.trim() }) })]),
+        h("label", { class: "dbte-translation" }, ["译名 ", h("input", { value: inspectorCn, placeholder: "可选中文说明", onChange: e => updateAt(inspectorIndex, { translation: e.target.value.trim(), translation_manual: true }) })]),
         h("div", { class: "dbte-pop-row actions" }, [
           h("button", { class: "dbte-toggle", onClick: () => updateAt(inspectorIndex, { enabled: inspectorItem.enabled === false }) }, inspectorItem.enabled === false ? "恢复输出" : "屏蔽输出"),
           h("button", { class: "dbte-toggle", onClick: () => navigator.clipboard?.writeText(inspectorItem.tag.replace(/_/g, " ")).catch(() => {}) }, "复制"),
@@ -1557,6 +1671,8 @@ const TagCategoryManager = {
     const activeMajor = ref("all");
     const selected = reactive(new Set());
     const targetKind = ref("general");
+    const managerElement = ref(null);
+    const listElement = ref(null);
     const keyOf = (item, index) => String(item?.tag || "") + "\u0000" + String(item?.source || "") + "\u0000" + index;
     const entries = computed(() => (props.tags || []).map((item, index) => ({ item, index, key: keyOf(item, index), ...inferTagTaxonomy(item) })));
     const groups = computed(() => [
@@ -1567,16 +1683,44 @@ const TagCategoryManager = {
 
     function toggle(entry) {
       if (selected.has(entry.key)) selected.delete(entry.key); else selected.add(entry.key);
+      activeTagDeleteOwner = selected.size ? listElement.value : null;
     }
-    function selectVisible() { visible.value.forEach(entry => selected.add(entry.key)); }
+    function selectVisible() {
+      visible.value.forEach(entry => selected.add(entry.key));
+      activeTagDeleteOwner = selected.size ? listElement.value : null;
+    }
     function applyCategory() {
       if (!selected.size) return;
-      const next = (props.tags || []).map((item, index) => selected.has(keyOf(item, index)) ? { ...item, kind: targetKind.value } : item);
+      const next = (props.tags || []).map((item, index) => selected.has(keyOf(item, index)) ? { ...item, kind: targetKind.value, kind_manual: true } : item);
       props.onChange && props.onChange(next);
       selected.clear();
+      if (activeTagDeleteOwner === listElement.value) activeTagDeleteOwner = null;
     }
+    function deleteSelected(event) {
+      if (!shouldConsumeTagDelete(event, selected.size, activeTagDeleteOwner, listElement.value)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation?.();
+      event.stopPropagation();
+      props.onChange?.((props.tags || []).filter((item, index) => !selected.has(keyOf(item, index))));
+      selected.clear();
+      activeTagDeleteOwner = null;
+    }
+    function releaseDeleteOwner(event) {
+      if (activeTagDeleteOwner === listElement.value && !managerElement.value?.contains(event.target)) activeTagDeleteOwner = null;
+    }
+    onMounted(() => {
+      window.addEventListener("keydown", deleteSelected, true);
+      window.addEventListener("pointerdown", releaseDeleteOwner, true);
+      window.addEventListener("focusin", releaseDeleteOwner, true);
+    });
+    onBeforeUnmount(() => {
+      window.removeEventListener("keydown", deleteSelected, true);
+      window.removeEventListener("pointerdown", releaseDeleteOwner, true);
+      window.removeEventListener("focusin", releaseDeleteOwner, true);
+      if (activeTagDeleteOwner === listElement.value) activeTagDeleteOwner = null;
+    });
 
-    return () => h("div", { class: "dbcm" }, [
+    return () => h("div", { class: "dbcm", ref: managerElement }, [
       h("div", { class: "dbcm-head" }, [
         h("strong", {}, "标签分类管理器"),
         h("span", {}, "顶部始终显示完整标签；在这里单独整理用途分类")
@@ -1586,21 +1730,26 @@ const TagCategoryManager = {
       }, [group.label, h("small", {}, String(group.count))]))),
       h("div", { class: "dbcm-tools" }, [
         h("button", { class: "dbs-btn small", onClick: selectVisible }, "选择当前分类"),
-        h("button", { class: "dbs-btn small", disabled: !selected.size, onClick: () => selected.clear() }, "取消选择"),
+        h("button", { class: "dbs-btn small", disabled: !selected.size, onClick: () => {
+          selected.clear();
+          if (activeTagDeleteOwner === listElement.value) activeTagDeleteOwner = null;
+        } }, "取消选择"),
         h("span", {}, "已选 " + selected.size),
         h("select", { class: "dbs-select", value: targetKind.value, onChange: event => { targetKind.value = event.target.value; } },
-          ["appearance", "outfit", "action", "expression", "scene", "environment", "composition", "lighting", "quality", "general"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))),
+          ["identity", "appearance", "body", "face", "outfit", "action", "expression", "scene", "environment", "composition", "lighting", "quality", "general"].map(kind => h("option", { value: kind }, TAG_KIND_LABELS[kind] || kind))),
         h("button", { class: "dbs-btn primary", disabled: !selected.size, onClick: applyCategory }, "应用分类")
       ]),
-      h("div", { class: "dbcm-tags" }, visible.value.length ? visible.value.map(entry => {
+      h("div", { class: "dbcm-tags", ref: listElement, tabindex: 0, onKeydown: deleteSelected,
+        title: "选择标签后按 Delete 删除；用途分类保存到工作流" }, visible.value.length ? visible.value.map(entry => {
         const cn = resolveTranslation(entry.item.tag, entry.item.translation);
         const text = danbooruUiSettings.tagDisplayLanguage === "zh" && cn
           ? cn
           : entry.item.tag.replace(/_/g, " ") + (danbooruUiSettings.tagDisplayLanguage === "bilingual" && cn ? " · " + cn : "");
         return h("button", {
           class: ["dbcm-tag", selected.has(entry.key) ? "selected" : "", "major-" + entry.major],
-          title: (TAG_KIND_LABELS[entry.item.kind] || entry.item.kind || "通用") + " / " + (TAG_SUBGROUP_LABELS[entry.sub] || entry.sub),
-          onClick: () => toggle(entry)
+          title: (TAG_KIND_LABELS[entry.item.kind] || entry.item.kind || "通用") + " / " + (TAG_SUBGROUP_LABELS[entry.sub] || entry.sub) +
+            " / 评级: " + (entry.item.rating && entry.item.rating !== "unknown" ? entry.item.rating : "未知"),
+          onClick: event => { toggle(entry); event.currentTarget.parentElement?.focus?.({ preventScroll: true }); }
         }, text);
       }) : [h("span", { class: "dbcm-empty" }, "当前分类没有标签")])
     ]);
@@ -1730,7 +1879,10 @@ const TagLibraryPanel = {
       busy.value = true;
       try {
         saveEnrichmentState(true);
-        await app.queuePrompt(0);
+        // First batch only needs this node and its connected model upstream;
+        // enabling dictionary work must not start unrelated H3 sampling nodes.
+        const accepted = await app.queuePrompt(0, 1, [String(props.node.id)]);
+        if (!accepted) throw new Error("局部执行未被 ComfyUI 接受");
         error.value = "✅ 已启用并提交首批；以后每次正常执行工作流时只处理一批。";
         setTimeout(refresh, 800);
       } catch (e) {
@@ -2390,6 +2542,7 @@ const DanbooruSearchApp = {
     node: { type: Object, required: true },
   },
   setup(props) {
+    const appElement = ref(null);
     const selectedGalleryTags = ref("");
     const selectedPosts = ref([]);
     const selectedOutputTags = ref([]);
@@ -2407,8 +2560,105 @@ const DanbooruSearchApp = {
     const gachaExcludedTags = ref("");
     const releaseModelAfterOutput = ref(false);
     const modelReleaseRequest = ref("");
+    const enrichmentBusy = ref(false);
+    const enrichmentStatus = ref("");
+    let restoreSelectionTimer = null;
+    const MAX_SIDE_RATIO_SUM = 0.68;
+    const leftRatio = ref(0.28);
+    const selectedRatio = ref(0.19);
+    let activeSplitCleanup = null;
+
+    function restoreSplitLayout() {
+      const savedSplit = props.node.properties?.eagle_danbooru_split_layout || {};
+      let restoredLeft = Math.max(0.18, Math.min(0.45, Number(savedSplit.left_ratio) || 0.28));
+      let restoredSelected = Math.max(0.14, Math.min(0.36, Number(savedSplit.selected_ratio) || 0.19));
+      if (restoredLeft + restoredSelected > MAX_SIDE_RATIO_SUM) {
+        restoredSelected = Math.max(0.14, MAX_SIDE_RATIO_SUM - restoredLeft);
+        restoredLeft = Math.max(0.18, Math.min(restoredLeft, MAX_SIDE_RATIO_SUM - restoredSelected));
+      }
+      leftRatio.value = restoredLeft;
+      selectedRatio.value = restoredSelected;
+    }
+    restoreSplitLayout();
+
+    function persistSplitLayout(commit = false) {
+      props.node.properties ||= {};
+      props.node.properties.eagle_danbooru_split_layout = {
+        version: 1,
+        left_ratio: Number(leftRatio.value.toFixed(5)),
+        selected_ratio: Number(selectedRatio.value.toFixed(5)),
+      };
+      props.node.setDirtyCanvas?.(true, true);
+      if (commit) props.node.graph?.change?.();
+    }
+
+    function stopSplitDrag() { activeSplitCleanup?.(); }
+
+    function beginColumnResize(event, ratioRef, invert = false) {
+      if (event.pointerType !== "touch" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      stopSplitDrag();
+      const target = event.currentTarget;
+      const layout = target?.parentElement;
+      const rect = layout?.getBoundingClientRect?.();
+      if (!target || !rect || rect.width < 1) return;
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startPixels = ratioRef.value * rect.width;
+      const oldCursor = document.body.style.cursor;
+      const oldUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      target.setPointerCapture?.(pointerId);
+      const move = moveEvent => {
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        const width = Math.max(1, layout.getBoundingClientRect().width);
+        let delta = moveEvent.clientX - startX;
+        if (invert) delta = -delta;
+        const next = (startPixels + delta) / width;
+        if (ratioRef === leftRatio) {
+          leftRatio.value = Math.max(0.18, Math.min(0.45, MAX_SIDE_RATIO_SUM - selectedRatio.value, next));
+        } else {
+          selectedRatio.value = Math.max(0.14, Math.min(0.36, MAX_SIDE_RATIO_SUM - leftRatio.value, next));
+        }
+        persistSplitLayout(false);
+      };
+      const finish = finishEvent => {
+        if (finishEvent?.pointerId != null && finishEvent.pointerId !== pointerId) return;
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", finish);
+        target.removeEventListener("pointercancel", finish);
+        target.removeEventListener("lostpointercapture", finish);
+        if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+        document.body.style.cursor = oldCursor;
+        document.body.style.userSelect = oldUserSelect;
+        if (activeSplitCleanup === finish) activeSplitCleanup = null;
+        persistSplitLayout(true);
+      };
+      activeSplitCleanup = finish;
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", finish);
+      target.addEventListener("pointercancel", finish);
+      target.addEventListener("lostpointercapture", finish);
+    }
+
+    const beginLeftResize = event => beginColumnResize(event, leftRatio, false);
+    const beginSelectedResize = event => beginColumnResize(event, selectedRatio, true);
+    props.node._dbsStopSplitDrag = stopSplitDrag;
+    props.node._dbsRestoreSplitLayout = restoreSplitLayout;
 
     const contentLevelLabels = ["SFW 安全", "SFW 轻微", "NSFW 成人", "NSFW 明确"];
+
+    function protectNativeEditing(event) {
+      if (!shouldProtectDanbooruEditing(event, appElement.value)) return;
+      // Nodes 2.0 may route Delete from an input to its graph-wide node
+      // shortcut. Keep the browser's default text deletion, while preventing
+      // the key from reaching ComfyUI's capture/bubble graph handlers.
+      event.stopImmediatePropagation?.();
+      event.stopPropagation();
+    }
 
     function inputConnected(name) {
       const input = (props.node?.inputs || []).find(item => item?.name === name);
@@ -2454,6 +2704,42 @@ const DanbooruSearchApp = {
       selectedOutputTags.value = (items || []).map(item => normalizeTagItem(item)).filter(Boolean);
       syncSelection();
     }
+
+    function applyApprovedMetadata() {
+      let changed = false;
+      const next = selectedOutputTags.value.map(item => {
+        const meta = approvedMetadataCache[item.tag];
+        if (!meta || typeof meta !== "object") return item;
+        const patch = {};
+        // Old workflow items have no manual marker: treat an already-specific
+        // purpose or nonempty translation as potentially hand-edited.
+        if (!item.kind_manual && ["general", "semantic", "detail", "manual"].includes(item.kind) &&
+            meta.kind && meta.kind !== item.kind) patch.kind = meta.kind;
+        if (!item.translation_manual && !item.translation && meta.cn_name) patch.translation = meta.cn_name;
+        if (Array.isArray(meta.facets) && JSON.stringify(meta.facets) !== JSON.stringify(item.facets || [])) patch.facets = meta.facets.slice();
+        if (meta.facet_labels && JSON.stringify(meta.facet_labels) !== JSON.stringify(item.facet_labels || {})) patch.facet_labels = { ...meta.facet_labels };
+        if (meta.rating && meta.rating !== item.rating) patch.rating = meta.rating;
+        const nsfw = normalizeNsfwTriState(meta.nsfw);
+        if (nsfw !== item.nsfw) patch.nsfw = nsfw;
+        if (!Object.keys(patch).length) return item;
+        changed = true;
+        return { ...item, ...patch };
+      });
+      if (changed) {
+        selectedOutputTags.value = next;
+        syncSelection();
+        enrichmentStatus.value = "已回读审核通过的标签分类";
+      }
+    }
+
+    function refreshApprovedTags() {
+      const tags = selectedOutputTags.value.map(item => item.tag).filter(Boolean);
+      if (!tags.length) return;
+      enrichmentStatus.value = `回读 ${tags.length} 个标签的已审核结果…`;
+      requestTranslations(tags, true);
+    }
+
+    watch(approvedMetadataCache, applyApprovedMetadata, { deep: true });
 
     async function drawGacha() {
       if (gachaLoading.value) return;
@@ -2522,6 +2808,66 @@ const DanbooruSearchApp = {
       }
     }
 
+    async function enrichSelectedTags(items) {
+      const tags = [...new Set((items || []).filter(item => item.enabled !== false)
+        .map(item => String(item.tag || "").trim()).filter(Boolean))].slice(0, 50);
+      if (!tags.length) { enrichmentStatus.value = "先框选有效标签"; return; }
+      if (!inputConnected("local_model") && !inputConnected("api_config")) {
+        enrichmentStatus.value = "先连接 local_model 或 api_config";
+        return;
+      }
+      const widget = (props.node.widgets || []).find(item => item.name === "selection_data");
+      if (!widget) { enrichmentStatus.value = "找不到节点状态，请刷新页面"; return; }
+      let payload;
+      try { payload = JSON.parse(widget.value || "{}"); } catch (_) { payload = {}; }
+      const request = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        node_id: String(props.node.id),
+        batch: Math.min(50, tags.length),
+        tags,
+      };
+      payload.selected_tag_enrichment_request = request;
+      widget.value = JSON.stringify(payload);
+      widget.callback?.(widget.value, widget, props.node);
+      props.node.graph?.change?.();
+      enrichmentBusy.value = true;
+      enrichmentStatus.value = `提交 ${tags.length} 个标签…`;
+      try {
+        // Queue only this node and its required upstream inputs. Running the
+        // whole graph here could unintentionally start an H3 sampler merely
+        // because the user asked to classify a few tags.
+        const accepted = await app.queuePrompt(0, 1, [String(props.node.id)]);
+        if (!accepted) throw new Error("局部执行未被 ComfyUI 接受");
+        // queuePrompt has already serialized the submitted prompt. Do not
+        // persist an accepted one-shot action in later workflow saves: if the
+        // SQLite library is moved or reset, a stale widget request could bill
+        // the connected API again on an unrelated future queue.
+        try {
+          const current = JSON.parse(widget.value || "{}");
+          if (current.selected_tag_enrichment_request?.id === request.id) {
+            delete current.selected_tag_enrichment_request;
+            widget.value = JSON.stringify(current);
+            widget.callback?.(widget.value, widget, props.node);
+            props.node.graph?.change?.();
+          }
+        } catch (_) {}
+        enrichmentStatus.value = `已局部提交 ${tags.length} 个标签；模型结果待审核后回读`;
+      } catch (error) {
+        // A failed queue submission must not leave a stale one-shot request.
+        try {
+          const current = JSON.parse(widget.value || "{}");
+          if (current.selected_tag_enrichment_request?.id === request.id) {
+            delete current.selected_tag_enrichment_request;
+            widget.value = JSON.stringify(current);
+            widget.callback?.(widget.value, widget, props.node);
+          }
+        } catch (_) {}
+        enrichmentStatus.value = `提交失败：${error.message}`;
+      } finally {
+        enrichmentBusy.value = false;
+      }
+    }
+
     function syncSelection() {
       const nodeId = String(props.node.id);
 
@@ -2564,6 +2910,10 @@ const DanbooruSearchApp = {
           // Preserve them when the editor changes tags or image selections.
           library_enrichment_enabled: !!controls.library_enrichment_enabled,
           library_enrichment_batch: Math.min(50, Math.max(1, Number(controls.library_enrichment_batch) || 20)),
+          ...(controls.selected_tag_enrichment_request && typeof controls.selected_tag_enrichment_request === "object"
+            ? { selected_tag_enrichment_request: controls.selected_tag_enrichment_request } : {}),
+          ...(controls.library_fill_request && typeof controls.library_fill_request === "object"
+            ? { library_fill_request: controls.library_fill_request } : {}),
         });
         if (typeof widget.callback === "function") widget.callback(widget.value, widget, props.node);
         if (props.node.graph) {
@@ -2591,6 +2941,7 @@ const DanbooruSearchApp = {
         )) workflowPayload = saved;
         if (Array.isArray(saved.selections)) selectedPosts.value = saved.selections;
         if (Array.isArray(saved.selected_tags)) selectedOutputTags.value = saved.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
+        applyApprovedMetadata();
         galleryCollapsed.value = !!saved.gallery_collapsed;
         autoGacha.value = !!saved.auto_gacha;
         if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
@@ -2633,6 +2984,7 @@ const DanbooruSearchApp = {
           if (data.success && data.found !== false) {
             if (Array.isArray(data.selections)) selectedPosts.value = data.selections;
             if (Array.isArray(data.selected_tags)) selectedOutputTags.value = data.selected_tags.map(item => normalizeTagItem(item)).filter(Boolean);
+            applyApprovedMetadata();
             galleryCollapsed.value = !!data.gallery_collapsed;
             if (typeof data.auto_gacha === "boolean") autoGacha.value = data.auto_gacha;
             if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
@@ -2650,6 +3002,7 @@ const DanbooruSearchApp = {
     props.node._eagleRestoreUiState = restoreSelection;
 
     onMounted(async () => {
+      window.addEventListener("keydown", protectNativeEditing, true);
       try {
         const [settingsResponse, libraryResponse] = await Promise.all([
           fetch("/danbooru_search/settings"),
@@ -2667,17 +3020,28 @@ const DanbooruSearchApp = {
       } catch (_) {
         // 设置读取失败不阻断节点加载，使用模块内默认值。
       }
-      setTimeout(restoreSelection, 500);
+      restoreSelectionTimer = setTimeout(() => {
+        restoreSelectionTimer = null;
+        restoreSelection();
+      }, 500);
     });
 
     onBeforeUnmount(() => {
+      stopSplitDrag();
+      clearTimeout(restoreSelectionTimer);
+      restoreSelectionTimer = null;
+      if (props.node._dbsStopSplitDrag === stopSplitDrag) delete props.node._dbsStopSplitDrag;
+      if (props.node._dbsRestoreSplitLayout === restoreSplitLayout) delete props.node._dbsRestoreSplitLayout;
+      window.removeEventListener("keydown", protectNativeEditing, true);
       if (props.node._eagleRestoreUiState === restoreSelection) {
         delete props.node._eagleRestoreUiState;
       }
     });
 
     return () => {
-      return h("div", { class: "dbs-root" }, [
+      // Keep blank-space and node-title right-clicks available to ComfyUI.
+      // Only tag chips and image cards consume their own context-menu event.
+      return h("div", { class: "dbs-root", ref: appElement }, [
         h("div", { class: ["dbs-preview-bar", galleryCollapsed.value ? "collapsed" : ""] }, [
           h(TagEditor, {
             tags: selectedOutputTags.value,
@@ -2701,6 +3065,10 @@ const DanbooruSearchApp = {
               syncSelection();
             },
             onClearAll: () => { selectedOutputTags.value = []; lastGachaCard.value = ""; gachaStatus.value = ""; syncSelection(); },
+            onEnrichSelected: enrichSelectedTags,
+            enrichmentBusy: enrichmentBusy.value,
+            enrichmentStatus: enrichmentStatus.value,
+            onRefreshApproved: refreshApprovedTags,
           }),
         ]),
 
@@ -2765,12 +3133,30 @@ const DanbooruSearchApp = {
             gachaStatus.value ? h("div", { class: ["dbs-gacha-status", gachaStatus.value.startsWith("抽卡失败") ? "error" : ""] }, gachaStatus.value) : null,
           ]),
         ]) : h("div", { class: "dbs-layout" }, [
-          h("div", { class: "dbs-left" }, [
+          h("div", {
+            class: "dbs-left",
+            style: { flex: `0 0 ${leftRatio.value * 100}%` },
+          }, [
             h(TagSearchPanel, {
               onAddOutput: addSearchOutput,
               onSearchGallery: searchGallery,
             }),
           ]),
+
+          h("div", {
+            class: "dbs-column-splitter",
+            role: "separator",
+            tabindex: 0,
+            "aria-orientation": "vertical",
+            "aria-label": "调整标签搜索与图库宽度",
+            onPointerdown: beginLeftResize,
+            onKeydown: event => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              leftRatio.value = Math.max(0.18, Math.min(0.45, MAX_SIDE_RATIO_SUM - selectedRatio.value, leftRatio.value + (event.key === "ArrowRight" ? 0.02 : -0.02)));
+              persistSplitLayout(true);
+            },
+          }),
 
           h("div", { class: "dbs-right" }, [
             h(GalleryPanel, {
@@ -2781,7 +3167,25 @@ const DanbooruSearchApp = {
             }),
           ]),
 
-          h("div", { class: "dbs-selected-side" }, [
+          h("div", {
+            class: "dbs-column-splitter",
+            role: "separator",
+            tabindex: 0,
+            "aria-orientation": "vertical",
+            "aria-label": "调整图库与已选内容宽度",
+            onPointerdown: beginSelectedResize,
+            onKeydown: event => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              selectedRatio.value = Math.max(0.14, Math.min(0.36, MAX_SIDE_RATIO_SUM - leftRatio.value, selectedRatio.value + (event.key === "ArrowLeft" ? 0.02 : -0.02)));
+              persistSplitLayout(true);
+            },
+          }),
+
+          h("div", {
+            class: "dbs-selected-side",
+            style: { flex: `0 0 ${selectedRatio.value * 100}%` },
+          }, [
             h(SelectionBar, { selections: selectedPosts.value, onRemove: removeSelection, onClear: clearSelection }),
           ]),
         ]),
@@ -2860,8 +3264,8 @@ const CSS = `
 .dbsb-wrap.vertical .dbsb-remove { opacity: 1; position: static; margin-left: auto; }
 
 .dbs-selected-side {
-  width: 190px; min-width: 170px; max-width: 260px; padding: 8px;
-  background: #1e1e22; border-left: 1px solid #333; overflow: hidden;
+  min-width: 130px; padding: 8px; box-sizing: border-box; flex-shrink: 0;
+  background: #1e1e22; overflow: hidden;
 }
 
 .dbte { display: flex; flex-direction: column; gap: 7px; min-height: 55px; }
@@ -2897,6 +3301,7 @@ const CSS = `
 .dbte-drag-handle { color:#9aa1ae; font-size:13px; line-height:1; }
 .dbte-drag-note { color:#7f8795; font-size:10px; margin-right:auto; }
 .dbte-chip.kind-outfit { background:#3b3152; border-color:#775da2; }
+.dbte-chip.kind-identity,.dbte-chip.kind-appearance,.dbte-chip.kind-body,.dbte-chip.kind-face { background:#303d4a; border-color:#5a7a9e; }
 .dbte-chip.kind-action { background:#264936; border-color:#4c8b69; }
 .dbte-chip.kind-expression { background:#4a2f3d; border-color:#985c78; }
 .dbte-chip.kind-scene { background:#423b24; border-color:#8e7d3f; }
@@ -3049,18 +3454,48 @@ const CSS = `
 }
 
 .dbs-left {
-  width: 320px;
-  min-width: 280px;
-  max-width: 400px;
-  border-right: 1px solid #333;
+  min-width: 150px;
+  box-sizing: border-box;
+  flex-shrink: 0;
   background: #1e1e22;
   overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 
+.dbs-column-splitter {
+  position: relative;
+  z-index: 4;
+  flex: 0 0 8px;
+  min-width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  background: #202126;
+  border-left: 1px solid #30333a;
+  border-right: 1px solid #30333a;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+.dbs-column-splitter::after {
+  content: "";
+  position: absolute;
+  top: 45%;
+  bottom: 45%;
+  left: 3px;
+  width: 2px;
+  min-height: 28px;
+  border-radius: 999px;
+  background: #606877;
+}
+.dbs-column-splitter:hover,
+.dbs-column-splitter:focus-visible {
+  outline: none;
+  background: #2c4260;
+  border-color: #517fba;
+}
+
 .dbs-right {
   flex: 1;
+  min-width: 180px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -3790,11 +4225,66 @@ const CSS = `
 // ComfyUI 扩展注册
 // ════════════════════════════════════════════════════════════════════════════
 
+function suppressDanbooruStateDefinition(nodeData) {
+  // Nodes 2.0 may create its parameter-row component before onNodeCreated can
+  // hide the classic widget. Mark the definition itself to prevent a raw JSON
+  // textarea from flashing or permanently reserving preview space.
+  const inputDefs = nodeData?.input || nodeData?.inputs;
+  const definition = inputDefs?.required?.selection_data;
+  if (!Array.isArray(definition)) return false;
+  definition[1] = {
+    ...(definition[1] || {}),
+    hidden: true,
+    vueNode: "never",
+    hideInPanel: true,
+  };
+  return true;
+}
+
+function hideDanbooruStateWidget(node) {
+  const widgets = (node?.widgets || []).filter(widget => widget?.name === "selection_data");
+  if (!widgets.length) return false;
+  for (const widget of widgets) {
+    const needsNodes2Refresh = widget.options?.hidden !== true;
+    widget.type = "hidden";
+    widget.options ||= {};
+    Object.assign(widget.options, {
+      hidden: true,
+      vueNode: "never",
+      hideInPanel: true,
+    });
+    widget.computeSize = () => [0, -4];
+    widget.hidden = true;
+    widget.draw = () => {};
+    // Nodes 2.0 keeps widgets in a shallowReactive array. Mutating nested
+    // options after its first render is not observable, so replace the same
+    // item through splice once when the hidden flag is first applied.
+    if (needsNodes2Refresh && Array.isArray(node.widgets)) {
+      const index = node.widgets.indexOf(widget);
+      if (index >= 0) node.widgets.splice(index, 1, widget);
+    }
+  }
+  node.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+function scheduleDanbooruStateWidgetHiding(node) {
+  for (const timer of node?._dbsHideWidgetTimers || []) clearTimeout(timer);
+  hideDanbooruStateWidget(node);
+  // Workflow switching and Nodes 2.0 can recreate native wrappers on a later
+  // tick. Bounded retries avoid a long-lived observer and are lifecycle-clean.
+  node._dbsHideWidgetTimers = [0, 250, 500].map(delay => setTimeout(() => {
+    if (node?._dbsInit !== false) hideDanbooruStateWidget(node);
+  }, delay));
+}
+
 app.registerExtension({
   name: "EagleSuite.DanbooruSearchVue",
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "DanbooruVueSearchNode") return;
+
+    suppressDanbooruStateDefinition(nodeData);
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
@@ -3803,24 +4293,12 @@ app.registerExtension({
       if (this._dbsInit || this._dbsMounting) return;
       this._dbsMounting = true;
 
-      this.setSize([1200, 700]);
+      const initialSize = Array.isArray(this.size) ? this.size : [0, 0];
+      if ((Number(initialSize[0]) || 0) < 620 || (Number(initialSize[1]) || 0) < 260) {
+        this.setSize([960, 720]);
+      }
 
-      const hideWidget = (node) => {
-        const w = (node.widgets || []).find(x => x.name === "selection_data");
-        if (!w) return false;
-        w.type = "hidden";
-        w.computeSize = () => [0, -4];
-        w.hidden = true;
-        w.draw = () => {};
-        node.setDirtyCanvas(true, true);
-        return true;
-      };
-
-      setTimeout(() => {
-        if (!hideWidget(this)) {
-          setTimeout(() => hideWidget(this), 500);
-        }
-      }, 300);
+      scheduleDanbooruStateWidgetHiding(this);
 
       let container = null;
       let vueApp = null;
@@ -3837,16 +4315,29 @@ app.registerExtension({
         style.textContent = CSS;
 
           container = document.createElement("div");
-          container.style.cssText = "width:1180px;max-width:none;min-width:0;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;position:relative;";
+          container.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;position:relative;";
 
+        const DEFAULT_VIEWPORT_HEIGHT = 570;
+        const MIN_VIEWPORT_HEIGHT = 280;
+        let currentViewportHeight = DEFAULT_VIEWPORT_HEIGHT;
+        const MAX_VIEWPORT_HEIGHT = 4096;
         const widget = this.addDOMWidget("danbooru_search_vue", "div", container, {
           serialize: false,
           // This is a full canvas application, not an editable parameter.
           // ComfyUI 1.49's right panel otherwise mounts WidgetLegacy and writes
           // its narrow sidebar width back to widget.width, clipping the canvas UI.
-          canvasOnly: true,
+          hideInPanel: true,
+          getMinHeight: () => MIN_VIEWPORT_HEIGHT,
+          getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
+          getHeight: () => currentViewportHeight,
         });
         widget.width = undefined;
+        widget._eagleViewportHeight = DEFAULT_VIEWPORT_HEIGHT;
+        // Keep the native DOMWidgetImpl.computeLayoutSize contract. Defining an
+        // instance computeSize here makes LiteGraph classify this as a fixed
+        // widget, so only MIN_VIEWPORT_HEIGHT is allocated and the larger Vue
+        // surface is clipped after a user resize or workflow restore.
+        const galleryHeight = (size) => Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, (Number(size?.[1]) || 720) - 150));
         this._dbsWidget = widget;
 
         vueApp = createApp(DanbooruSearchApp, { node: this });
@@ -3859,13 +4350,12 @@ app.registerExtension({
         this._dbsInit = true;
 
           const syncWidgetLayout = (size) => {
-            const currentSize = size || this.size || [1200, 700];
-            const nodeWidth = Math.max(640, Number(currentSize[0]) || 1200);
-            const nodeHeight = Math.max(480, Number(currentSize[1]) || 700);
+            const currentSize = size || this.size || [960, 720];
+            const nodeWidth = Math.max(640, Number(currentSize[0]) || 960);
             const width = Math.max(620, nodeWidth - 20);
-            // 标题和四个输入端口属于 LiteGraph 原生区域。DOM 只占剩余
-            // 视口；内部三栏各自滚动，内容量不能反向改变节点高度。
-            const hgt = Math.max(300, nodeHeight - 150);
+            const hgt = galleryHeight(currentSize);
+            currentViewportHeight = hgt;
+            widget._eagleViewportHeight = hgt;
 
             container.style.width = width + "px";
             container.style.maxWidth = "none";
@@ -3877,17 +4367,13 @@ app.registerExtension({
               host.style.width = width + "px";
               host.style.maxWidth = "none";
               host.style.minWidth = "0";
-              host.style.height = hgt + "px";
-              host.style.maxHeight = hgt + "px";
               host.style.boxSizing = "border-box";
               host.style.overflow = "hidden";
             }
             return hgt;
           };
-          // Do not derive computeSize from node.size. New ComfyUI measures every
-          // DOM widget while laying out the graph; feeding node height back as
-          // widget height makes the native input-row height accumulate forever.
-          // The fixed container/host height above is the measurement boundary.
+          // The renderer owns host height. A 100% child fills either renderer's
+          // allocated slot without writing node.size back into Nodes 2.0 bounds.
           this._dbsSyncLayout = syncWidgetLayout;
           syncWidgetLayout(this.size);
           requestAnimationFrame(() => syncWidgetLayout(this.size));
@@ -3902,17 +4388,20 @@ app.registerExtension({
           const onConfigure = this.onConfigure;
           this.onConfigure = function () {
             onConfigure?.apply(this, arguments);
+            this._dbsRestoreSplitLayout?.();
             this.properties = this.properties || {};
-            if (Number(this.properties.eagle_dbs_layout_version || 0) < 2) {
+            if (Number(this.properties.eagle_dbs_layout_version || 0) < 4) {
               // Recover old workflows whose feedback loop already persisted a
               // several-thousand-pixel height. This runs once; later deliberate
               // user resizing is preserved by the version marker.
-              const restoredWidth = Math.max(640, Number(this.size?.[0]) || 1200);
-              const restoredHeight = Number(this.size?.[1]) || 700;
-              if (restoredHeight > 1200) this.setSize([restoredWidth, 760]);
-              this.properties.eagle_dbs_layout_version = 2;
+              const restoredWidth = Math.max(640, Number(this.size?.[0]) || 960);
+              const restoredHeight = Number(this.size?.[1]) || 720;
+              // 只修复旧 Nodes 2.0 反馈循环产生的异常高度。正常用户缩放
+              // 无论是 620/700/900 都按工作流原样恢复。
+              if (restoredHeight > 1800) this.setSize([restoredWidth, 720]);
+              this.properties.eagle_dbs_layout_version = 4;
             }
-            hideWidget(this);
+            scheduleDanbooruStateWidgetHiding(this);
             requestAnimationFrame(() => this._dbsSyncLayout?.(this.size));
           };
       } catch (error) {
@@ -3935,12 +4424,16 @@ app.registerExtension({
 
     const onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
+      this._dbsStopSplitDrag?.();
+      this._dbsStopSplitDrag = null;
       if (this._vueApp) {
         this._vueApp.unmount();
         this._vueApp = null;
       }
       this._dbsInit = false;
       this._dbsMounting = false;
+      for (const timer of this._dbsHideWidgetTimers || []) clearTimeout(timer);
+      this._dbsHideWidgetTimers = [];
           this._dbsContainer = null;
           this._dbsWidget = null;
           this._dbsSyncLayout = null;

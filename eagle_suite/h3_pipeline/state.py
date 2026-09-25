@@ -78,14 +78,16 @@ def _first_changed_shot(old_plan, new_plan):
     return None
 
 
-def _default_state(plan, base_dir, mode="auto", max_shots=0):
+def _default_state(plan, base_dir, mode="auto", max_shots=0, run_name=None):
     """从 plan 构建初始运行状态。"""
     total = len(plan["shots"])
     if max_shots and max_shots < total:
         total = max_shots
     return {
         "version": MANIFEST_VERSION,
-        "run_name": plan.get("run_name", "eagle_h3_pipeline"),
+        # Runtime identity must match the actual checkpoint directory.  The
+        # authored plan name is still retained inside ``plan`` for provenance.
+        "run_name": run_name or plan.get("run_name", "eagle_h3_pipeline"),
         "base_dir": str(base_dir),
         "mode": mode if mode in ("auto", "interactive") else "auto",
         "current_index": 0,
@@ -100,6 +102,30 @@ def _default_state(plan, base_dir, mode="auto", max_shots=0):
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
     }
+
+
+def _normalize_shot_bounds(state, plan=None, max_shots=0,
+                           use_plan_count=False):
+    """Keep persisted loop bounds consistent with the effective plan."""
+    plan = plan if isinstance(plan, dict) else (state.get("plan") or {})
+    shots = plan.get("shots") or []
+    plan_total = len(shots)
+    if plan_total < 1:
+        raise ValueError("plan.shots 必须是非空列表")
+
+    configured_limit = int(max_shots or 0)
+    stored_total = int(state.get("total_shots", 0) or 0)
+    if configured_limit > 0:
+        total = min(plan_total, configured_limit)
+    elif use_plan_count or stored_total < 1 or stored_total > plan_total:
+        total = plan_total
+    else:
+        total = stored_total
+
+    current = int(state.get("current_index", 0) or 0)
+    state["total_shots"] = total
+    state["current_index"] = max(0, min(current, total))
+    return state
 
 
 def init_state(plan, output_root, run_name_override="", resume_policy="resume", mode="auto", max_shots=0):
@@ -131,23 +157,32 @@ def init_state(plan, output_root, run_name_override="", resume_policy="resume", 
             raise FileExistsError(f"manifest 已存在: {manifest_file}，请调整 run_name")
         if resume_policy == "overwrite":
             logger.info(f"[H3Chain] 覆盖已有运行: {run_name}")
-            state = _default_state(plan, base_dir, mode=mode, max_shots=max_shots)
+            state = _default_state(
+                plan, base_dir, mode=mode, max_shots=max_shots, run_name=run_name
+            )
             save_state(state)
             return state
         # resume：加载已有状态，但 plan 可能被更新，这里合并 plan
         old = load_state(base_dir)
-        # 如果 plan_hash 不同，用户可能修改了导演台后重新排队；允许替换 plan
+        # 如果 plan 的生成合同有变化，从最早受影响镜头起失效旧检查点。
+        # 不能只依赖 plan_hash：旧版 manifest 可能没有 hash，或者曾错误
+        # 复用了 hash。
         old_plan = old.get("plan") or {}
         new_hash = plan.get("plan_hash")
         old_hash = old_plan.get("plan_hash")
-        if new_hash and old_hash and new_hash != old_hash:
-            invalid_from = _first_changed_shot(old_plan, plan)
-            logger.info(
-                f"[H3Chain] plan 已变更 ({old_hash[:8]} -> {new_hash[:8]})，"
-                f"从场景 {(invalid_from or 0) + 1} 起失效旧检查点"
+        invalid_from = _first_changed_shot(old_plan, plan)
+        hash_changed = bool(new_hash and old_hash and new_hash != old_hash)
+        if hash_changed or invalid_from is not None:
+            invalidation_note = (
+                f"从场景 {invalid_from + 1} 起失效旧检查点"
+                if invalid_from is not None
+                else "镜头合同未变，保留旧检查点"
             )
-            old["plan"] = plan
-            old["total_shots"] = min(len(plan["shots"]), max_shots or len(plan["shots"]))
+            logger.info(
+                f"[H3Chain] plan 已变更 "
+                f"({str(old_hash or '-')[:8]} -> {str(new_hash or '-')[:8]})，"
+                f"{invalidation_note}"
+            )
             if invalid_from is not None:
                 old["shots"] = [
                     item for item in old.get("shots", [])
@@ -164,14 +199,23 @@ def init_state(plan, output_root, run_name_override="", resume_policy="resume", 
                         if int(index) < invalid_from
                     }
                 old["invalidated_from"] = invalid_from
-        if max_shots and max_shots < old["total_shots"]:
-            old["total_shots"] = max_shots
+        old["plan"] = plan
+        # Keep review events, final filenames and resume lookup in the same
+        # namespace as the directory selected by run_name_override.
+        old["run_name"] = run_name
+        # 每次从导演台恢复时，以本次 plan.shots 为镜头数权威来源。
+        # 这也修复旧版 manifest 中 total_shots=0 造成的 1/0 假完成。
+        _normalize_shot_bounds(
+            old, plan=plan, max_shots=max_shots, use_plan_count=True
+        )
         old["mode"] = mode if mode in ("auto", "interactive") else old.get("mode", "auto")
         old["updated_at"] = datetime.now().isoformat()
         save_state(old)
         return old
 
-    state = _default_state(plan, base_dir, mode=mode, max_shots=max_shots)
+    state = _default_state(
+        plan, base_dir, mode=mode, max_shots=max_shots, run_name=run_name
+    )
     save_state(state)
     return state
 
@@ -195,6 +239,7 @@ def load_state(base_dir):
     state.setdefault("seed_overrides", {})
     state.setdefault("checkpoint_history", [])
     state.setdefault("mode", "auto")
+    _normalize_shot_bounds(state)
     return state
 
 
@@ -301,6 +346,10 @@ def restore_from_scene(state, scene_number):
     state["reroll_index"] = index
     state["stop"] = False
     state.pop("pending_decision", None)
+    # Runtime tails belong to the most recently accepted scene, not necessarily
+    # the predecessor of the requested resume position. Reload its checkpoint.
+    state.pop("previous_frames", None)
+    state.pop("previous_latent", None)
     state["restored_from_scene"] = scene_number
     return state
 
@@ -311,6 +360,8 @@ def advance(state, decision=None):
     decision: None / "approve" / "retry" / "reroll" / "stop"。
     返回 (state, loop_again, done)。
     """
+    if decision not in (None, "approve", "retry", "reroll", "stop"):
+        raise ValueError(f"无效审片决策 {decision!r}，循环不推进")
     state["reroll_index"] = None
 
     if decision == "stop":
@@ -399,10 +450,11 @@ def build_summary(state):
     idx = state.get("current_index", 0)
     done = state.get("stop") or idx >= total
     shots = state.get("shots", [])
+    current_scene = min(idx + 1, total) if total else 0
     return (
         f"run={state.get('run_name')} | "
         f"mode={state.get('mode')} | "
-        f"index={idx+1}/{total} | "
+        f"index={current_scene}/{total} | "
         f"completed={len(shots)} | "
         f"done={'是' if done else '否'}"
     )

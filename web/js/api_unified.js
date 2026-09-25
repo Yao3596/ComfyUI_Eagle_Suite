@@ -1,7 +1,8 @@
 // api_unified.js - Eagle API 节点前端扩展（稳定版 v3.4）
-// 功能：API Key 密码框、ENC:Base64 混淆存储、右键菜单显示/隐藏切换、安全保存、连线状态提示
+// 功能：API Key 密码框、旧版 ENC:Base64 读取、右键菜单显示/隐藏切换、运行时密钥、连线状态提示
 
 import { app } from "../../../scripts/app.js";
+import { redactSecretWidgetFromWorkflow } from "./workflow_secret_redaction.js";
 
 // ── 与 Python decode_api_key 对应的编码/解码工具 ─────────────────────
 const _ENC_PREFIX = "ENC:";
@@ -9,14 +10,6 @@ const _SUPPORTED_API_NODES = new Set([
     "EagleAPIUnifiedNode",
     "EagleAPIImageNode",
 ]);
-
-function _encodeKey(str) {
-    if (!str) return "";
-    if (typeof str !== "string") str = String(str);
-    // 已经是编码格式则不再重复编码
-    if (str.startsWith(_ENC_PREFIX)) return str;
-    try { return _ENC_PREFIX + btoa(encodeURIComponent(str)); } catch { return str; }
-}
 
 function _decodeKey(str) {
     if (!str) return "";
@@ -32,6 +25,13 @@ app.registerExtension({
         if (!_SUPPORTED_API_NODES.has(nodeData.name)) return;
 
         console.log("[EagleAPI] 注册节点:", nodeData.name);
+
+        const inputDefs = nodeData?.input || nodeData?.inputs;
+        for (const groupName of ["required", "optional"]) {
+            const definition = inputDefs?.[groupName]?.api_config_key;
+            if (!Array.isArray(definition)) continue;
+            definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+        }
 
         if (nodeData.name === "EagleAPIImageNode") {
             const previousConfigure = nodeType.prototype.onConfigure;
@@ -112,7 +112,7 @@ app.registerExtension({
 
                         // 更新输入框类型
                         try {
-                            const widgetElement = apiKeyWidget.inputEl || apiKeyWidget.element;
+                            const widgetElement = this._eagleApiKeyInput || apiKeyWidget.inputEl || apiKeyWidget.element;
                             if (widgetElement && widgetElement.tagName === "INPUT") {
                                 widgetElement.type = this._showApiKey ? "text" : "password";
                             }
@@ -147,7 +147,7 @@ app.registerExtension({
             const status = document.createElement("div");
             status.style.cssText = "box-sizing:border-box;width:100%;min-height:72px;padding:8px;background:#171321;color:#dbd5e8;border:1px solid #564061;border-radius:6px;font:12px/1.5 sans-serif;white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere";
             status.textContent = "尺寸诊断：等待执行。比例/分辨率仅在 size=比例预设时生效；4K 长边=3840。input_resize_mode 只控制上传参考图。";
-            node.addDOMWidget("eagle_image_size_status", "div", status, { serialize: false, hideOnZoom: false });
+            node.addDOMWidget("eagle_image_size_status", "div", status, { serialize: false, hideInPanel: true, hideOnZoom: false });
             node._eagleImageSizeStatus = status;
         }
 
@@ -183,7 +183,7 @@ app.registerExtension({
         lines.push(`api_config 复合端口: ${apiConfigConnected ? '✅ 已连接' : '❌ 未连接'}`);
         lines.push("");
         lines.push("独立字段状态:");
-        lines.push(`  api_config_key:  ${keyWidget?.value ? '✅ ' + keyWidget.value.slice(0, 8) + '***' : '❌ 空'}`);
+        lines.push(`  api_config_key:  ${keyWidget?.value ? '✅ 已填写（值不显示）' : '❌ 空'}`);
         lines.push(`  api_config_url:  ${urlWidget?.value ? '✅ ' + urlWidget.value : '❌ 空'}`);
         lines.push(`  api_config_model:${modelWidget?.value ? '✅ ' + modelWidget.value : '❌ 空'}`);
         lines.push("");
@@ -207,38 +207,45 @@ app.registerExtension({
     },
 
     _setupPasswordField(node, widget) {
-        console.log("[EagleAPI] 设置 API Key 密码框");
+        if (node._eagleApiKeyInput) return;
+        // The native STRING editor can be remounted as plain text by Vue
+        // Nodes 2.0. Keep its serializable runtime value, but display only a
+        // node-owned password DOM widget in both node renderers.
+        widget.hidden = true;
+        widget.options ||= {};
+        Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
+        const widgetIndex = node.widgets?.indexOf(widget) ?? -1;
+        if (widgetIndex >= 0) node.widgets.splice(widgetIndex, 1, widget);
+        const container = document.createElement("div");
+        container.style.cssText = "box-sizing:border-box;width:100%;padding:8px;background:#171321;border:1px solid #564061;border-radius:6px;color:#dbd5e8;font:12px sans-serif";
+        const label = document.createElement("label");
+        label.textContent = "API Key";
+        label.style.cssText = "display:block;margin-bottom:5px";
+        const input = document.createElement("input");
+        input.type = "password";
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.placeholder = "输入您的 API Key";
+        input.style.cssText = "box-sizing:border-box;width:100%;min-height:30px;padding:5px;color:#eee;background:#20202b;border:1px solid #56566a;border-radius:4px";
+        input.value = _decodeKey(widget.value);
+        input.addEventListener("input", () => {
+            widget.value = input.value;
+            widget.callback?.(input.value);
+        });
+        container.appendChild(label);
+        container.appendChild(input);
+        node.addDOMWidget("eagle_api_key_password", "div", container,
+                          { serialize: false, hideInPanel: true, hideOnZoom: false });
+        node._eagleApiKeyInput = input;
 
-        const setPasswordType = () => {
-            try {
-                const widgetElement = widget.inputEl || widget.element;
-                if (widgetElement && widgetElement.tagName === "INPUT") {
-                    // 根据显示状态设置类型
-                    widgetElement.type = node._showApiKey ? "text" : "password";
-                    widgetElement.autocomplete = "off";
-                    if (!widgetElement.placeholder) {
-                        widgetElement.placeholder = "输入您的 API Key";
-                    }
-                }
-            } catch (e) {
-                console.log("[EagleAPI] 设置密码框失败:", e);
-            }
-        };
-
-        // 多次尝试设置
-        setPasswordType();
-        setTimeout(setPasswordType, 100);
-        setTimeout(setPasswordType, 500);
-
-        // 监听值变化
+        // Legacy workflow restore and external widget updates must refresh the
+        // password field without exposing the native STRING editor.
         const originalCallback = widget.callback;
         widget.callback = function(value) {
-            setTimeout(setPasswordType, 10);
+            if (input.value !== String(value ?? "")) input.value = _decodeKey(value);
             if (originalCallback) originalCallback(value);
         };
-
-        // 添加 tooltip
-        widget.tooltip = "右键点击节点可切换显示/隐藏 API Key";
+        widget.tooltip = "API Key 在节点内使用密码框编辑；工作流导出会剔除密钥";
     },
 
     _setupSecureSave(node, apiKeyWidget) {
@@ -252,42 +259,31 @@ app.registerExtension({
             }
             try {
                 const idx = this.widgets.indexOf(apiKeyWidget);
-                if (config?.widgets_values && idx >= 0 && idx < config.widgets_values.length) {
-                    const val = config.widgets_values[idx];
-                    if (val && typeof val === "string" && val.startsWith(_ENC_PREFIX)) {
-                        const plain = _decodeKey(val);
-                        apiKeyWidget.value = plain;
-                        config.widgets_values[idx] = plain; // 保持运行时明文显示
-                        console.log("[EagleAPI] 工作流加载时解码 API Key");
-                    }
+                const val = config?.widgets_values_named?.[apiKeyWidget.name]
+                    ?? (config?.widgets_values && idx >= 0 ? config.widgets_values[idx] : undefined);
+                if (val && typeof val === "string" && val.startsWith(_ENC_PREFIX)) {
+                    apiKeyWidget.value = _decodeKey(val);
+                    // The shared named-value restore hook may run after this hook.
+                    queueMicrotask(() => {
+                        if (typeof apiKeyWidget.value === "string" && apiKeyWidget.value.startsWith(_ENC_PREFIX)) {
+                            apiKeyWidget.value = _decodeKey(apiKeyWidget.value);
+                        }
+                    });
+                    console.log("[EagleAPI] 工作流加载时解码旧版 API Key");
+                }
+                if (this._eagleApiKeyInput) {
+                    this._eagleApiKeyInput.value = _decodeKey(apiKeyWidget.value);
                 }
             } catch (e) {
                 console.log("[EagleAPI] 解码工作流 API Key 失败:", e);
             }
         };
 
-        // 序列化工作流时：将 API Key 编码为 ENC:xxx，防止明文泄露
+        // Exported workflows must contain no API key; ENC:Base64 is reversible.
         const originalSerialize = node.serialize;
         node.serialize = function() {
-            try {
-                const data = originalSerialize ? originalSerialize.apply(this, arguments) : {};
-
-                if (data.widgets_values && apiKeyWidget) {
-                    const idx = this.widgets.indexOf(apiKeyWidget);
-                    if (idx !== -1 && idx < data.widgets_values.length) {
-                        const plain = data.widgets_values[idx] || "";
-                        if (plain && typeof plain === "string" && !plain.startsWith(_ENC_PREFIX)) {
-                            data.widgets_values[idx] = _encodeKey(plain);
-                            console.log("[EagleAPI] 保存前编码 API Key");
-                        }
-                    }
-                }
-
-                return data;
-            } catch (e) {
-                console.log("[EagleAPI] 序列化失败:", e);
-                return originalSerialize ? originalSerialize.apply(this, arguments) : {};
-            }
+            const data = originalSerialize ? originalSerialize.apply(this, arguments) : {};
+            return redactSecretWidgetFromWorkflow(data, this, apiKeyWidget);
         };
     }
 });

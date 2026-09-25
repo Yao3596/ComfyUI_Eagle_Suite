@@ -35,7 +35,14 @@ from .utils import (
     IMAGE_EXTENSIONS,
 )
 EAGLE_API_URL = "http://localhost:41595/api"
-STAR_OPTIONS = ["0 未评分", "1 ★", "2 ★★", "3 ★★★", "4 ★★★★", "5 ★★★★★"]
+STAR_OPTIONS = [
+    "0 ☆☆☆☆☆",
+    "1 ★☆☆☆☆",
+    "2 ★★☆☆☆",
+    "3 ★★★☆☆",
+    "4 ★★★★☆",
+    "5 ★★★★★",
+]
 
 RESOLUTION_PRESETS = [
     "original",
@@ -383,9 +390,10 @@ class EagleImagesToVideo:
                                               "max": 8192, "step": 2}),
                 "custom_height": ("INT",     {"default": 1080, "min": 64,
                                               "max": 8192, "step": 2}),
-                "tags":          ("STRING",  {"default": "", "multiline": False}),
+                "tags":          ("STRING",  {"default": "", "multiline": True,
+                                                "placeholder": "Eagle 标签：用逗号或换行分隔"}),
                 "annotation":    ("STRING",  {"default": "", "multiline": True}),
-                "star":          (STAR_OPTIONS, {"default": "0 未评分"}),
+                "star":          (STAR_OPTIONS, {"default": STAR_OPTIONS[0]}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -402,7 +410,7 @@ class EagleImagesToVideo:
              images=None, input_video=None, frame_skip=0, frame_limit=0,
              mask=None, audio=None, crf=20,
              custom_width=1920, custom_height=1080,
-             tags="", annotation="", star="0 未评分",
+             tags="", annotation="", star=STAR_OPTIONS[0],
              prompt=None, extra_pnginfo=None):
         _check_ffmpeg()
         star_val = _parse_star(star)
@@ -705,9 +713,10 @@ class EagleVideoConverter:
                                               "max": 8192, "step": 2}),
                 "custom_height": ("INT",     {"default": 1080, "min": 64,
                                               "max": 8192, "step": 2}),
-                "tags":          ("STRING",  {"default": "", "multiline": False}),
+                "tags":          ("STRING",  {"default": "", "multiline": True,
+                                                "placeholder": "Eagle 标签：用逗号或换行分隔"}),
                 "annotation":    ("STRING",  {"default": "", "multiline": True}),
-                "star":          (STAR_OPTIONS, {"default": "0 未评分"}),
+                "star":          (STAR_OPTIONS, {"default": STAR_OPTIONS[0]}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -723,7 +732,7 @@ class EagleVideoConverter:
                 size_mode, resolution="1080p (1920x1080)",
                 video=None, images=None, fps=24.0, frame_limit=0, speed=1.0,
                 target_fps=0, custom_width=1920, custom_height=1080,
-                tags="", annotation="", star="0 未评分",
+                tags="", annotation="", star=STAR_OPTIONS[0],
                 prompt=None, extra_pnginfo=None):
         _check_ffmpeg()
         star_val = _parse_star(star)

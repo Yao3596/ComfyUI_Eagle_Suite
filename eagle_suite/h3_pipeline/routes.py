@@ -16,7 +16,11 @@ import folder_paths
 from ..route_registry import route
 from ..logger import logger
 from ..utils import is_safe_path, strip_path
-from .review_runtime import resolve_review
+from .review_runtime import (
+    lookup_pending_review,
+    resolve_review,
+    review_decision_filename,
+)
 
 
 CHAIN_SUBDIR = "h3_eagle_chains"
@@ -120,7 +124,14 @@ async def post_review(request):
         return web.json_response({"error": f"无效 decision: {decision}"}, status=400)
 
     token = body.get("token", "")
-    review_file = run_path / f"review_decision_{token or 'default'}.json"
+    try:
+        decision_filename = review_decision_filename(token)
+    except ValueError:
+        return web.json_response({"error": "缺少有效 token"}, status=400)
+    # The request URL is authoritative. Runtime validates this run identity
+    # against the token before it wakes a waiting recursive execution.
+    body["run_name"] = run_name
+    review_file = run_path / decision_filename
     try:
         with open(review_file, "w", encoding="utf-8") as f:
             json.dump(body, f, ensure_ascii=False, indent=2)
@@ -129,6 +140,28 @@ async def post_review(request):
 
     resolved = resolve_review(token, body)
     return web.json_response({"status": "ok", "decision": decision, "resolved": resolved})
+
+
+@route("GET", "/eagle_h3_pipeline/review/pending")
+@route("GET", "/eagle_h3_chain/review/pending")
+async def get_pending_review(request):
+    """Recover one active review after the ComfyUI browser is refreshed."""
+    run_name = request.query.get("run", "").strip()
+    node_id = request.query.get("node", "").strip()
+    run_path = _safe_run_path(run_name)
+    if not run_path:
+        return web.json_response({"error": "非法 run_name"}, status=400)
+    if not node_id:
+        return web.json_response({"error": "缺少 node"}, status=400)
+
+    status, payload = lookup_pending_review(run_name, node_id)
+    if status == "not_found":
+        return web.json_response({"error": "没有匹配的待审任务"}, status=404)
+    if status == "not_ready":
+        return web.json_response({"error": "待审任务尚未发布"}, status=409)
+    if status == "ambiguous":
+        return web.json_response({"error": "同一运行和节点存在多个待审任务"}, status=409)
+    return web.json_response({"status": "ok", "review": payload})
 
 
 @route("GET", "/eagle_h3_pipeline/preview")

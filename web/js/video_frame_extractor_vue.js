@@ -19,7 +19,7 @@ const HIDDEN_WIDGETS = new Set([
 ]);
 
 const CSS = `
-.evfe-root{box-sizing:border-box;width:100%;height:100%;min-height:430px;display:flex;flex-direction:column;
+.evfe-root{box-sizing:border-box;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;
   gap:9px;padding:11px;background:var(--eagle-vue-bg,#101116);color:var(--eagle-vue-text,#e4e7ee);
   font:12px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
 .evfe-head,.evfe-row,.evfe-actions{display:flex;align-items:center;gap:8px}.evfe-head{justify-content:space-between}
@@ -38,10 +38,15 @@ const CSS = `
   border-radius:5px;background:var(--eagle-vue-surface-alt,#20232d);color:var(--eagle-vue-text,#e4e7ee);cursor:pointer}
 .evfe-btn:hover{border-color:var(--eagle-vue-primary,#2f82db)}.evfe-btn.primary{background:var(--eagle-vue-primary-deep,#294f8f);border-color:var(--eagle-vue-primary,#2f82db)}
 .evfe-btn.active{background:var(--eagle-vue-selected,#243451);border-color:var(--eagle-vue-primary,#2f82db);color:#fff}
-.evfe-player-shell{display:grid;grid-template-columns:minmax(300px,1.35fr) minmax(260px,1fr);gap:10px;min-height:226px}
-.evfe-player{position:relative;min-height:220px;display:grid;place-items:center;overflow:hidden;border:1px solid var(--eagle-vue-border,#303441);
+.evfe-workspace{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}.evfe-upper{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}
+.evfe-results{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;gap:7px}
+.evfe-player-shell{display:flex;min-width:0;min-height:180px;overflow:hidden}
+.evfe-splitter-v{flex:0 0 8px;width:8px;cursor:col-resize;touch-action:none;user-select:none;border-left:1px solid #30394b;border-right:1px solid #30394b;background:#111722}
+.evfe-splitter-h{flex:0 0 8px;height:8px;cursor:row-resize;touch-action:none;user-select:none;border-top:1px solid #30394b;border-bottom:1px solid #30394b;background:#111722}
+.evfe-splitter-v:hover,.evfe-splitter-h:hover,.evfe-splitter-v:focus-visible,.evfe-splitter-h:focus-visible{background:var(--eagle-vue-primary,#2f82db);outline:none}
+.evfe-player{position:relative;min-width:0;min-height:180px;display:grid;place-items:center;overflow:hidden;border:1px solid var(--eagle-vue-border,#303441);
   border-radius:8px;background:#07090d}.evfe-player video{width:100%;height:100%;max-height:280px;object-fit:contain;background:#050609}
-.evfe-player-empty{color:var(--eagle-vue-muted,#9299aa);text-align:center;padding:18px}.evfe-trim{display:flex;flex-direction:column;gap:8px;padding:10px;
+.evfe-player-empty{color:var(--eagle-vue-muted,#9299aa);text-align:center;padding:18px}.evfe-trim{flex:1;min-width:220px;display:flex;flex-direction:column;gap:8px;padding:10px;
   border:1px solid var(--eagle-vue-border,#303441);border-radius:8px;background:var(--eagle-vue-panel,#15171d)}
 .evfe-trim-line{display:grid;grid-template-columns:38px 1fr 72px;gap:7px;align-items:center}.evfe-trim-line input[type=range]{width:100%}
 .evfe-trim-line input[type=number]{width:72px}.evfe-time{color:#80bff1;font:11px/1.3 ui-monospace,monospace}
@@ -63,7 +68,7 @@ const CSS = `
 .evfe-tl-range{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;pointer-events:none;z-index:6}.evfe-tl-range::-webkit-slider-thumb{width:20px;height:67px;pointer-events:auto;cursor:ew-resize}.evfe-tl-range.end{z-index:7}
 .evfe-size-lock{display:flex;align-items:center;gap:6px}.evfe-lock-btn{width:34px;padding:0;font-size:16px}.evfe-lock-btn.active{color:#7dd3fc;border-color:#38bdf8;background:#17344a}
 .evfe-summary{min-height:18px;color:#8fc5f2;font:11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace}
-.evfe-grid{min-height:220px;flex:1;overflow:auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-content:start;gap:7px;
+.evfe-grid{min-height:120px;flex:1;overflow:auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));align-content:start;gap:7px;
   padding:8px;border:1px solid var(--eagle-vue-border,#303441);border-radius:8px;background:#0b0d12;scrollbar-width:thin}
 .evfe-empty{grid-column:1/-1;min-height:210px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;
   color:var(--eagle-vue-muted,#9299aa);text-align:center}
@@ -74,7 +79,7 @@ const CSS = `
   display:grid;place-items:center;border-radius:50%;background:var(--eagle-vue-primary,#2f82db);color:white;font-weight:800}
 .evfe-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--eagle-vue-muted,#9299aa)}
 .evfe-selected{color:#7cc4ff;font-weight:700}.evfe-hint{font-size:10px;text-align:right}
-@media(max-width:700px){.evfe-player-shell{grid-template-columns:1fr}.evfe-controls{grid-template-columns:1fr 1fr}.evfe-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:700px){.evfe-player-shell{flex-direction:column}.evfe-splitter-v{display:none}.evfe-player,.evfe-trim{flex:1 1 auto!important;width:auto!important}.evfe-controls{grid-template-columns:1fr 1fr}.evfe-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 `;
 
 function installStyle() {
@@ -190,6 +195,95 @@ const FrameSelector = {
     const player = ref(null);
     const currentTime = ref(0);
     const running = ref(false);
+    const playerRatio = ref(0.56);
+    const upperRatio = ref(0.58);
+    let activeSplitCleanup = null;
+
+    function restoreSplitLayout() {
+      const savedSplit = node.properties?.eagle_video_frame_split_layout || {};
+      playerRatio.value = Math.max(0.30, Math.min(0.72, finiteNumber(savedSplit.player_ratio, 0.56)));
+      upperRatio.value = Math.max(0.30, Math.min(0.76, finiteNumber(savedSplit.upper_ratio, 0.58)));
+    }
+    restoreSplitLayout();
+
+    function persistSplitLayout(commit = false) {
+      node.properties ||= {};
+      node.properties.eagle_video_frame_split_layout = {
+        version: 1,
+        player_ratio: Number(playerRatio.value.toFixed(5)),
+        upper_ratio: Number(upperRatio.value.toFixed(5)),
+      };
+      node.setDirtyCanvas?.(true, true);
+      if (commit) node.graph?.change?.();
+    }
+
+    function stopSplitDrag() {
+      activeSplitCleanup?.();
+    }
+
+    function beginSplit(event, axis, ratioRef, minRatio, maxRatio) {
+      if (event.pointerType !== "touch" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      stopSplitDrag();
+      const target = event.currentTarget;
+      const layout = target?.parentElement;
+      const rect = layout?.getBoundingClientRect?.();
+      const total = axis === "x" ? rect?.width : rect?.height;
+      if (!target || !rect || !Number.isFinite(total) || total < 1) return;
+      const pointerId = event.pointerId;
+      const start = axis === "x" ? event.clientX : event.clientY;
+      const startPixels = ratioRef.value * total;
+      const oldCursor = document.body.style.cursor;
+      const oldUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
+      document.body.style.userSelect = "none";
+      target.setPointerCapture?.(pointerId);
+
+      const move = moveEvent => {
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        const liveRect = layout.getBoundingClientRect();
+        const liveTotal = Math.max(1, axis === "x" ? liveRect.width : liveRect.height);
+        const delta = (axis === "x" ? moveEvent.clientX : moveEvent.clientY) - start;
+        ratioRef.value = Math.max(minRatio, Math.min(maxRatio, (startPixels + delta) / liveTotal));
+        persistSplitLayout(false);
+      };
+      const finish = finishEvent => {
+        if (finishEvent?.pointerId != null && finishEvent.pointerId !== pointerId) return;
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", finish);
+        target.removeEventListener("pointercancel", finish);
+        target.removeEventListener("lostpointercapture", finish);
+        if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+        document.body.style.cursor = oldCursor;
+        document.body.style.userSelect = oldUserSelect;
+        if (activeSplitCleanup === finish) activeSplitCleanup = null;
+        persistSplitLayout(true);
+      };
+      activeSplitCleanup = finish;
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", finish);
+      target.addEventListener("pointercancel", finish);
+      target.addEventListener("lostpointercapture", finish);
+    }
+
+    const beginPlayerResize = event => beginSplit(event, "x", playerRatio, 0.30, 0.72);
+    const beginWorkspaceResize = event => beginSplit(event, "y", upperRatio, 0.30, 0.76);
+    function nudgePlayerResize(event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      playerRatio.value = Math.max(0.30, Math.min(0.72, playerRatio.value + (event.key === "ArrowRight" ? 0.02 : -0.02)));
+      persistSplitLayout(true);
+    }
+    function nudgeWorkspaceResize(event) {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      upperRatio.value = Math.max(0.30, Math.min(0.76, upperRatio.value + (event.key === "ArrowDown" ? 0.02 : -0.02)));
+      persistSplitLayout(true);
+    }
+    node._evfeStopSplitDrag = stopSplitDrag;
+    node._evfeRestoreSplitLayout = restoreSplitLayout;
 
     const duration = computed(() => Math.max(0, finiteNumber(videoMeta.value.duration, 0)));
     const fps = computed(() => Math.max(0, finiteNumber(videoMeta.value.fps, 0)));
@@ -554,6 +648,9 @@ const FrameSelector = {
     node._evfeApplyExecution = applyExecution;
     node._evfeRestoreState = restoreFromWidgets;
     onBeforeUnmount(() => {
+      stopSplitDrag();
+      if (node._evfeStopSplitDrag === stopSplitDrag) node._evfeStopSplitDrag = null;
+      if (node._evfeRestoreSplitLayout === restoreSplitLayout) node._evfeRestoreSplitLayout = null;
       if (node._evfeApplyExecution === applyExecution) node._evfeApplyExecution = null;
       if (node._evfeRestoreState === restoreFromWidgets) node._evfeRestoreState = null;
     });
@@ -569,6 +666,7 @@ const FrameSelector = {
       clearSelection, clampTrim, onVideoLoaded, onVideoTime, setTrimFromCurrent,
       playSelection, addCurrentFrame, seekTimeline, changeTimelineZoom,
       syncResize, setSizeMode, toggleAspectLock, formatTimelineTime, refreshPreview,
+      playerRatio, upperRatio, beginPlayerResize, beginWorkspaceResize, nudgePlayerResize, nudgeWorkspaceResize,
     };
   },
   template: `
@@ -589,11 +687,14 @@ const FrameSelector = {
         <input ref="uploadInput" type="file" accept="video/*,.mkv,.m4v,.avi,.wmv,.gif" hidden @change="uploadVideo">
       </div>
 
+      <div class="evfe-workspace">
+      <div class="evfe-upper" :style="{flex:'0 0 '+(upperRatio*100).toFixed(3)+'%'}">
       <div class="evfe-player-shell">
-        <div class="evfe-player">
+        <div class="evfe-player" :style="{flex:'0 0 '+(playerRatio*100).toFixed(3)+'%'}">
           <video v-if="videoUrl" ref="player" :src="videoUrl" controls preload="metadata" @loadedmetadata="onVideoLoaded" @timeupdate="onVideoTime"></video>
           <div v-else class="evfe-player-empty"><b>视频播放器等待数据</b><br>连接 VIDEO 后先执行一次节点</div>
         </div>
+        <div class="evfe-splitter-v" role="separator" tabindex="0" aria-orientation="vertical" title="拖拽调整播放器与精确参数比例" @pointerdown="beginPlayerResize" @keydown="nudgePlayerResize"></div>
         <div class="evfe-trim">
           <div class="evfe-row" style="justify-content:space-between"><b>选区精确值</b><span class="evfe-time">{{ trimLabel }}</span></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
@@ -677,6 +778,10 @@ const FrameSelector = {
         <div v-if="sizeMode==='custom'" class="evfe-field"><label>宽高比例</label><div class="evfe-size-lock"><button class="evfe-btn evfe-lock-btn" :class="{active:lockAspectRatio}" @click="toggleAspectLock">{{ lockAspectRatio ? '🔒' : '🔓' }}</button><span class="evfe-time">{{ lockAspectRatio ? '锁定原视频比例' : '自由拉伸' }}</span></div></div>
         <div class="evfe-field"><label>实际输出</label><div class="evfe-time" style="padding-top:7px">{{ outputSizeLabel }}</div></div>
       </div>
+      </div>
+
+      <div class="evfe-splitter-h" role="separator" tabindex="0" aria-orientation="horizontal" title="拖拽调整编辑区与结果网格比例" @pointerdown="beginWorkspaceResize" @keydown="nudgeWorkspaceResize"></div>
+      <div class="evfe-results">
 
       <div class="evfe-summary">{{ summary || modeHint }}</div>
       <div class="evfe-grid">
@@ -693,17 +798,25 @@ const FrameSelector = {
         <div><span class="evfe-selected">已选 {{ selected.length }} 帧</span> · {{ modeHint }}</div>
         <div class="evfe-actions"><button class="evfe-btn" @click="clearSelection">清除选择</button><span class="evfe-hint">选择会保存到工作流；再次执行后输出原始帧</span></div>
       </div>
+      </div>
+      </div>
     </div>
   `,
 };
 
 function hideNativeWidgets(node) {
   let found = false;
-  for (const widget of node.widgets || []) {
+  const widgets = node.widgets || [];
+  for (let index = 0; index < widgets.length; index++) {
+    const widget = widgets[index];
     if (!HIDDEN_WIDGETS.has(widget.name)) continue;
     widget.type = "hidden";
+    widget.options ||= {};
+    Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
     widget.computeSize = () => [0, -4];
+    widget.hidden = true;
     widget.draw = () => {};
+    widgets.splice(index, 1, widget);
     found = true;
   }
   if (found) node.setDirtyCanvas?.(true, true);
@@ -715,29 +828,59 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "EagleVideoFrameExtractor") return;
 
+    const inputDefs = nodeData?.input || nodeData?.inputs;
+    for (const groupName of ["required", "optional"]) {
+      const group = inputDefs?.[groupName];
+      for (const name of HIDDEN_WIDGETS) {
+        const definition = group?.[name];
+        if (!Array.isArray(definition)) continue;
+        definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+      }
+    }
+
     const previousCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const result = previousCreated?.apply(this, arguments);
       if (this._evfeVue) return result;
       installStyle();
-      this.setSize([880, 990]);
-      setTimeout(() => {
-        if (!hideNativeWidgets(this)) setTimeout(() => hideNativeWidgets(this), 400);
-      }, 100);
+      if (!this.size || Number(this.size[0]) < 480 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
+      hideNativeWidgets(this);
+      const hideNode = this;
+      setTimeout(() => hideNativeWidgets(hideNode), 0);
+      setTimeout(() => hideNativeWidgets(hideNode), 250);
+      setTimeout(() => hideNativeWidgets(hideNode), 500);
 
       const element = document.createElement("div");
-      element.style.cssText = "box-sizing:border-box;width:860px;height:870px;overflow:hidden;border-radius:0 0 8px 8px;";
+      element.style.cssText = "box-sizing:border-box;width:940px;height:100%;overflow:hidden;border-radius:0 0 8px 8px;";
+      const FRAME_SELECTOR_MIN_VIEWPORT_HEIGHT = 320;
+      const FRAME_SELECTOR_DEFAULT_VIEWPORT_HEIGHT = 600;
+      let currentViewportHeight = FRAME_SELECTOR_DEFAULT_VIEWPORT_HEIGHT;
+      const MAX_VIEWPORT_HEIGHT = 4096;
       const widget = this.addDOMWidget("video_frame_selector", "div", element, {
         serialize: false,
-        canvasOnly: true,
+        hideInPanel: true,
         hideOnZoom: false,
+        getMinHeight: () => FRAME_SELECTOR_MIN_VIEWPORT_HEIGHT,
+        getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
+        getHeight: () => currentViewportHeight,
       });
       widget.width = undefined;
+      widget._eagleViewportHeight = FRAME_SELECTOR_DEFAULT_VIEWPORT_HEIGHT;
+      // Keep DOMWidgetImpl.computeLayoutSize inherited. An own computeSize
+      // turns this editor into a fixed 320px slot and clips its live viewport.
       const applyFrame = (size) => {
-        const width = Math.max(640, (Number(size?.[0]) || 880) - 20);
-        const height = Math.max(770, (Number(size?.[1]) || 990) - 120);
+        const width = Math.max(480, (Number(size?.[0]) || 960) - 20);
+        currentViewportHeight = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(FRAME_SELECTOR_MIN_VIEWPORT_HEIGHT, (Number(size?.[1]) || 720) - 120));
+        widget._eagleViewportHeight = currentViewportHeight;
         element.style.width = `${width}px`;
-        element.style.height = `${height}px`;
+        element.style.height = `${currentViewportHeight}px`;
+        const host = element.parentElement;
+        if (host) {
+          host.style.width = `${width}px`;
+          host.style.overflow = "hidden";
+        }
       };
       applyFrame(this.size);
       this._evfeApplyFrame = applyFrame;
@@ -757,11 +900,14 @@ app.registerExtension({
     const previousConfigured = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function () {
       const result = previousConfigured?.apply(this, arguments);
+      hideNativeWidgets(this);
+      this._evfeRestoreSplitLayout?.();
       setTimeout(() => {
         hideNativeWidgets(this);
         this._evfeApplyFrame?.(this.size);
         this._evfeRestoreState?.();
       }, 0);
+      setTimeout(() => hideNativeWidgets(this), 250);
       return result;
     };
 
@@ -773,6 +919,7 @@ app.registerExtension({
 
     const previousRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function () {
+      this._evfeStopSplitDrag?.();
       try { this._evfeVue?.unmount(); } catch (_) {}
       this._evfeVue = null;
       this._evfeRuntime = null;

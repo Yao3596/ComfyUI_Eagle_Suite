@@ -6,7 +6,7 @@ import { app } from "../../../scripts/app.js";
 
 // ── CSS ────────────────────────────────────────────────────
 var CSS = `
-.umb-root{display:flex;flex-direction:column;width:100%;min-width:0;height:100%;box-sizing:border-box;background:#121216;color:#bbb;font:13px/1.5 system-ui;overflow:hidden;border-radius:0 0 8px 8px}
+.umb-root{display:flex;flex-direction:column;width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;background:#121216;color:#bbb;font:13px/1.5 system-ui;overflow:hidden;border-radius:0 0 8px 8px}
 .umb-bar{display:flex;gap:6px;padding:6px 8px;background:#1a1a22;border-bottom:1px solid #2a2a32;align-items:center;flex-wrap:wrap}
 .umb-search{flex:1;min-width:100px;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:12px}
 .umb-search:focus{outline:none;border-color:#4a7de0}
@@ -24,15 +24,15 @@ var CSS = `
 .umb-mode-toggle span{padding:3px 10px;cursor:pointer;background:#1c1c26;color:#aaa;transition:.15s;font-size:10px}
 .umb-mode-toggle span.active{background:#4a7de0;color:#fff}
 .umb-mode-toggle span:hover:not(.active){background:#2a2a36}
-.umb-body{flex:1;display:flex;overflow:hidden}
-.umb-side{width:180px;background:#16161e;border-right:1px solid #2a2a32;overflow-y:auto;flex-shrink:0;padding:8px 0}
+.umb-body{flex:1;display:flex;min-height:0;overflow:hidden}
+.umb-side{width:180px;min-width:90px;max-width:none;background:#16161e;border-right:1px solid #2a2a32;overflow-y:auto;flex:0 0 auto;padding:8px 0;box-sizing:border-box}
 .umb-side::-webkit-scrollbar{width:4px}
 .umb-side::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
 .umb-folder-hd{padding:8px 10px;border-bottom:1px solid #2a2a32}
 .umb-folder-srch{width:100%;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:11px;box-sizing:border-box}
 .umb-folder-srch:focus{outline:none;border-color:#4a7de0}
-.umb-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:200px;background:#0f0f14}
-.umb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:120px;gap:8px;padding:10px;overflow-y:auto;flex:1;align-content:start}
+.umb-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:180px;min-height:0;background:#0f0f14}
+.umb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));grid-auto-rows:120px;gap:8px;padding:10px;overflow-y:auto;flex:1;min-height:0;align-content:start}
 .umb-grid::-webkit-scrollbar{width:8px}
 .umb-grid::-webkit-scrollbar-track{background:transparent}
 .umb-grid::-webkit-scrollbar-thumb{background:#3a3a45;border-radius:4px}
@@ -59,10 +59,12 @@ var CSS = `
 .umb-type-badge{position:absolute;top:4px;left:4px;z-index:4;padding:2px 5px;border-radius:4px;background:rgba(200,80,200,0.85);color:#fff;font-size:11px}
 .umb-check{position:absolute;inset:0;background:rgba(74,125,224,0.25);display:flex;align-items:center;justify-content:center;z-index:6;pointer-events:none}
 .umb-check::after{content:'✔';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}
-.umb-selected{width:200px;border-left:1px solid #2a2a32;background:#16161e;overflow:hidden;display:flex;flex-direction:column;flex-shrink:0}
+.umb-selected{width:200px;min-width:120px;max-width:none;border-left:1px solid #2a2a32;background:#16161e;overflow:hidden;display:flex;flex-direction:column;flex:0 0 auto;min-height:0;box-sizing:border-box}
+.umb-splitter{width:7px;flex:0 0 7px;align-self:stretch;z-index:30;cursor:col-resize;background:transparent;touch-action:none;user-select:none;outline:none}
+.umb-splitter:hover,.umb-splitter:focus-visible{background:rgba(74,125,224,.42)}
 .umb-sel-hd{padding:8px 10px;font-weight:600;border-bottom:1px solid #2a2a32;background:#1a1a22;color:#ddd}
 .umb-sel-empty{padding:20px 10px;color:#666;text-align:center;font-size:11px}
-.umb-sel-list{flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+.umb-sel-list{flex:1;min-height:0;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
 .umb-sel-item{display:flex;align-items:center;gap:8px;padding:6px;background:#1a1a24;border-radius:6px;border:1px solid #2a2a32}
 .umb-sel-thumb{width:40px;height:40px;border-radius:4px;object-fit:cover;background:#000;flex-shrink:0}
 .umb-sel-info{flex:1;min-width:0}
@@ -89,10 +91,12 @@ function formatSize(bytes) {
 
 function debounce(fn, delay) {
   let timer = null;
-  return function(...args) {
+  const debounced = function(...args) {
     clearTimeout(timer);
     timer = setTimeout(() => fn.apply(this, args), delay);
   };
+  debounced.cancel = () => { clearTimeout(timer); timer = null; };
+  return debounced;
 }
 
 function escapeHtml(value) {
@@ -109,6 +113,16 @@ class UnifiedMediaBrowser {
   constructor(container, node) {
     this.container = container;
     this.node = node;
+    this._disposed = false;
+    this._timers = new Set();
+    this._restoreRetries = 0;
+    this._eventController = null;
+    this._debouncedHandlers = new Set();
+    this._fetchController = new AbortController();
+    this._splitDragCleanup = null;
+    this._layoutResizeObserver = null;
+    this._sideRatio = 0.19;
+    this._selectedRatio = 0.22;
 
     // 状态
     this.state = {
@@ -137,10 +151,165 @@ class UnifiedMediaBrowser {
     };
 
     // ✅ 延迟恢复状态，确保 widgets 已完全初始化
-    setTimeout(() => {
+    this.schedule(() => {
       this.restoreStateFromNode();
       this.init();
     }, 0);
+  }
+
+  schedule(callback, delay = 0) {
+    if (this._disposed) return null;
+    const timer = setTimeout(() => {
+      this._timers.delete(timer);
+      if (!this._disposed) callback();
+    }, delay);
+    this._timers.add(timer);
+    return timer;
+  }
+
+  destroy() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this._eventController?.abort();
+    this._eventController = null;
+    for (const handler of this._debouncedHandlers) handler.cancel?.();
+    this._debouncedHandlers.clear();
+    this._fetchController?.abort();
+    for (const timer of this._timers) clearTimeout(timer);
+    this._timers.clear();
+    this._stateReloadTimer = null;
+    this._splitDragCleanup?.();
+    this._splitDragCleanup = null;
+    this._layoutResizeObserver?.disconnect();
+    this._layoutResizeObserver = null;
+  }
+
+  clampLayoutValue(value, min, max) {
+    return Math.max(min, Math.min(max, Number(value) || min));
+  }
+
+  availableLayoutWidth() {
+    const bodyWidth = Number(this.container.querySelector?.(".umb-body")?.clientWidth);
+    const mountedWidth = bodyWidth || Number(this.container.clientWidth);
+    return Math.max(380, (mountedWidth || (Number(this.node.size?.[0]) || 960) - 20) - 14);
+  }
+
+  currentPaneWidth(kind) {
+    const selector = kind === "side" ? ".umb-side" : ".umb-selected";
+    const width = Number(this.container.querySelector?.(selector)?.getBoundingClientRect?.().width);
+    const total = this.availableLayoutWidth();
+    return width || total * (kind === "side" ? this._sideRatio : this._selectedRatio);
+  }
+
+  applySplitLayout() {
+    const total = this.availableLayoutWidth();
+    const mainMin = 180;
+    let sideWidth = this.clampLayoutValue(total * this._sideRatio, 90, Math.max(90, total - 120 - mainMin));
+    let selectedWidth = this.clampLayoutValue(total * this._selectedRatio, 120, Math.max(120, total - sideWidth - mainMin));
+    sideWidth = this.clampLayoutValue(sideWidth, 90, Math.max(90, total - selectedWidth - mainMin));
+    const side = this.container.querySelector?.(".umb-side");
+    const selected = this.container.querySelector?.(".umb-selected");
+    if (side) side.style.width = `${sideWidth}px`;
+    if (selected) selected.style.width = `${selectedWidth}px`;
+  }
+
+  persistSplitLayout(notifyGraph) {
+    const total = this.availableLayoutWidth();
+    this._sideRatio = this.clampLayoutValue(this.currentPaneWidth("side") / total, 0.10, 0.46);
+    this._selectedRatio = this.clampLayoutValue(this.currentPaneWidth("selected") / total, 0.13, 0.50);
+    this.node.properties ||= {};
+    this.node.properties.eagle_unified_media_split_layout = {
+      version: 1,
+      side_ratio: Number(this._sideRatio.toFixed(5)),
+      selected_ratio: Number(this._selectedRatio.toFixed(5)),
+    };
+    this.node.setDirtyCanvas?.(true, true);
+    if (notifyGraph) this.node.graph?.change?.();
+  }
+
+  restoreSplitLayout() {
+    const saved = this.node.properties?.eagle_unified_media_split_layout;
+    if (saved && Number(saved.version) >= 1) {
+      if (Number.isFinite(Number(saved.side_ratio))) {
+        this._sideRatio = this.clampLayoutValue(saved.side_ratio, 0.10, 0.46);
+      }
+      if (Number.isFinite(Number(saved.selected_ratio))) {
+        this._selectedRatio = this.clampLayoutValue(saved.selected_ratio, 0.13, 0.50);
+      }
+    }
+    this.applySplitLayout();
+  }
+
+  resizePane(kind, requestedWidth, notifyGraph) {
+    const total = this.availableLayoutWidth();
+    const mainMin = 180;
+    const otherWidth = this.currentPaneWidth(kind === "side" ? "selected" : "side");
+    const min = kind === "side" ? 90 : 120;
+    const width = this.clampLayoutValue(requestedWidth, min, Math.max(min, total - otherWidth - mainMin));
+    if (kind === "side") this._sideRatio = width / total;
+    else this._selectedRatio = width / total;
+    this.applySplitLayout();
+    this.persistSplitLayout(notifyGraph);
+  }
+
+  beginSplitDrag(event, kind) {
+    if (event.pointerType !== "touch" && event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this._splitDragCleanup?.();
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = this.currentPaneWidth(kind);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    target.setPointerCapture?.(pointerId);
+
+    const onMove = moveEvent => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      moveEvent.stopPropagation();
+      const physicalDelta = moveEvent.clientX - startX;
+      this.resizePane(kind, startWidth + (kind === "side" ? physicalDelta : -physicalDelta), false);
+    };
+    const finish = finishEvent => {
+      if (finishEvent && finishEvent.pointerId !== pointerId) return;
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", finish);
+      target.removeEventListener("pointercancel", finish);
+      target.removeEventListener("lostpointercapture", finish);
+      if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      if (this._splitDragCleanup === finish) this._splitDragCleanup = null;
+      this.persistSplitLayout(true);
+    };
+    this._splitDragCleanup = finish;
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", finish);
+    target.addEventListener("pointercancel", finish);
+    target.addEventListener("lostpointercapture", finish);
+  }
+
+  nudgeSplitter(event, kind) {
+    let physicalDelta = 0;
+    if (event.key === "ArrowLeft") physicalDelta = -16;
+    else if (event.key === "ArrowRight") physicalDelta = 16;
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+    const widthDelta = kind === "side" ? physicalDelta : -physicalDelta;
+    this.resizePane(kind, this.currentPaneWidth(kind) + widthDelta, true);
+  }
+
+  observeLayout() {
+    if (this._layoutResizeObserver || typeof ResizeObserver !== "function") return;
+    this._layoutResizeObserver = new ResizeObserver(() => {
+      if (!this._splitDragCleanup) this.applySplitLayout();
+    });
+    this._layoutResizeObserver.observe(this.container);
   }
 
   getWidget(name) {
@@ -148,12 +317,19 @@ class UnifiedMediaBrowser {
   }
 
   restoreStateFromNode() {
-    // ✅ 如果 widgets 还没初始化，延迟重试
+    if (this._disposed) return false;
+    // 如果 widgets 还没初始化，有界重试。节点被删除后不得每 50ms
+    // 无限创建新定时器。
     if (!this.node.widgets || this.node.widgets.length === 0) {
-      console.warn("[UnifiedMediaBrowser] widgets 未就绪，延迟恢复");
-      setTimeout(() => this.restoreStateFromNode(), 50);
-      return;
+      if (this._restoreRetries >= 20) {
+        console.warn("[UnifiedMediaBrowser] widgets 未就绪，停止恢复重试");
+        return false;
+      }
+      this._restoreRetries += 1;
+      this.schedule(() => this.restoreStateFromNode(), 50);
+      return false;
     }
+    this._restoreRetries = 0;
 
     const directory = String(this.getWidget("directory")?.value || "").trim();
     const activeDirectory = String(this.getWidget("active_directory")?.value || "").trim();
@@ -194,6 +370,7 @@ class UnifiedMediaBrowser {
       directory: this.state.directory,
       selectedCount: this.state.selectedItems.size
     });
+    return true;
   }
 
   syncBrowserSettings() {
@@ -220,8 +397,12 @@ class UnifiedMediaBrowser {
   }
 
   reloadStateFromNode() {
-    clearTimeout(this._stateReloadTimer);
-    this._stateReloadTimer = setTimeout(() => {
+    if (this._stateReloadTimer != null) {
+      clearTimeout(this._stateReloadTimer);
+      this._timers.delete(this._stateReloadTimer);
+    }
+    this._stateReloadTimer = this.schedule(() => {
+      this._stateReloadTimer = null;
       this.restoreStateFromNode();
       this.render();
       this.renderSelected();
@@ -232,11 +413,13 @@ class UnifiedMediaBrowser {
 
   init() {
     this.render();
+    this.restoreSplitLayout();
+    this.observeLayout();
     this.renderSelected();
     this.updateCounts();
     
     // ✅ 增加延迟时间，确保 DOM 和事件都准备好
-    setTimeout(() => {
+    this.schedule(() => {
       this.attachEvents();
       // ✅ 如果工作流中有保存的目录，自动加载
       if (this.state.directory) {
@@ -247,6 +430,7 @@ class UnifiedMediaBrowser {
   }
 
   render() {
+    this._splitDragCleanup?.();
     this.container.innerHTML = `
       <div class="umb-root">
         <div class="umb-bar">
@@ -295,11 +479,13 @@ class UnifiedMediaBrowser {
               </div>
             </div>
           </div>
+          <div class="umb-splitter" data-splitter="side" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整目录栏宽度"></div>
           <div class="umb-main">
             <div class="umb-grid" data-container="grid">
               <div class="umb-empty">请先选择目录</div>
             </div>
           </div>
+          <div class="umb-splitter" data-splitter="selected" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整已选栏宽度"></div>
           <div class="umb-selected">
             <div class="umb-sel-hd">已选 <span data-display="selected-count">0</span></div>
             <div class="umb-sel-list" data-container="selected"></div>
@@ -307,15 +493,33 @@ class UnifiedMediaBrowser {
         </div>
       </div>
     `;
+    this.applySplitLayout();
   }
 
 
   attachEvents() {
+    if (this._disposed) return;
     const root = this.container.querySelector(".umb-root");
     if (!root) {
       console.error("[UnifiedMediaBrowser] 根元素未找到，延迟重试");
-      setTimeout(() => this.attachEvents(), 100);
+      this.schedule(() => this.attachEvents(), 100);
       return;
+    }
+
+    // init() 和 onConfigure() 可能在恢复阶段先后触发。每次重绑前先取消
+    // 上一组静态控件监听，避免一次点击执行两次。
+    this._eventController?.abort();
+    for (const handler of this._debouncedHandlers) handler.cancel?.();
+    this._debouncedHandlers.clear();
+    this._eventController = new AbortController();
+    const listen = (target, type, handler) => {
+      if (typeof handler?.cancel === "function") this._debouncedHandlers.add(handler);
+      target?.addEventListener(type, handler, { signal: this._eventController.signal });
+    };
+    for (const splitter of root.querySelectorAll("[data-splitter]")) {
+      const kind = splitter.dataset.splitter;
+      listen(splitter, "pointerdown", event => this.beginSplitDrag(event, kind));
+      listen(splitter, "keydown", event => this.nudgeSplitter(event, kind));
     }
 
     // 目录使用持久化路径框；浏览器不能可靠返回本机绝对路径，因此回车/按钮加载最稳定。
@@ -331,15 +535,15 @@ class UnifiedMediaBrowser {
       this.syncBrowserSettings();
       this.authorizeAndLoadDirectory();
     };
-    root.querySelector('[data-action="load-dir"]')?.addEventListener("click", applyDirectory);
-    directoryInput?.addEventListener("keydown", event => {
+    listen(root.querySelector('[data-action="load-dir"]'), "click", applyDirectory);
+    listen(directoryInput, "keydown", event => {
       if (event.key === "Enter") applyDirectory();
     });
 
     // 是否递归扫描当前目录。关闭后只列出当前层文件，可显著降低大目录扫描量。
     const recursiveBtn = root.querySelector('[data-action="recursive"]');
     if (recursiveBtn) {
-      recursiveBtn.addEventListener("click", () => {
+      listen(recursiveBtn, "click", () => {
         this.state.recursive = !this.state.recursive;
         recursiveBtn.classList.toggle("active", this.state.recursive);
         recursiveBtn.textContent = this.state.recursive ? "✅ 递归子文件夹" : "⬜ 递归子文件夹";
@@ -353,7 +557,7 @@ class UnifiedMediaBrowser {
     // 列表模式完全不创建缩略图 <img>，用于大目录低资源浏览。
     const viewModeBtn = root.querySelector('[data-action="view-mode"]');
     if (viewModeBtn) {
-      viewModeBtn.addEventListener("click", () => {
+      listen(viewModeBtn, "click", () => {
         this.state.viewMode = this.state.viewMode === "grid" ? "list" : "grid";
         viewModeBtn.textContent = this.state.viewMode === "grid" ? "📋 列表（省资源）" : "🖼️ 缩略图";
         this.syncBrowserSettings();
@@ -363,7 +567,7 @@ class UnifiedMediaBrowser {
 
     // 模式切换
     root.querySelectorAll('[data-mode]').forEach(btn => {
-      btn.addEventListener("click", (e) => {
+      listen(btn, "click", (e) => {
         root.querySelectorAll('[data-mode]').forEach(b => b.classList.remove("active"));
         e.target.classList.add("active");
         this.state.mediaType = e.target.dataset.mode;
@@ -377,7 +581,7 @@ class UnifiedMediaBrowser {
     // 搜索
     const searchInput = root.querySelector('[data-input="search"]');
     if (searchInput) {
-      searchInput.addEventListener("input", debounce((e) => {
+      listen(searchInput, "input", debounce((e) => {
         this.state.keyword = e.target.value.trim();
         this.state.offset = 0;
         this.state.items = [];
@@ -388,7 +592,7 @@ class UnifiedMediaBrowser {
 
     const folderSearch = root.querySelector('[data-input="folder-search"]');
     if (folderSearch) {
-      folderSearch.addEventListener("input", debounce((event) => {
+      listen(folderSearch, "input", debounce((event) => {
         const keyword = event.target.value.trim().toLowerCase();
         root.querySelectorAll('.ft-r:not([data-action="show-all-files"])').forEach(row => {
           row.style.display = !keyword || row.textContent.toLowerCase().includes(keyword) ? "flex" : "none";
@@ -399,7 +603,7 @@ class UnifiedMediaBrowser {
     // 排序
     const sortSelect = root.querySelector('[data-input="sort"]');
     if (sortSelect) {
-      sortSelect.addEventListener("change", (e) => {
+      listen(sortSelect, "change", (e) => {
         const [sortBy, sortDir] = e.target.value.split(":");
         this.state.sortBy = sortBy;
         this.state.sortDir = sortDir;
@@ -413,7 +617,7 @@ class UnifiedMediaBrowser {
     // 滚动加载更多
     const grid = root.querySelector('[data-container="grid"]');
     if (grid) {
-      grid.addEventListener("scroll", debounce(() => {
+      listen(grid, "scroll", debounce(() => {
         if (this.state.loading || !this.state.hasMore) return;
         if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 200) {
           this.loadItems(true);
@@ -421,21 +625,21 @@ class UnifiedMediaBrowser {
       }, 200));
     }
 
-    root.querySelector('[data-input="fallback"]')?.addEventListener("change", event => {
+    listen(root.querySelector('[data-input="fallback"]'), "change", event => {
       this.state.fallbackMode = event.target.value === "random" ? "random" : "sequential";
       this.syncBrowserSettings();
     });
-    root.querySelector('[data-input="batch-count"]')?.addEventListener("change", event => {
+    listen(root.querySelector('[data-input="batch-count"]'), "change", event => {
       this.state.batchCount = Math.max(0, Math.min(64, Number(event.target.value ?? 1)));
       event.target.value = this.state.batchCount;
       this.syncBrowserSettings();
     });
-    root.querySelector('[data-input="start-index"]')?.addEventListener("change", event => {
+    listen(root.querySelector('[data-input="start-index"]'), "change", event => {
       this.state.startIndex = Math.max(0, Number(event.target.value || 0));
       event.target.value = this.state.startIndex;
       this.syncBrowserSettings();
     });
-    root.querySelector('[data-input="aspect"]')?.addEventListener("change", event => {
+    listen(root.querySelector('[data-input="aspect"]'), "change", event => {
       this.state.aspectRatio = event.target.value || "all";
       this.state.offset = 0;
       this.state.items = [];
@@ -445,7 +649,7 @@ class UnifiedMediaBrowser {
   }
 
   async authorizeAndLoadDirectory() {
-    if (!this.state.directory) return false;
+    if (this._disposed || !this.state.directory) return false;
     const grid = this.container.querySelector('[data-container="grid"]');
     if (grid) grid.innerHTML = '<div class="umb-loading">正在验证媒体目录...</div>';
     try {
@@ -453,6 +657,7 @@ class UnifiedMediaBrowser {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ directory: this.state.directory }),
+        signal: this._fetchController.signal,
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
@@ -462,6 +667,7 @@ class UnifiedMediaBrowser {
       await Promise.all([this.loadFolders(), this.loadItems()]);
       return true;
     } catch (err) {
+      if (this._disposed || err?.name === "AbortError") return false;
       console.error("[UnifiedMediaBrowser] 目录授权失败:", err);
       if (grid) grid.innerHTML = '<div class="umb-empty">目录授权失败</div>';
       return false;
@@ -469,10 +675,12 @@ class UnifiedMediaBrowser {
   }
 
   async loadFolders() {
-    if (!this.state.directory) return;
+    if (this._disposed || !this.state.directory) return;
 
     try {
-      const res = await fetch(`/unified_media_browser/folders?directory=${encodeURIComponent(this.state.directory)}`);
+      const res = await fetch(`/unified_media_browser/folders?directory=${encodeURIComponent(this.state.directory)}`, {
+        signal: this._fetchController.signal,
+      });
       const data = await res.json();
 
       if (data.success) {
@@ -480,6 +688,7 @@ class UnifiedMediaBrowser {
         this.renderFolders();
       }
     } catch (err) {
+      if (this._disposed || err?.name === "AbortError") return;
       console.error("[UnifiedMediaBrowser] 加载文件夹失败:", err);
     }
   }
@@ -567,7 +776,7 @@ class UnifiedMediaBrowser {
 
   async loadItems(append = false) {
     const scanDirectory = this.state.currentDirectory || this.state.directory;
-    if (!scanDirectory || this.state.loading) return;
+    if (this._disposed || !scanDirectory || this.state.loading) return;
 
     this.state.loading = true;
     const grid = this.container.querySelector('[data-container="grid"]');
@@ -600,6 +809,7 @@ class UnifiedMediaBrowser {
           offset: this.state.offset,
           limit: this.state.limit,
         }),
+        signal: this._fetchController.signal,
       });
 
       const data = await res.json();
@@ -621,6 +831,7 @@ class UnifiedMediaBrowser {
         grid.innerHTML = `<div class="umb-empty">错误: ${escapeHtml(data.error || "未知")}</div>`;
       }
     } catch (err) {
+      if (this._disposed || err?.name === "AbortError") return;
       console.error("[UnifiedMediaBrowser] 加载失败:", err);
       grid.innerHTML = `<div class="umb-empty">加载失败</div>`;
     } finally {
@@ -782,18 +993,37 @@ app.registerExtension({
       "keyword", "sort_by", "sort_dir"
     ];
 
+    // Nodes 2.0 snapshots widget display options while the node constructor is
+    // running.  Hiding only the instance afterwards leaves an empty Vue row (or
+    // briefly exposes the transport value).  Mark every browser-owned setting
+    // on the V1 definition before ComfyUI creates/registers the widgets.
+    const inputDefs = nodeData?.input || nodeData?.inputs;
+    for (const groupName of ["required", "optional"]) {
+      const group = inputDefs?.[groupName];
+      for (const name of HIDDEN_WIDGETS) {
+        const definition = group?.[name];
+        if (!Array.isArray(definition)) continue;
+        definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+      }
+    }
+
     const hideWidgets = (node) => {
       if (!node.widgets) return false;
       let found = false;
-        for (const w of node.widgets) {
-          if (HIDDEN_WIDGETS.includes(w.name)) {
-            w.type = "hidden";
-            w.computeSize = () => [0, -4];
-            // 不设置 w.hidden，确保 ComfyUI 序列化 prompt 时仍把值传给后端
-            w.draw = () => {};
-            found = true;
-          }
+      for (let index = 0; index < node.widgets.length; index++) {
+        const w = node.widgets[index];
+        if (HIDDEN_WIDGETS.includes(w.name)) {
+          w.type = "hidden";
+          w.hidden = true;
+          w.options ||= {};
+          Object.assign(w.options, { hidden: true, vueNode: "never", hideInPanel: true });
+          w.computeSize = () => [0, -4];
+          // hidden 只控制 Vue/画布显示；保留 widget.value 供工作流和 prompt 序列化。
+          w.draw = () => {};
+          node.widgets.splice(index, 1, w);
+          found = true;
         }
+      }
       if (found) node.setDirtyCanvas(true, true);
       return found;
     };
@@ -815,12 +1045,14 @@ app.registerExtension({
       this._umbInit = true;
       normalizeOutputSlots(this);
 
-      this.setSize([960, 640]);
-      setTimeout(() => {
-        if (!hideWidgets(this)) {
-          setTimeout(() => hideWidgets(this), 500);
-        }
-      }, 300);
+      if (!this.size || Number(this.size[0]) < 480 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
+      hideWidgets(this);
+      // 不依赖首个找到的控件：有些 Vue 节点的参数在创建钩子后分批加入。
+      setTimeout(() => hideWidgets(this), 0);
+      setTimeout(() => hideWidgets(this), 250);
+      setTimeout(() => hideWidgets(this), 500);
 
       if (!document.getElementById("umb-style")) {
         const style = document.createElement("style");
@@ -832,27 +1064,50 @@ app.registerExtension({
       const el = document.createElement("div");
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
 
-      const widget = this.addDOMWidget("unified_media_browser", "div", el, { serialize: false, canvasOnly: true });
+      // DOMWidgetImpl.computeLayoutSize 会读取这些有界像素约束，并把主界面
+      // 作为可增长区域分配剩余高度；不要再覆盖 computeSize，否则新旧画布
+      // 都可能把它锁在最小高度并裁掉下半部分。
+      const INITIAL_VIEWPORT_HEIGHT = 580;
+      const MIN_VIEWPORT_HEIGHT = 300;
+      let currentViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+      const MAX_VIEWPORT_HEIGHT = 4096;
+      const widget = this.addDOMWidget("unified_media_browser", "div", el, {
+        serialize: false,
+        hideInPanel: true,
+        getMinHeight: () => MIN_VIEWPORT_HEIGHT,
+        getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
+        getHeight: () => currentViewportHeight,
+      });
       widget.width = undefined;
+      widget._eagleViewportHeight = INITIAL_VIEWPORT_HEIGHT;
 
       const nodeRef = this;
       const applyFrame = (size) => {
         const nodeWidth = Number(size?.[0]) || 960;
-        const nodeHeight = Number(size?.[1]) || 640;
+        const nodeHeight = Number(size?.[1]) || 720;
         const w = Math.max(320, nodeWidth - 20);
-        const h = Math.max(300, nodeHeight - 140);
+        // 六个输出槽需要更大的顶部余量，否则 DOM 测量会反过来撑高节点。
+        const h = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, nodeHeight - 140));
+        currentViewportHeight = h;
+        widget._eagleViewportHeight = h;
         el.style.width = w + "px";
         el.style.height = h + "px";
+        const host = el.parentElement;
+        if (host) {
+          host.style.width = w + "px";
+          host.style.maxWidth = "none";
+          host.style.overflow = "hidden";
+        }
+        nodeRef._umbApp?.applySplitLayout();
         return [w, h];
       };
-      // 保留 ComfyUI 自带的 DOM widget 测量。不能从 node.size 反推 computeSize，
-      // 否则全图重新布局时节点标题/插槽高度会被反复累加。
       this._umbApplyFrame = applyFrame;
       applyFrame(this.size);
 
       try {
         this._umbApp = new UnifiedMediaBrowser(el, this);
         this._eagleRestoreUiState = () => this._umbApp?.reloadStateFromNode();
+        this._eagleRestoreSplitLayout = () => this._umbApp?.restoreSplitLayout();
       } catch (e) {
         console.error("[UnifiedMediaBrowser] 初始化失败:", e);
         el.replaceChildren();
@@ -878,21 +1133,27 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function() {
       const result = onConfigure?.apply(this, arguments);
       normalizeOutputSlots(this);
+      hideWidgets(this);
       const nodeRef = this;
       setTimeout(() => {
+        hideWidgets(nodeRef);
         nodeRef._umbApplyFrame?.(nodeRef.size);
+        nodeRef._eagleRestoreSplitLayout?.();
         nodeRef._eagleRestoreUiState?.();
       }, 0);
+      setTimeout(() => hideWidgets(nodeRef), 250);
       return result;
     };
 
     const onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function() {
       if (this._umbApp) {
+        this._umbApp.destroy();
         this._umbApp = null;
       }
       this._umbApplyFrame = null;
       this._eagleRestoreUiState = null;
+      this._eagleRestoreSplitLayout = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

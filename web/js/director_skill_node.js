@@ -1,6 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
-import { createApp, h, ref, reactive, computed, onMounted, watch } from "../lib/vue.esm-browser.js";
+import { createApp, h, ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 
 console.log("[Eagle Suite] director_skill_node.js module loaded", new Date().toISOString());
@@ -11,66 +11,233 @@ console.log("[Eagle Suite] director_skill_node.js module loaded", new Date().toI
 // 选中/编辑的技能内容实时写入 director_skill 输出端口，供 H3 导演台等连线使用。
 // ──────────────────────────────────────────────────────────────
 
-function renderMarkdown(text) {
-  if (!text) return "";
-  function escapeHtml(value) {
-    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  }
-  function inline(value) {
-    return escapeHtml(value)
-      .replace(/`([^`]+)`/g, "<code class='pp-md-icode'>$1</code>")
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "<a href='$2' target='_blank' rel='noopener'>$1</a>");
+// The skill document is user-controlled and is inserted through Vue's
+// `innerHTML`.  Keep this renderer dependency-free for ComfyUI 1.x/2.x, but
+// always escape source text before adding the small, explicit GFM subset.
+function escapeMarkdownHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function safeMarkdownHref(value) {
+  var href = String(value || "").trim();
+  if (!/^(?:https?:|mailto:|#|\/(?!\/)|\.\.?\/)/i.test(href)) return "";
+  return escapeMarkdownHtml(href);
+}
+
+function renderMarkdownInline(value) {
+  var tokens = [];
+  function token(html) {
+    var index = tokens.push(html) - 1;
+    return "\u0000DS" + index + "\u0000";
   }
 
-  var lines = String(text).replace(/\r/g, "").split("\n");
+  var html = escapeMarkdownHtml(value);
+  // Protect code spans and links before applying emphasis. The source and URL
+  // have already been escaped/validated, so the restored tokens remain safe.
+  html = html.replace(/`([^`\n]+)`/g, function (_, code) {
+    return token('<code class="pp-md-icode">' + code + "</code>");
+  });
+  html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g, function (_, label, href) {
+    var safeHref = safeMarkdownHref(href.replace(/&amp;/g, "&"));
+    if (!safeHref) return label;
+    return token('<a href="' + safeHref + '" target="_blank" rel="noopener noreferrer">' + label + "</a>");
+  });
+  html = html
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+  return html.replace(/\u0000DS(\d+)\u0000/g, function (_, index) {
+    return tokens[Number(index)] || "";
+  });
+}
+
+function splitMarkdownTableRow(line) {
+  var value = String(line || "").trim().replace(/^\|/, "").replace(/\|$/, "");
+  var cells = [];
+  var current = "";
+  var escaped = false;
+  var inCode = false;
+  for (var i = 0; i < value.length; i += 1) {
+    var character = value.charAt(i);
+    if (escaped) {
+      current += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "`") {
+      inCode = !inCode;
+      current += character;
+    } else if (character === "|" && !inCode) {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  if (escaped) current += "\\";
+  cells.push(current.trim());
+  return cells;
+}
+
+function markdownTableAlignments(line) {
+  var cells = splitMarkdownTableRow(line);
+  if (!cells.length || !cells.every(function (cell) { return /^:?-{3,}:?$/.test(cell); })) return null;
+  return cells.map(function (cell) {
+    return cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : "left";
+  });
+}
+
+function renderMarkdown(text) {
+  if (!text) return "";
+
+  var lines = String(text).replace(/\r\n?/g, "\n").split("\n");
   var output = [];
   var paragraph = [];
-  var list = [];
   var listType = "";
-  var code = [];
   var inCode = false;
+  var codeFence = "";
+  var codeLanguage = "";
+  var codeLines = [];
+
   function flushParagraph() {
-    if (paragraph.length) output.push("<p>" + paragraph.map(inline).join("<br>") + "</p>");
+    if (!paragraph.length) return;
+    output.push('<p class="pp-md-p">' + paragraph.map(renderMarkdownInline).join("<br>") + "</p>");
     paragraph = [];
   }
-  function flushList() {
-    if (list.length) output.push("<" + listType + ">" + list.map(function (item) { return "<li>" + inline(item) + "</li>"; }).join("") + "</" + listType + ">");
-    list = []; listType = "";
+
+  function closeList() {
+    if (!listType) return;
+    output.push("</" + listType + ">");
+    listType = "";
   }
-  lines.forEach(function (line) {
-    if (/^```/.test(line.trim())) {
-      flushParagraph(); flushList();
-      if (inCode) { output.push('<pre class="pp-md-code"><code>' + escapeHtml(code.join("\n")) + "</code></pre>"); code = []; }
-      inCode = !inCode;
-      return;
+
+  function openList(type) {
+    if (listType === type) return;
+    closeList();
+    listType = type;
+    output.push("<" + type + ">");
+  }
+
+  for (var i = 0; i < lines.length; i += 1) {
+    var line = lines[i];
+
+    if (inCode) {
+      var closingFence = line.match(/^\s*(`{3,}|~{3,})\s*$/);
+      if (closingFence && closingFence[1].charAt(0) === codeFence.charAt(0) && closingFence[1].length >= codeFence.length) {
+        output.push('<pre class="pp-md-code"><code' + (codeLanguage ? ' data-language="' + escapeMarkdownHtml(codeLanguage) + '"' : "") + ">" + escapeMarkdownHtml(codeLines.join("\n")) + "</code></pre>");
+        inCode = false;
+        codeFence = "";
+        codeLanguage = "";
+        codeLines = [];
+      } else {
+        codeLines.push(line);
+      }
+      continue;
     }
-    if (inCode) { code.push(line); return; }
-    if (!line.trim()) { flushParagraph(); flushList(); return; }
-    var heading = line.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
-      flushParagraph(); flushList();
-      var level = Math.min(5, heading[1].length + 1);
-      output.push("<h" + level + " class='pp-md-h'>" + inline(heading[2]) + "</h" + level + ">");
-      return;
-    }
-    var quote = line.match(/^>\s?(.*)$/);
-    if (quote) { flushParagraph(); flushList(); output.push("<blockquote class='pp-md-quote'>" + inline(quote[1]) + "</blockquote>"); return; }
-    var unordered = line.match(/^[-*+]\s+(.+)$/);
-    var ordered = line.match(/^\d+[.)]\s+(.+)$/);
-    if (unordered || ordered) {
+
+    var fence = line.match(/^\s*(`{3,}|~{3,})\s*([^\s`]*)?.*$/);
+    if (fence) {
       flushParagraph();
-      var nextType = ordered ? "ol" : "ul";
-      if (listType && listType !== nextType) flushList();
-      listType = nextType; list.push((ordered || unordered)[1]); return;
+      closeList();
+      inCode = true;
+      codeFence = fence[1];
+      codeLanguage = fence[2] || "";
+      continue;
     }
-    if (/^([-*_])\1\1+\s*$/.test(line.trim())) { flushParagraph(); flushList(); output.push("<hr>"); return; }
-    flushList();
+
+    var alignments = i + 1 < lines.length ? markdownTableAlignments(lines[i + 1]) : null;
+    if (alignments && line.indexOf("|") >= 0) {
+      flushParagraph();
+      closeList();
+      var headers = splitMarkdownTableRow(line);
+      // A separator row defines the GFM column count. Pad/truncate all rows so
+      // malformed content cannot break the table layout.
+      output.push('<div class="pp-md-table-wrap"><table class="pp-md-table"><thead><tr>' + alignments.map(function (alignment, column) {
+        return '<th class="pp-md-align-' + alignment + '">' + renderMarkdownInline(headers[column] || "") + "</th>";
+      }).join("") + "</tr></thead><tbody>");
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].indexOf("|") >= 0) {
+        var cells = splitMarkdownTableRow(lines[i]);
+        output.push("<tr>" + alignments.map(function (alignment, column) {
+          return '<td class="pp-md-align-' + alignment + '">' + renderMarkdownInline(cells[column] || "") + "</td>";
+        }).join("") + "</tr>");
+        i += 1;
+      }
+      output.push("</tbody></table></div>");
+      i -= 1;
+      continue;
+    }
+
+    var heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      flushParagraph();
+      closeList();
+      var level = heading[1].length;
+      output.push('<h' + level + ' class="pp-md-h">' + renderMarkdownInline(heading[2]) + "</h" + level + ">");
+      continue;
+    }
+
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      flushParagraph();
+      closeList();
+      output.push("<hr>");
+      continue;
+    }
+
+    if (/^\s{0,3}>/.test(line)) {
+      flushParagraph();
+      closeList();
+      var quoteLines = [];
+      while (i < lines.length) {
+        var quote = lines[i].match(/^\s{0,3}>\s?(.*)$/);
+        if (!quote) break;
+        quoteLines.push(quote[1]);
+        i += 1;
+      }
+      output.push('<blockquote class="pp-md-quote">' + quoteLines.map(renderMarkdownInline).join("<br>") + "</blockquote>");
+      i -= 1;
+      continue;
+    }
+
+    var unordered = line.match(/^\s*[-+*]\s+(?:\[([ xX])\]\s+)?(.*)$/);
+    if (unordered) {
+      flushParagraph();
+      openList("ul");
+      var checkbox = unordered[1] == null ? "" : '<input class="pp-md-task" type="checkbox" disabled' + (/x/i.test(unordered[1]) ? " checked" : "") + "> ";
+      output.push("<li>" + checkbox + renderMarkdownInline(unordered[2]) + "</li>");
+      continue;
+    }
+
+    var ordered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ordered) {
+      flushParagraph();
+      openList("ol");
+      output.push("<li>" + renderMarkdownInline(ordered[1]) + "</li>");
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      closeList();
+      continue;
+    }
+
+    closeList();
     paragraph.push(line.trim());
-  });
-  if (inCode && code.length) output.push('<pre class="pp-md-code"><code>' + escapeHtml(code.join("\n")) + "</code></pre>");
-  flushParagraph(); flushList();
+  }
+
+  if (inCode) {
+    output.push('<pre class="pp-md-code"><code>' + escapeMarkdownHtml(codeLines.join("\n")) + "</code></pre>");
+  }
+  flushParagraph();
+  closeList();
   return output.join("");
 }
 
@@ -106,11 +273,20 @@ function loadStyles() {
     .eagle-director-skill-root .ppui-btn.primary { background:var(--ppui-primary); border-color:var(--ppui-primary); color:#fff; }
     .eagle-director-skill-root .ppui-btn.primary:hover { filter:brightness(1.12); }
     .eagle-director-skill-root .ppui-btn-sm { padding:3px 8px; }
-    .eagle-director-skill-root .pp-director-layout { display:flex; min-height:0; flex:1 1 auto; }
+    .eagle-director-skill-root .pp-director-layout { display:flex; min-width:0; min-height:0; flex:1 1 auto; overflow:hidden; }
     .eagle-director-skill-root .pp-director-sidebar {
-      width:230px; flex-shrink:0; border-right:1px solid var(--ppui-border); overflow-y:auto;
+      min-width:150px; flex-shrink:0; overflow-y:auto;
       background:var(--ppui-panel); padding:8px;
     }
+    .eagle-director-skill-root .pp-director-splitter {
+      flex:0 0 8px; width:8px; position:relative; cursor:col-resize; touch-action:none; user-select:none;
+      background:var(--ppui-bg); border-left:1px solid var(--ppui-border); border-right:1px solid var(--ppui-border);
+    }
+    .eagle-director-skill-root .pp-director-splitter::after {
+      content:""; position:absolute; inset:0 2px; background:transparent; transition:background .12s ease;
+    }
+    .eagle-director-skill-root .pp-director-splitter:hover::after,
+    .eagle-director-skill-root .pp-director-splitter:focus-visible::after { background:var(--ppui-primary); outline:none; }
     .eagle-director-skill-root .pp-sidebar-head {
       display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;
     }
@@ -139,8 +315,14 @@ function loadStyles() {
     .eagle-director-skill-root .pp-skill-delete:focus-visible {
       background:#b84a55; color:#fff; outline:none;
     }
-    .eagle-director-skill-root .pp-director-main { flex:1 1 auto; min-width:0; overflow-y:auto; padding:12px; }
-    .eagle-director-skill-root .pp-director-section { margin-bottom:14px; }
+    .eagle-director-skill-root .pp-director-main {
+      flex:1 1 auto; min-width:0; min-height:0; overflow-y:auto; padding:12px;
+      display:flex; flex-direction:column;
+    }
+    .eagle-director-skill-root .pp-director-section { margin-bottom:14px; flex:0 0 auto; }
+    .eagle-director-skill-root .pp-director-preview-section {
+      flex:1 1 180px; min-height:180px; margin-bottom:0; display:flex; flex-direction:column;
+    }
     .eagle-director-skill-root .pp-director-section > label { display:block; margin-bottom:6px; color:var(--ppui-muted); font-size:12px; }
     .eagle-director-skill-root .pp-director-editor {
       width:100%; min-height:280px; resize:vertical; font-family:monospace;
@@ -164,26 +346,50 @@ function loadStyles() {
     }
     .eagle-director-skill-root .pp-preview-markdown {
       background:var(--ppui-input); border:1px solid var(--ppui-border); border-radius:6px; padding:10px;
-      min-height:54px; max-height:280px; overflow:auto; line-height:1.5; overflow-wrap:anywhere;
+      flex:1 1 auto; min-height:140px; max-height:none; overflow:auto; line-height:1.5; overflow-wrap:anywhere;
     }
     .eagle-director-skill-root .pp-preview-markdown p { margin:0 0 8px; }
     .eagle-director-skill-root .pp-preview-markdown p:last-child { margin-bottom:0; }
     .eagle-director-skill-root .pp-preview-markdown ul,
     .eagle-director-skill-root .pp-preview-markdown ol { margin:5px 0 9px; padding-left:22px; }
     .eagle-director-skill-root .pp-preview-markdown li { margin:2px 0; }
+    .eagle-director-skill-root .pp-preview-markdown h1,
     .eagle-director-skill-root .pp-preview-markdown h2,
     .eagle-director-skill-root .pp-preview-markdown h3,
     .eagle-director-skill-root .pp-preview-markdown h4,
-    .eagle-director-skill-root .pp-preview-markdown h5 { color:#fff; margin:10px 0 5px; line-height:1.25; }
+    .eagle-director-skill-root .pp-preview-markdown h5,
+    .eagle-director-skill-root .pp-preview-markdown h6 { color:var(--ppui-text); margin:10px 0 5px; line-height:1.25; }
+    .eagle-director-skill-root .pp-preview-markdown h1:first-child,
     .eagle-director-skill-root .pp-preview-markdown h2:first-child,
     .eagle-director-skill-root .pp-preview-markdown h3:first-child,
-    .eagle-director-skill-root .pp-preview-markdown h4:first-child { margin-top:0; }
+    .eagle-director-skill-root .pp-preview-markdown h4:first-child,
+    .eagle-director-skill-root .pp-preview-markdown h5:first-child,
+    .eagle-director-skill-root .pp-preview-markdown h6:first-child { margin-top:0; }
+    .eagle-director-skill-root .pp-preview-markdown h1 { font-size:1.52em; }
+    .eagle-director-skill-root .pp-preview-markdown h2 { font-size:1.34em; }
+    .eagle-director-skill-root .pp-preview-markdown h3 { font-size:1.19em; }
+    .eagle-director-skill-root .pp-preview-markdown h4,
+    .eagle-director-skill-root .pp-preview-markdown h5,
+    .eagle-director-skill-root .pp-preview-markdown h6 { font-size:1.05em; }
     .eagle-director-skill-root .pp-preview-markdown pre { margin:6px 0 9px; background:#000; padding:8px; border-radius:4px; overflow:auto; white-space:pre-wrap; }
     .eagle-director-skill-root .pp-preview-markdown code { background:#000; padding:1px 4px; border-radius:3px; }
+    .eagle-director-skill-root .pp-preview-markdown pre code { padding:0; background:transparent; }
+    .eagle-director-skill-root .pp-preview-markdown a { color:#77b7ff; text-decoration:none; }
+    .eagle-director-skill-root .pp-preview-markdown a:hover { text-decoration:underline; }
+    .eagle-director-skill-root .pp-preview-markdown del { color:var(--ppui-muted); }
     .eagle-director-skill-root .pp-preview-markdown blockquote {
       border-left:3px solid #4a9eff; margin:6px 0; padding-left:8px; color:#9fb3c8;
     }
     .eagle-director-skill-root .pp-preview-markdown hr { margin:9px 0; border:0; border-top:1px solid #3a3a3a; }
+    .eagle-director-skill-root .pp-md-table-wrap { max-width:100%; margin:8px 0 10px; overflow-x:auto; }
+    .eagle-director-skill-root .pp-md-table { width:100%; border-collapse:collapse; background:var(--ppui-panel); }
+    .eagle-director-skill-root .pp-md-table th,
+    .eagle-director-skill-root .pp-md-table td { min-width:72px; padding:6px 8px; border:1px solid var(--ppui-border); vertical-align:top; }
+    .eagle-director-skill-root .pp-md-table th { background:var(--ppui-surface-alt); color:var(--ppui-text); font-weight:700; }
+    .eagle-director-skill-root .pp-md-align-left { text-align:left; }
+    .eagle-director-skill-root .pp-md-align-center { text-align:center; }
+    .eagle-director-skill-root .pp-md-align-right { text-align:right; }
+    .eagle-director-skill-root .pp-md-task { width:auto; margin:0 5px 0 0; vertical-align:-1px; pointer-events:none; }
     .eagle-director-skill-root, .eagle-director-skill-root * { box-sizing:border-box; }
     .eagle-director-skill-root .ds-modal-backdrop {
       position:absolute; inset:0; z-index:80; display:flex; align-items:center; justify-content:center;
@@ -258,6 +464,81 @@ var DirectorSkillApp = {
       local_paths: [], auto_sync: true, default_category: "自定义"
     });
     var toastTimer = 0;
+    var sidebarRatio = ref(0.28);
+    var activeSplitCleanup = null;
+
+    function restoreSplitLayout() {
+      var savedSplit = props.node.properties && props.node.properties.eagle_director_skill_split_layout;
+      var savedRatio = Number(savedSplit && savedSplit.sidebar_ratio);
+      sidebarRatio.value = Math.max(0.18, Math.min(0.58, Number.isFinite(savedRatio) ? savedRatio : 0.28));
+    }
+    restoreSplitLayout();
+
+    function persistSplitLayout(commit) {
+      props.node.properties = props.node.properties || {};
+      props.node.properties.eagle_director_skill_split_layout = {
+        version: 1,
+        sidebar_ratio: Number(sidebarRatio.value.toFixed(5))
+      };
+      props.node.setDirtyCanvas?.(true, true);
+      if (commit) props.node.graph?.change?.();
+    }
+
+    function stopSplitDrag() {
+      if (activeSplitCleanup) activeSplitCleanup();
+    }
+
+    function beginSidebarResize(event) {
+      if (event.pointerType !== "touch" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      stopSplitDrag();
+      var target = event.currentTarget;
+      var layout = target && target.parentElement;
+      var rect = layout && layout.getBoundingClientRect ? layout.getBoundingClientRect() : null;
+      if (!target || !rect || rect.width < 1) return;
+      var pointerId = event.pointerId;
+      var startX = event.clientX;
+      var startPixels = sidebarRatio.value * rect.width;
+      var oldCursor = document.body.style.cursor;
+      var oldUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      target.setPointerCapture?.(pointerId);
+
+      function move(moveEvent) {
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        var width = Math.max(1, layout.getBoundingClientRect().width);
+        var minPixels = Math.min(180, width * 0.42);
+        var maxPixels = Math.max(minPixels, width - Math.min(320, width * 0.52));
+        var pixels = Math.max(minPixels, Math.min(maxPixels, startPixels + moveEvent.clientX - startX));
+        sidebarRatio.value = Math.max(0.18, Math.min(0.58, pixels / width));
+        persistSplitLayout(false);
+      }
+
+      function finish(finishEvent) {
+        if (finishEvent && finishEvent.pointerId != null && finishEvent.pointerId !== pointerId) return;
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", finish);
+        target.removeEventListener("pointercancel", finish);
+        target.removeEventListener("lostpointercapture", finish);
+        if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+        document.body.style.cursor = oldCursor;
+        document.body.style.userSelect = oldUserSelect;
+        if (activeSplitCleanup === finish) activeSplitCleanup = null;
+        persistSplitLayout(true);
+      }
+
+      activeSplitCleanup = finish;
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", finish);
+      target.addEventListener("pointercancel", finish);
+      target.addEventListener("lostpointercapture", finish);
+    }
+
+    props.node._dsStopSplitDrag = stopSplitDrag;
+    props.node._dsRestoreSplitLayout = restoreSplitLayout;
 
     function showToast(text, error) {
       toast.text = String(text || "");
@@ -672,6 +953,14 @@ var DirectorSkillApp = {
       loadSettings();
     });
 
+    onBeforeUnmount(function () {
+      stopSplitDrag();
+      clearTimeout(toastTimer);
+      toastTimer = 0;
+      if (props.node._dsStopSplitDrag === stopSplitDrag) delete props.node._dsStopSplitDrag;
+      if (props.node._dsRestoreSplitLayout === restoreSplitLayout) delete props.node._dsRestoreSplitLayout;
+    });
+
     return function () {
       return h("div", {
         class: "ppui-root eagle-director-skill-root",
@@ -706,7 +995,10 @@ var DirectorSkillApp = {
                 ? h("div", { style: { padding: "10px", color: "#61afef", background: "#1e2a3a", borderBottom: "1px solid #2f455a" } }, infoMsg.value)
                 : null,
               h("div", { class: "pp-director-layout" }, [
-                h("aside", { class: "pp-director-sidebar" }, [
+                h("aside", {
+                  class: "pp-director-sidebar",
+                  style: { flex: "0 0 " + (sidebarRatio.value * 100).toFixed(3) + "%", width: "auto" }
+                }, [
                   h("div", { class: "pp-skills-list" },
                   skills.value.map(function (skill) {
                     var enabled = enabledSkillIds.value.indexOf(skill.id) >= 0;
@@ -748,6 +1040,20 @@ var DirectorSkillApp = {
                   })
                 )
               ]),
+              h("div", {
+                class: "pp-director-splitter",
+                role: "separator",
+                tabindex: "0",
+                "aria-orientation": "vertical",
+                title: "拖拽调整技能列表与编辑区比例",
+                onPointerdown: beginSidebarResize,
+                onKeydown: function(event) {
+                  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                  event.preventDefault();
+                  sidebarRatio.value = Math.max(0.18, Math.min(0.58, sidebarRatio.value + (event.key === "ArrowLeft" ? -0.02 : 0.02)));
+                  persistSplitLayout(true);
+                }
+              }),
               h("div", { class: "pp-director-main" }, [
                 h("div", { class: "pp-director-section" }, [
                   h("label", {}, "📄 技能文档（Markdown）"),
@@ -788,7 +1094,7 @@ var DirectorSkillApp = {
                     ])
                   ])
                 ]),
-                h("div", { class: "pp-director-section" }, [
+                h("div", { class: "pp-director-section pp-director-preview-section" }, [
                   h("label", {}, "👁️ Markdown 预览"),
                   h("div", {
                     class: "pp-preview-markdown",
@@ -911,34 +1217,65 @@ var DirectorSkillApp = {
   }
 };
 
+function scheduleDirectorSkillTimer(node, callback, delay) {
+  var timer = setTimeout(function () {
+    node._dsLifecycleTimers = (node._dsLifecycleTimers || []).filter(function (item) { return item !== timer; });
+    if (!node._dsDisposed) callback();
+  }, delay);
+  (node._dsLifecycleTimers || (node._dsLifecycleTimers = [])).push(timer);
+  return timer;
+}
+
+function clearDirectorSkillTimers(node) {
+  (node._dsLifecycleTimers || []).forEach(function (timer) { clearTimeout(timer); });
+  node._dsLifecycleTimers = [];
+}
+
 function mountDirectorSkillNode(node) {
   if (!node || node._dsInit || node._dsMounting) return;
+  node._dsDisposed = false;
   node._dsMounting = true;
   var hiddenNames = ["director_skill", "ui_state"];
   var hide = function () {
-    (node.widgets || []).forEach(function (widget) {
+    (node.widgets || []).forEach(function (widget, index) {
       if (hiddenNames.indexOf(widget.name) < 0) return;
       widget.type = "hidden";
       widget.hidden = true;
+      widget.options = widget.options || {};
+      Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
       widget.computeSize = function () { return [0, -4]; };
       widget.draw = function () {};
+      node.widgets.splice(index, 1, widget);
     });
   };
   try {
     loadStyles();
     node.serialize_widgets = true;
-    node.setSize([840, 640]);
+    // loadedGraphNode runs after configure() on several ComfyUI builds.  Never
+    // replace a persisted user size here; the new-node hook owns the 960x720
+    // default and the DOM viewport can still render a malformed legacy node.
     hide();
 
     var container = document.createElement("div");
     container.className = "eagle-director-skill-host";
-    container.style.cssText = "width:820px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;position:relative;";
+    container.style.cssText = "width:940px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;position:relative;";
+    var DIRECTOR_SKILL_MIN_VIEWPORT_HEIGHT = 280;
+    var DIRECTOR_SKILL_DEFAULT_VIEWPORT_HEIGHT = 620;
+    var currentViewportHeight = DIRECTOR_SKILL_DEFAULT_VIEWPORT_HEIGHT;
+    var MAX_VIEWPORT_HEIGHT = 4096;
     node._dsWidget = node.addDOMWidget("director_skill_ui", "div", container, {
       serialize: false,
       hideOnZoom: false,
-      canvasOnly: true
+      hideInPanel: true,
+      getMinHeight: function () { return DIRECTOR_SKILL_MIN_VIEWPORT_HEIGHT; },
+      getMaxHeight: function () { return MAX_VIEWPORT_HEIGHT; },
+      getHeight: function () { return currentViewportHeight; },
     });
     node._dsWidget.width = undefined;
+    node._dsWidget._eagleViewportHeight = DIRECTOR_SKILL_DEFAULT_VIEWPORT_HEIGHT;
+    // Do not add an instance computeSize: current LiteGraph treats such DOM
+    // widgets as fixed-height and clips the Vue surface to the minimum. The
+    // inherited computeLayoutSize uses the bounded growable options above.
     node._dsVueApp = createApp({
       render: function () { return h(DirectorSkillApp, { node: node }); }
     });
@@ -946,12 +1283,13 @@ function mountDirectorSkillNode(node) {
     node._dsContainer = container;
 
     node._dsSyncLayout = function (size) {
-      var current = size || node.size || [840, 640];
-      var width = Math.max(420, (Number(current[0]) || 840) - 20);
-      var height = Math.max(360, (Number(current[1]) || 640) - 96);
+      var current = size || node.size || [960, 720];
+      var width = Math.max(420, (Number(current[0]) || 960) - 20);
+      currentViewportHeight = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(DIRECTOR_SKILL_MIN_VIEWPORT_HEIGHT, (Number(current[1]) || 720) - 100));
+      node._dsWidget._eagleViewportHeight = currentViewportHeight;
       container.style.width = width + "px";
       container.style.maxWidth = "none";
-      container.style.height = height + "px";
+      container.style.height = currentViewportHeight + "px";
       var host = container.parentElement;
       if (host) {
         host.style.width = width + "px";
@@ -968,11 +1306,12 @@ function mountDirectorSkillNode(node) {
       this._dsSyncLayout?.(size);
     };
     node.onResize(node.size);
-    setTimeout(function () { node._dsSyncLayout?.(node.size); }, 250);
+    scheduleDirectorSkillTimer(node, function () { node._dsSyncLayout?.(node.size); }, 250);
     var previousConfigure = node.onConfigure;
     node.onConfigure = function () {
       if (previousConfigure) previousConfigure.apply(this, arguments);
       hide();
+      this._dsRestoreSplitLayout?.();
       requestAnimationFrame(function () {
         node._dsSyncLayout?.(node.size);
         node._dsReloadSkills?.();
@@ -980,6 +1319,9 @@ function mountDirectorSkillNode(node) {
     };
     var previousRemoved = node.onRemoved;
     node.onRemoved = function () {
+      node._dsDisposed = true;
+      clearDirectorSkillTimers(node);
+      this._dsStopSplitDrag?.();
       if (this._dsVueApp) this._dsVueApp.unmount();
       this._dsVueApp = null;
       this._dsContainer = null;
@@ -993,7 +1335,7 @@ function mountDirectorSkillNode(node) {
     node._dsMounting = false;
     node._dsSyncLayout(node.size);
     requestAnimationFrame(function () { node._dsSyncLayout?.(node.size); });
-    setTimeout(hide, 250);
+    scheduleDirectorSkillTimer(node, hide, 250);
   } catch (error) {
     node._dsInit = false;
     node._dsMounting = false;
@@ -1010,6 +1352,18 @@ app.registerExtension({
 
     var HIDDEN_WIDGETS = ["director_skill", "ui_state"];
 
+    var inputDefs = nodeData && (nodeData.input || nodeData.inputs);
+    ["required", "optional"].forEach(function (groupName) {
+      var group = inputDefs && inputDefs[groupName];
+      HIDDEN_WIDGETS.forEach(function (name) {
+        var definition = group && group[name];
+        if (!Array.isArray(definition)) return;
+        definition[1] = Object.assign({}, definition[1] || {}, {
+          hidden: true, vueNode: "never", hideInPanel: true
+        });
+      });
+    });
+
     var hideWidgets = function (node) {
       if (!node.widgets || !node.widgets.length) return false;
       var found = false;
@@ -1017,9 +1371,12 @@ app.registerExtension({
         var widget = node.widgets[i];
         if (HIDDEN_WIDGETS.indexOf(widget.name) < 0) continue;
         widget.type = "hidden";
+        widget.options = widget.options || {};
+        Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
         widget.computeSize = function () { return [0, -4]; };
         widget.hidden = true;
         widget.draw = function () {};
+        node.widgets.splice(i, 1, widget);
         found = true;
       }
       if (found) node.setDirtyCanvas(true, true);
@@ -1031,14 +1388,17 @@ app.registerExtension({
       console.log("[Eagle Suite] DirectorSkill onNodeCreated", this.id, this.type);
       if (originalOnNodeCreated) originalOnNodeCreated.apply(this, arguments);
       if (this._dsInit || this._dsMounting) return;
+      this._dsDisposed = false;
       this._dsMounting = true;
 
       var node = this;
-      this.setSize([840, 640]);
+      if (!this.size || Number(this.size[0]) < 420 || Number(this.size[1]) < 300) {
+        this.setSize([960, 720]);
+      }
       hideWidgets(this);
 
-      setTimeout(function () {
-        if (!hideWidgets(node)) setTimeout(function () { hideWidgets(node); }, 500);
+      scheduleDirectorSkillTimer(node, function () {
+        if (!hideWidgets(node)) scheduleDirectorSkillTimer(node, function () { hideWidgets(node); }, 500);
       }, 300);
 
       try {
@@ -1047,14 +1407,24 @@ app.registerExtension({
 
         var container = document.createElement("div");
         container.className = "eagle-director-skill-root";
-        container.style.cssText = "width:820px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
+        container.style.cssText = "width:940px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
 
+        var DIRECTOR_SKILL_MIN_VIEWPORT_HEIGHT = 280;
+        var DIRECTOR_SKILL_DEFAULT_VIEWPORT_HEIGHT = 620;
+        var currentViewportHeight = DIRECTOR_SKILL_DEFAULT_VIEWPORT_HEIGHT;
+        var MAX_VIEWPORT_HEIGHT = 4096;
         var domWidget = this.addDOMWidget("preview", "div", container, {
           serialize: false,
           hideOnZoom: false,
-          canvasOnly: true
+          hideInPanel: true,
+          getMinHeight: function () { return DIRECTOR_SKILL_MIN_VIEWPORT_HEIGHT; },
+          getMaxHeight: function () { return MAX_VIEWPORT_HEIGHT; },
+          getHeight: function () { return currentViewportHeight; },
         });
         domWidget.width = undefined;
+        domWidget._eagleViewportHeight = DIRECTOR_SKILL_DEFAULT_VIEWPORT_HEIGHT;
+        // Leave computeSize inherited so both classic and Nodes 2.0 allocate
+        // the remaining body height through DOMWidgetImpl.computeLayoutSize.
         this._dsWidget = domWidget;
 
         var vueApp = createApp({
@@ -1071,17 +1441,17 @@ app.registerExtension({
 
         var syncLayout = function (target, size) {
           if (!target || !target._dsContainer) return;
-          var currentSize = size || target.size || [840, 640];
-          var nodeWidth = Math.max(440, Number(currentSize[0]) || 840);
-          var nodeHeight = Math.max(440, Number(currentSize[1]) || 640);
+          var currentSize = size || target.size || [960, 720];
+          var nodeWidth = Math.max(440, Number(currentSize[0]) || 960);
           var width = Math.max(420, nodeWidth - 20);
-          var height = Math.max(360, nodeHeight - 96);
+          currentViewportHeight = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(DIRECTOR_SKILL_MIN_VIEWPORT_HEIGHT, (Number(currentSize[1]) || 720) - 100));
+          target._dsWidget._eagleViewportHeight = currentViewportHeight;
           var root = target._dsContainer;
           root.style.width = width + "px";
           root.style.maxWidth = "none";
           root.style.minWidth = "0";
           root.style.boxSizing = "border-box";
-          root.style.height = height + "px";
+          root.style.height = currentViewportHeight + "px";
           root.style.overflow = "hidden";
           var host = root.parentElement;
           if (host) {
@@ -1103,12 +1473,13 @@ app.registerExtension({
         };
         this.onResize(this.size);
         requestAnimationFrame(function () { this._dsSyncLayout?.(this.size); }.bind(this));
-        setTimeout(function () { this._dsSyncLayout?.(this.size); }.bind(this), 250);
+        scheduleDirectorSkillTimer(this, function () { this._dsSyncLayout?.(this.size); }.bind(this), 250);
 
         var previousOnConfigure = this.onConfigure;
         this.onConfigure = function () {
           if (previousOnConfigure) previousOnConfigure.apply(this, arguments);
           hideWidgets(this);
+          this._dsRestoreSplitLayout?.();
           requestAnimationFrame(function () {
             hideWidgets(this);
             this._dsSyncLayout?.(this.size);
@@ -1118,6 +1489,9 @@ app.registerExtension({
 
         var previousOnRemoved = this.onRemoved;
         this.onRemoved = function () {
+          this._dsDisposed = true;
+          clearDirectorSkillTimers(this);
+          this._dsStopSplitDrag?.();
           if (this._dsVueApp) this._dsVueApp.unmount();
           this._dsVueApp = null;
           this._dsContainer = null;
@@ -1148,13 +1522,13 @@ app.registerExtension({
   // _dsInit/_dsMounting guards make this idempotent on current frontends.
   nodeCreated(node) {
     if (!node || (node.comfyClass !== "EagleDirectorSkillNode" && node.type !== "EagleDirectorSkillNode")) return;
-    setTimeout(function () { mountDirectorSkillNode(node); }, 0);
+    scheduleDirectorSkillTimer(node, function () { mountDirectorSkillNode(node); }, 0);
   },
 
   loadedGraphNode(node) {
     if (!node || (node.comfyClass !== "EagleDirectorSkillNode" && node.type !== "EagleDirectorSkillNode")) return;
     mountDirectorSkillNode(node);
-    setTimeout(function () {
+    scheduleDirectorSkillTimer(node, function () {
       node._dsSyncLayout?.(node.size);
       node._dsReloadSkills?.();
     }, 0);

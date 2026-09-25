@@ -73,11 +73,19 @@ function loadStyles() {
     .eagle-prompt-presets-root .ppui-main {
       flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column;
     }
+    .eagle-prompt-presets-root .pp-split-layout { display:flex; width:100%; height:100%; min-width:0; min-height:0; overflow:hidden; }
     .eagle-prompt-presets-root .ppui-sidebar.pp-master {
       min-width: 0 !important; min-height: 0 !important; overflow: auto !important; padding: 10px !important;
       display: block !important; grid-template-columns: none !important;
-      background: var(--ppui-panel) !important; border-right: 1px solid var(--ppui-border) !important;
+      background: var(--ppui-panel) !important; border-right: 0 !important;
     }
+    .eagle-prompt-presets-root .pp-splitter {
+      flex:0 0 8px; width:8px; position:relative; cursor:col-resize; touch-action:none; user-select:none;
+      background:var(--ppui-bg); border-left:1px solid var(--ppui-border); border-right:1px solid var(--ppui-border);
+    }
+    .eagle-prompt-presets-root .pp-splitter::after { content:""; position:absolute; inset:0 2px; background:transparent; transition:background .12s ease; }
+    .eagle-prompt-presets-root .pp-splitter:hover::after,
+    .eagle-prompt-presets-root .pp-splitter:focus-visible::after { background:var(--ppui-primary); outline:none; }
     .eagle-prompt-presets-root .pp-master-item {
       width: 100% !important; min-width: 0; min-height: 66px; margin: 0 0 8px; padding: 8px;
       display: grid !important; grid-template-columns: 46px minmax(0, 1fr) auto !important; gap: 9px; align-items: center;
@@ -110,6 +118,8 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-detail-subtitle { margin-top: 3px; color: var(--ppui-muted); }
     .eagle-prompt-presets-root .pp-detail-tools { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; flex-shrink: 0; }
     .eagle-prompt-presets-root .pp-detail-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 15px; flex-shrink: 0; }
+    .eagle-prompt-presets-root .pp-detail-preview-strip { display:flex; gap:8px; flex:0 0 auto; overflow-x:auto; overflow-y:hidden; margin:0 0 10px; padding:8px; border:1px solid var(--ppui-border); border-radius:8px; background:var(--ppui-panel); }
+    .eagle-prompt-presets-root .pp-detail-preview-strip img { width:112px; height:84px; flex:0 0 112px; object-fit:contain; border:1px solid var(--ppui-border); border-radius:6px; background:#090c11; }
     .eagle-prompt-presets-root .pp-detail-scroll { min-width: 0; flex: 1; }
     .eagle-prompt-presets-root .pp-detail-section { margin: 11px 0; padding: 12px; border: 1px solid var(--ppui-border); border-radius: 9px; background: var(--ppui-surface); }
     .eagle-prompt-presets-root .pp-detail-section h4 { margin: 0 0 8px; color: #c8d2e5; }
@@ -128,7 +138,7 @@ function loadStyles() {
     .eagle-prompt-presets-root select { background: var(--ppui-input); border: 1px solid var(--ppui-border); border-radius: 6px; padding: 7px 9px; }
     .eagle-prompt-presets-root .pp-variable-row input { flex: 1; min-width: 0; }
     .eagle-prompt-presets-root .pp-var-heading,
-    .eagle-prompt-presets-root .pp-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .eagle-prompt-presets-root .pp-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap:wrap; }
     .eagle-prompt-presets-root .pp-section-hint { color: #8b94a5; font-size: 11px; }
     .eagle-prompt-presets-root .pp-external-hint { color: #75c4ff; }
     .eagle-prompt-presets-root .pp-var-switcher { display: flex; gap: 8px; margin: 10px 0; }
@@ -139,7 +149,7 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-var-tag.active { background: #2368b5; border-color: #70adf5; color: #fff; }
     .eagle-prompt-presets-root .pp-var-tag.external { border-color: #5d8e86; color: #a7e8d8; }
     .eagle-prompt-presets-root .pp-var-source { margin-left: 4px; font-size: 10px; }
-    .eagle-prompt-presets-root .pp-preview-mode { display: flex; gap: 5px; }
+    .eagle-prompt-presets-root .pp-preview-mode { display: flex; flex-wrap:wrap; justify-content:flex-end; gap: 5px; }
     .eagle-prompt-presets-root .pp-preview-markdown,
     .eagle-prompt-presets-root .pp-preview-textarea { width: 100%; min-height: 100px; margin-top: 9px; padding: 10px; border: 1px solid var(--ppui-border); border-radius: 7px; background: var(--ppui-input); color: var(--ppui-text); overflow: auto; white-space: pre-wrap; }
     .eagle-prompt-presets-root .pp-preview-markdown { white-space: normal; overflow-wrap: anywhere; }
@@ -231,9 +241,19 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-test-result { padding: 8px 12px; border-radius: 6px; font-size: 12px; }
     .eagle-prompt-presets-root .pp-test-result.ok { background: rgba(76,175,80,.12); border: 1px solid #4caf50; color: #81c784; }
     .eagle-prompt-presets-root .pp-test-result.fail { background: rgba(244,67,54,.12); border: 1px solid #f44336; color: #e57373; }
-    .eagle-prompt-presets-root .pp-cover-editor { display:flex; align-items:center; gap:8px; min-height:0; padding:7px; border:1px dashed var(--ppui-border); border-radius:8px; background:var(--ppui-panel); }
+    .eagle-prompt-presets-root .pp-cover-editor { display:flex; flex-direction:column; align-items:stretch; gap:9px; min-height:0; padding:9px; border:1px dashed var(--ppui-border); border-radius:8px; background:var(--ppui-panel); }
     .eagle-prompt-presets-root .pp-cover-fallback { width:44px; height:44px; flex:0 0 44px; display:grid; place-items:center; border-radius:6px; background:var(--ppui-surface-alt); color:var(--ppui-text); font-size:18px; font-weight:700; }
     .eagle-prompt-presets-root .pp-cover-editor .ppui-search { flex:0 0 auto; width:100%; height:32px; min-height:32px; }
+    .eagle-prompt-presets-root .pp-cover-primary-row { display:flex; align-items:center; gap:8px; min-width:0; }
+    .eagle-prompt-presets-root .pp-template-preview-grid { display:flex; flex-wrap:wrap; gap:8px; min-height:76px; }
+    .eagle-prompt-presets-root .pp-template-preview-card { position:relative; width:96px; height:76px; flex:0 0 96px; border:1px solid var(--ppui-border); border-radius:7px; overflow:hidden; background:#0c0f15; }
+    .eagle-prompt-presets-root .pp-template-preview-card.primary { border-color:var(--ppui-primary); box-shadow:inset 0 0 0 1px var(--ppui-primary); }
+    .eagle-prompt-presets-root .pp-template-preview-image { width:100%; height:100%; padding:0; border:0; background:transparent; cursor:pointer; }
+    .eagle-prompt-presets-root .pp-template-preview-image img { display:block; width:100%; height:100%; object-fit:contain; }
+    .eagle-prompt-presets-root .pp-template-preview-badge { position:absolute; left:4px; bottom:4px; padding:2px 5px; border-radius:4px; background:rgba(20,87,181,.9); color:#fff; font-size:10px; pointer-events:none; }
+    .eagle-prompt-presets-root .pp-template-preview-remove { position:absolute; top:3px; right:3px; width:20px; height:20px; padding:0; border:0; border-radius:50%; background:rgba(166,48,58,.92); color:#fff; line-height:20px; cursor:pointer; }
+    .eagle-prompt-presets-root .pp-template-preview-add { width:96px; height:76px; flex:0 0 96px; display:grid; place-items:center; border:1px dashed var(--ppui-border); border-radius:7px; color:var(--ppui-muted); cursor:pointer; text-align:center; }
+    .eagle-prompt-presets-root .pp-template-preview-add:hover { border-color:var(--ppui-primary); color:var(--ppui-text); }
     .eagle-prompt-presets-root .pp-category-row {
       display:grid; grid-template-columns:minmax(0, 1fr); gap:8px; align-items:center;
     }
@@ -340,6 +360,143 @@ function extractVariables(text) {
   return [...new Set(matches.map(m => m.replace(/\{\{|\}\}/g, '').trim()))];
 }
 
+function coverValueFromResponse(data) {
+  return String((data && (data.cover || data.path || data.url)) || "").trim();
+}
+
+function isPersistentCoverReference(value) {
+  var cover = String(value || "").trim().replace(/\\/g, "/");
+  if (!cover) return true;
+  if (/^eagle-user:\/\/prompt-presets\/covers\/cover_[0-9a-f]{32}\.(?:png|jpe?g|webp|gif)$/i.test(cover)) return true;
+  if (/^covers\/[A-Za-z0-9._/-]+$/i.test(cover)) return true;
+  return /^\/eaglePromptPresets\/cover(?:\?|$)/.test(cover);
+}
+
+function resolveTemplateCoverSource(cover, templateFilePath) {
+  var value = String(cover || "").trim();
+  if (!value || isPersistentCoverReference(value)) return value;
+  if (/^(?:https?:|data:|blob:)/i.test(value)) return value;
+  if (/^(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|\/)/.test(value)) return value;
+
+  var templatePath = String(templateFilePath || "").trim();
+  if (!templatePath) return value;
+  if (/^file:\/\//i.test(templatePath)) {
+    try {
+      return new URL(value.replace(/\\/g, "/"), templatePath).href;
+    } catch (error) {
+      return value;
+    }
+  }
+  if (!/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(templatePath)) return value;
+  var slashIndex = Math.max(templatePath.lastIndexOf("/"), templatePath.lastIndexOf("\\"));
+  if (slashIndex < 0) return value;
+  var separator = templatePath.lastIndexOf("\\") > templatePath.lastIndexOf("/") ? "\\" : "/";
+  return templatePath.slice(0, slashIndex + 1) + value.replace(/^[.\\/]+/, "").replace(/[\\/]/g, separator);
+}
+
+async function readCoverResponse(response, fallbackMessage) {
+  var data = null;
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = {};
+  }
+  if (!response.ok || !data.success) {
+    var requestError = new Error(data.error || fallbackMessage);
+    requestError.status = response.status;
+    throw requestError;
+  }
+  var cover = coverValueFromResponse(data);
+  if (!cover) throw new Error("封面接口没有返回可保存的引用");
+  return cover;
+}
+
+async function importCoverRequest(body, headers) {
+  var response = await fetch("/eaglePromptPresets/import_cover", {
+    method: "POST",
+    headers: headers || undefined,
+    body: body
+  });
+  return readCoverResponse(response, "封面导入失败");
+}
+
+async function uploadPersistentCover(file, templateId) {
+  var body = new FormData();
+  body.append("file", file, file.name || "cover.png");
+  if (templateId) body.append("template_id", String(templateId));
+  var response = await fetch("/eaglePromptPresets/upload_cover", {
+    method: "POST",
+    body: body
+  });
+  return readCoverResponse(response, "封面上传失败");
+}
+
+async function persistCoverSource(source, templateId) {
+  var value = String(source || "").trim();
+  if (!value || isPersistentCoverReference(value)) return value;
+
+  // Remote covers intentionally remain external. The server-side importer
+  // refuses http(s) to avoid turning ComfyUI into an SSRF/download proxy.
+  if (/^https?:\/\//i.test(value)) return value;
+
+  if (/^blob:/i.test(value)) {
+    var localResponse = await fetch(value);
+    if (!localResponse.ok) throw new Error("无法读取浏览器中的封面数据");
+    var blob = await localResponse.blob();
+    var extension = String(blob.type || "image/png").split("/")[1] || "png";
+    return uploadPersistentCover(new File([blob], "cover." + extension, { type: blob.type || "image/png" }), templateId);
+  }
+
+  try {
+    return await importCoverRequest(JSON.stringify({
+      source: value
+    }), { "Content-Type": "application/json" });
+  } catch (error) {
+    // A stale Python backend must not make existing URL/path based presets
+    // unsaveable. Once import_cover is present, invalid sources return 400.
+    if (error.status === 404 || error.status === 405) return value;
+    throw error;
+  }
+}
+
+var TEMPLATE_PREVIEW_IMAGE_LIMIT = 12;
+
+function templatePreviewImages(template) {
+  var source = template && Object.prototype.hasOwnProperty.call(template, "preview_images")
+    ? template.preview_images
+    : [template && template.cover];
+  if (typeof source === "string") {
+    var trimmed = source.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      try {
+        var parsed = JSON.parse(trimmed);
+        source = Array.isArray(parsed) ? parsed : [trimmed];
+      } catch (error) {
+        source = trimmed ? [trimmed] : [];
+      }
+    } else {
+      source = trimmed ? [trimmed] : [];
+    }
+  }
+  if (!Array.isArray(source)) source = [];
+  var seen = new Set();
+  var result = [];
+  source.forEach(function(value) {
+    var reference = String(value || "").trim();
+    if (!reference || seen.has(reference) || result.length >= TEMPLATE_PREVIEW_IMAGE_LIMIT) return;
+    seen.add(reference);
+    result.push(reference);
+  });
+  return result;
+}
+
+function assignTemplatePreviewImages(template, images) {
+  var normalized = templatePreviewImages({ preview_images: Array.isArray(images) ? images : [] });
+  template.preview_images = normalized;
+  template.cover = normalized[0] || "";
+  return normalized;
+}
+
 // ... 其他工具函数保持不变 ...
 
 // ============ 子组件：模板编辑器（使用统一样式）============
@@ -367,7 +524,8 @@ var TemplateEditor = {
       example: '',
       category: '图片编辑 (kontext)',
       tags: [],
-      cover: ''
+      cover: '',
+      preview_images: []
     });
 
     var categoryOptions = computed(function() {
@@ -404,14 +562,18 @@ var TemplateEditor = {
       if (newVal) {
         Object.assign(form, {
           id: '', Label: '', Instruction: '', example: '',
-          category: '图片编辑 (kontext)', tags: [], cover: '', source: 'user'
+          category: '图片编辑 (kontext)', tags: [], cover: '', preview_images: [], file_path: '', source: 'user'
         }, newVal);
       } else {
         Object.assign(form, {
           id: '', Label: '', Instruction: '', example: '',
-          category: '图片编辑 (kontext)', tags: [], cover: ''
+          category: '图片编辑 (kontext)', tags: [], cover: '', preview_images: [], file_path: '', source: 'user'
         });
       }
+      if (!newVal || !Object.prototype.hasOwnProperty.call(newVal, "preview_images")) {
+        delete form.preview_images;
+      }
+      assignTemplatePreviewImages(form, templatePreviewImages(form));
       syncCategoryEditor(form.category);
     }, { immediate: true });
 
@@ -419,7 +581,7 @@ var TemplateEditor = {
       if (visible) syncCategoryEditor(form.category);
     });
 
-    function handleSave() {
+    async function handleSave() {
       if (!form.Label || !form.Instruction) {
         formError.value = "请填写标签名称和指令模板";
         return;
@@ -432,23 +594,52 @@ var TemplateEditor = {
         return;
       }
       formError.value = "";
-      props.onSave({ ...form });
+      coverUploading.value = true;
+      try {
+        var persistedPreviews = [];
+        for (var previewSource of templatePreviewImages(form)) {
+          var persistedPreview = await persistCoverSource(
+            resolveTemplateCoverSource(previewSource, form.file_path),
+            form.id
+          );
+          if (persistedPreview && persistedPreviews.indexOf(persistedPreview) < 0) persistedPreviews.push(persistedPreview);
+        }
+        assignTemplatePreviewImages(form, persistedPreviews);
+        await props.onSave({ ...form });
+      } catch (error) {
+        formError.value = error.message || String(error);
+      } finally {
+        coverUploading.value = false;
+      }
     }
 
-    async function uploadCover(file) {
-      if (!file || !String(file.type || "").startsWith("image/")) {
+    async function uploadCovers(fileList) {
+      var files = Array.from(fileList || []);
+      if (!files.length || files.some(function(file) { return !String(file.type || "").startsWith("image/"); })) {
         formError.value = "请拖入或选择图片文件";
         return;
       }
+      var previews = templatePreviewImages(form);
+      var remaining = TEMPLATE_PREVIEW_IMAGE_LIMIT - previews.length;
+      if (remaining <= 0) {
+        formError.value = "每个预设最多保存 " + TEMPLATE_PREVIEW_IMAGE_LIMIT + " 张预览效果素材";
+        return;
+      }
+      var selected = files.slice(0, remaining);
       coverUploading.value = true;
       try {
-        var body = new FormData();
-        body.append("file", file, file.name || "cover.png");
-        var response = await fetch("/eaglePromptPresets/upload_cover", { method: "POST", body: body });
-        var data = await response.json();
-        if (!response.ok || !data.success) throw new Error(data.error || "封面上传失败");
-        form.cover = data.path;
-        formError.value = "";
+        for (var file of selected) {
+          var uploaded = await uploadPersistentCover(file, form.id);
+          if (uploaded && previews.indexOf(uploaded) < 0) {
+            previews.push(uploaded);
+            // Keep every successful upload referenced even if a later file fails.
+            assignTemplatePreviewImages(form, previews);
+          }
+        }
+        assignTemplatePreviewImages(form, previews);
+        formError.value = files.length > selected.length
+          ? "已达到 " + TEMPLATE_PREVIEW_IMAGE_LIMIT + " 张上限，多余文件未添加"
+          : "";
       } catch (error) {
         formError.value = error.message || String(error);
       } finally {
@@ -457,8 +648,31 @@ var TemplateEditor = {
       }
     }
 
+    function updatePrimaryPreview(value) {
+      var previous = String(form.cover || "").trim();
+      var next = String(value || "").trim();
+      var remaining = templatePreviewImages(form).filter(function(reference) {
+        return reference !== previous && reference !== next;
+      });
+      assignTemplatePreviewImages(form, next ? [next].concat(remaining) : remaining);
+    }
+
+    function makePrimaryPreview(index) {
+      var previews = templatePreviewImages(form);
+      if (index <= 0 || index >= previews.length) return;
+      var selected = previews.splice(index, 1)[0];
+      assignTemplatePreviewImages(form, [selected].concat(previews));
+    }
+
+    function removePreview(index) {
+      var previews = templatePreviewImages(form);
+      previews.splice(index, 1);
+      assignTemplatePreviewImages(form, previews);
+    }
+
     return function() {
       if (!props.visible) return null;
+      var previewImages = templatePreviewImages(form);
 
       // ✅ 使用统一样式类名
       return h("div", { class: "ppui-settings-backdrop show", onClick: props.onClose }, [
@@ -528,45 +742,65 @@ var TemplateEditor = {
                 : "从已有分类中选择；需要新分类时选择“自定义分类”")
             ]),
 
-            // 封面上传
+            // 预览效果素材（首张同时作为列表封面）
             h("div", {}, [
               h("label", { style: { display: "block", marginBottom: "4px", color: "#aaa", fontSize: "12px" } }, [
-                "小封面 ",
-                h("span", { class: "ppui-settings-hint", style: { display: "inline" } }, "(可选：URL 或本地路径)")
+                "预览效果素材 ",
+                h("span", { class: "ppui-settings-hint", style: { display: "inline" } },
+                  "(最多 " + TEMPLATE_PREVIEW_IMAGE_LIMIT + " 张；首张作为列表封面)")
               ]),
               h("div", {
                 class: "pp-cover-editor",
                 style: coverUploading.value ? { opacity: 0.6, pointerEvents: "none" } : {},
                 onDragover: function(e) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; },
-                onDrop: function(e) { e.preventDefault(); uploadCover(e.dataTransfer.files && e.dataTransfer.files[0]); }
+                onDrop: function(e) { e.preventDefault(); uploadCovers(e.dataTransfer.files); }
               }, [
-                form.cover
-                  ? h("img", { src: templateCoverUrl(form.cover), style: { width: "44px", height: "44px", objectFit: "cover", borderRadius: "6px", flex: "0 0 44px" } })
-                  : h("span", { class: "pp-cover-fallback" }, (form.Label || "P").slice(0, 1)),
-                h("div", { style: { flex: 1, display: "flex", flexDirection: "column", gap: "8px" } }, [
+                h("div", { class: "pp-cover-primary-row" }, [
+                  form.cover
+                    ? h("img", { src: templateCoverUrl(form.cover, form.file_path), style: { width: "44px", height: "44px", objectFit: "contain", borderRadius: "6px", flex: "0 0 44px", background: "#090c11" } })
+                    : h("span", { class: "pp-cover-fallback" }, (form.Label || "P").slice(0, 1)),
                   h("input", {
                     class: "ppui-search",
                     type: "text",
                     value: form.cover || "",
-                    placeholder: "拖入图片，或填写 URL / 本地路径",
-                    onInput: function(e) { form.cover = e.target.value; }
+                    placeholder: "首张封面 URL / 本地路径（也可直接拖入多张图片）",
+                    onInput: function(e) { updatePrimaryPreview(e.target.value); }
+                  })
+                ]),
+                h("div", { class: "pp-template-preview-grid" }, [
+                  ...previewImages.map(function(reference, index) {
+                    return h("div", { class: ["pp-template-preview-card", index === 0 ? "primary" : ""] }, [
+                      h("button", {
+                        type: "button",
+                        class: "pp-template-preview-image",
+                        title: index === 0 ? "当前列表封面" : "设为列表封面",
+                        onClick: function() { makePrimaryPreview(index); }
+                      }, [h("img", { src: templateCoverUrl(reference, form.file_path), alt: "预览效果 " + (index + 1), loading: "lazy" })]),
+                      index === 0 ? h("span", { class: "pp-template-preview-badge" }, "封面") : null,
+                      h("button", {
+                        type: "button",
+                        class: "pp-template-preview-remove",
+                        title: "移除该素材引用",
+                        onClick: function(e) { e.stopPropagation(); removePreview(index); }
+                      }, "×")
+                    ]);
                   }),
-                  h("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, [
-                    h("button", {
-                      class: "ppui-btn",
-                      disabled: coverUploading.value,
-                      onClick: function() { coverInput.value && coverInput.value.click(); }
-                    }, coverUploading.value ? "上传中…" : "选择封面"),
-                    h("span", { class: "ppui-settings-hint" }, "支持 PNG/JPG/WebP/GIF，最大 8MB"),
-                    h("input", {
-                      ref: coverInput,
-                      type: "file",
-                      accept: "image/png,image/jpeg,image/webp,image/gif",
-                      style: "display:none",
-                      onChange: function(e) { uploadCover(e.target.files && e.target.files[0]); }
-                    })
-                  ])
-                ])
+                  previewImages.length < TEMPLATE_PREVIEW_IMAGE_LIMIT
+                    ? h("label", { class: "pp-template-preview-add" }, [
+                        coverUploading.value ? "上传中…" : "+ 添加多张素材",
+                        h("input", {
+                          ref: coverInput,
+                          type: "file",
+                          multiple: true,
+                          accept: "image/png,image/jpeg,image/webp,image/gif",
+                          style: "display:none",
+                          onChange: function(e) { uploadCovers(e.target.files); }
+                        })
+                      ])
+                    : null
+                ]),
+                h("span", { class: "ppui-settings-hint" },
+                  "点击缩略图可设为首图；支持 PNG/JPG/WebP/GIF，单张最大 8MB")
               ])
             ]),
 
@@ -609,7 +843,11 @@ var TemplateEditor = {
           // 底部按钮
           h("div", { class: "ppui-settings-row", style: { marginTop: "16px", paddingTop: "12px", borderTop: "1px solid var(--ppui-border)" } }, [
             h("button", { class: "ppui-btn", onClick: props.onClose }, "取消"),
-            h("button", { class: "ppui-btn primary", onClick: handleSave }, "保存")
+            h("button", {
+              class: "ppui-btn primary",
+              disabled: coverUploading.value,
+              onClick: handleSave
+            }, coverUploading.value ? "处理封面…" : "保存")
           ])
         ])
       ]);
@@ -1023,11 +1261,124 @@ var PromptPresetsApp = {
     var notice = reactive({ text: "", error: false });
     var activeTab = ref("presets");
     var stateReady = false;
+    var masterRatio = ref(0.34);
+    var activeSplitCleanup = null;
+    var noticeTimer = 0;
+    var retryTimers = new Set();
+    var coverLoadStates = reactive({});
+
+    function scheduleRetry(callback, delay) {
+      var timer = setTimeout(function() {
+        retryTimers.delete(timer);
+        callback();
+      }, delay);
+      retryTimers.add(timer);
+      return timer;
+    }
+
+    function coverLoadKey(template, slot) {
+      return String(slot || "cover") + "::" + templateKey(template) + "::" + String((template && template.cover) || "");
+    }
+
+    function coverDisplay(template, slot) {
+      var key = coverLoadKey(template, slot);
+      var state = coverLoadStates[key] || { attempts: 0, nonce: 0 };
+      var url = templateCoverUrl(template && template.cover, template && template.file_path);
+      if (url && state.attempts === 1 && /^\/eaglePromptPresets\/cover(?:\?|$)/.test(url)) {
+        url += (url.indexOf("?") >= 0 ? "&" : "?") + "_eagle_cover_retry=" + encodeURIComponent(state.nonce);
+      }
+      return { key: key, url: state.attempts >= 2 ? "" : url };
+    }
+
+    function handleCoverLoadError(template, slot) {
+      var key = coverLoadKey(template, slot);
+      var state = coverLoadStates[key] || { attempts: 0, nonce: 0 };
+      var url = templateCoverUrl(template && template.cover, template && template.file_path);
+      if (state.attempts === 0 && /^\/eaglePromptPresets\/cover(?:\?|$)/.test(url)) {
+        coverLoadStates[key] = { attempts: 1, nonce: Date.now() };
+      } else {
+        coverLoadStates[key] = { attempts: 2, nonce: state.nonce || Date.now() };
+      }
+    }
+
+    function restoreSplitLayout() {
+      var savedSplit = props.node.properties && props.node.properties.eagle_prompt_presets_split_layout;
+      var savedRatio = Number(savedSplit && savedSplit.master_ratio);
+      masterRatio.value = Math.max(0.20, Math.min(0.60, Number.isFinite(savedRatio) ? savedRatio : 0.34));
+    }
+    restoreSplitLayout();
+
+    function persistSplitLayout(commit) {
+      props.node.properties = props.node.properties || {};
+      props.node.properties.eagle_prompt_presets_split_layout = {
+        version: 1,
+        master_ratio: Number(masterRatio.value.toFixed(5))
+      };
+      props.node.setDirtyCanvas?.(true, true);
+      if (commit) props.node.graph?.change?.();
+    }
+
+    function stopSplitDrag() {
+      if (activeSplitCleanup) activeSplitCleanup();
+    }
+
+    function beginMasterResize(event) {
+      if (event.pointerType !== "touch" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      stopSplitDrag();
+      var target = event.currentTarget;
+      var layout = target && target.parentElement;
+      var rect = layout && layout.getBoundingClientRect ? layout.getBoundingClientRect() : null;
+      if (!target || !rect || rect.width < 1) return;
+      var pointerId = event.pointerId;
+      var startX = event.clientX;
+      var startPixels = masterRatio.value * rect.width;
+      var oldCursor = document.body.style.cursor;
+      var oldUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      target.setPointerCapture?.(pointerId);
+
+      function move(moveEvent) {
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        var width = Math.max(1, layout.getBoundingClientRect().width);
+        var minPixels = Math.min(190, width * 0.44);
+        var maxPixels = Math.max(minPixels, width - Math.min(320, width * 0.52));
+        var pixels = Math.max(minPixels, Math.min(maxPixels, startPixels + moveEvent.clientX - startX));
+        masterRatio.value = Math.max(0.20, Math.min(0.60, pixels / width));
+        persistSplitLayout(false);
+      }
+
+      function finish(finishEvent) {
+        if (finishEvent && finishEvent.pointerId != null && finishEvent.pointerId !== pointerId) return;
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", finish);
+        target.removeEventListener("pointercancel", finish);
+        target.removeEventListener("lostpointercapture", finish);
+        if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+        document.body.style.cursor = oldCursor;
+        document.body.style.userSelect = oldUserSelect;
+        if (activeSplitCleanup === finish) activeSplitCleanup = null;
+        persistSplitLayout(true);
+      }
+
+      activeSplitCleanup = finish;
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", finish);
+      target.addEventListener("pointercancel", finish);
+      target.addEventListener("lostpointercapture", finish);
+    }
+
+    props.node._ppStopSplitDrag = stopSplitDrag;
+    props.node._ppRestoreSplitLayout = restoreSplitLayout;
 
     function showNotice(text, isError) {
       notice.text = String(text || "");
       notice.error = !!isError;
-      if (notice.text) setTimeout(function() { notice.text = ""; }, 3200);
+      clearTimeout(noticeTimer);
+      noticeTimer = notice.text ? setTimeout(function() { notice.text = ""; noticeTimer = 0; }, 3200) : 0;
     }
 
     function applyWidgetState(nextState, nextVariables) {
@@ -1235,10 +1586,10 @@ var PromptPresetsApp = {
       function trySyncExternalVariables(attempt) {
         syncExternalVariables();
         if (attempt < 3) {
-          setTimeout(function() { trySyncExternalVariables(attempt + 1); }, 250 * (attempt + 1));
+          scheduleRetry(function() { trySyncExternalVariables(attempt + 1); }, 250 * (attempt + 1));
         }
       }
-      setTimeout(function() { trySyncExternalVariables(0); }, 100);
+      scheduleRetry(function() { trySyncExternalVariables(0); }, 100);
 
       props.node._ppSyncExternalVariables = function() {
         syncLinkedPromptVariableNames(props.node, selectedVariables.value);
@@ -1248,6 +1599,13 @@ var PromptPresetsApp = {
     });
 
     onUnmounted(function() {
+      stopSplitDrag();
+      clearTimeout(noticeTimer);
+      noticeTimer = 0;
+      retryTimers.forEach(function(timer) { clearTimeout(timer); });
+      retryTimers.clear();
+      if (props.node._ppStopSplitDrag === stopSplitDrag) delete props.node._ppStopSplitDrag;
+      if (props.node._ppRestoreSplitLayout === restoreSplitLayout) delete props.node._ppRestoreSplitLayout;
       if (props.node._ppSyncExternalVariables) delete props.node._ppSyncExternalVariables;
       if (props.node._eagleRestoreUiState) delete props.node._eagleRestoreUiState;
     });
@@ -1407,7 +1765,7 @@ var PromptPresetsApp = {
 
     function renderMasterItem(template) {
       var active = templateKey(template) === templateKey(selectedTemplate.value);
-      var cover = templateCoverUrl(template.cover);
+      var cover = coverDisplay(template, "master");
       var readOnly = isReadOnly(template);
       return h("div", {
         key: templateKey(template),
@@ -1423,8 +1781,15 @@ var PromptPresetsApp = {
           }
         }
       }, [
-        cover
-          ? h("img", { class: "pp-master-cover", src: cover, alt: "", loading: "lazy" })
+        cover.url
+          ? h("img", {
+              class: "pp-master-cover",
+              src: cover.url,
+              alt: "",
+              loading: "eager",
+              decoding: "async",
+              onError: function() { handleCoverLoadError(template, "master"); }
+            })
           : h("div", { class: "pp-master-cover pp-cover-placeholder" }, String(template.Label || "模").slice(0, 1)),
         h("div", { class: "pp-master-copy" }, [
           h("strong", { class: "pp-master-label", title: template.Label || "" }, template.Label || "未命名模板"),
@@ -1454,7 +1819,8 @@ var PromptPresetsApp = {
       if (!template) return h("div", { class: "ppui-empty" }, "请选择一个模板");
       
       var vars = displayedVariables.value;
-      var cover = templateCoverUrl(template.cover);
+      var cover = coverDisplay(template, "detail");
+      var previewImages = templatePreviewImages(template);
       var readOnly = isReadOnly(template);
       var activeIsExternal = !!activeVariable.value && hasExternalVariable(activeVariable.value);
 
@@ -1462,8 +1828,15 @@ var PromptPresetsApp = {
         // 标题区域
         h("div", { class: "pp-detail-head" }, [
           h("div", { class: "pp-detail-identity" }, [
-            cover
-              ? h("img", { class: "pp-detail-cover", src: cover, alt: "", loading: "lazy" })
+            cover.url
+              ? h("img", {
+                  class: "pp-detail-cover",
+                  src: cover.url,
+                  alt: "",
+                  loading: "eager",
+                  decoding: "async",
+                  onError: function() { handleCoverLoadError(template, "detail"); }
+                })
               : h("div", { class: "pp-detail-cover pp-cover-placeholder" }, String(template.Label || "模").slice(0, 1)),
             h("div", {}, [
               h("h3", {}, template.Label || "未命名模板"),
@@ -1475,6 +1848,18 @@ var PromptPresetsApp = {
             h("button", { class: "ppui-btn", onClick: function() { handleDuplicate(template); } }, "另存副本")
           ])
         ]),
+
+        previewImages.length ? h("div", {
+          class: "pp-detail-preview-strip",
+          title: "预设效果素材（首张作为列表封面）"
+        }, previewImages.map(function(reference, index) {
+          return h("img", {
+            src: templateCoverUrl(reference, template.file_path),
+            alt: (template.Label || "提示词预设") + " 效果素材 " + (index + 1),
+            title: (index === 0 ? "封面 · " : "") + (index + 1) + " / " + previewImages.length,
+            loading: "lazy"
+          });
+        })) : null,
 
         // 滚动区域
         h("div", { class: "pp-detail-scroll" }, [
@@ -1557,19 +1942,15 @@ var PromptPresetsApp = {
                   type: "button",
                   class: ["ppui-btn", previewMode.value === "source" ? "primary" : ""],
                   onClick: function() { previewMode.value = "source"; }
-                }, "源码")
+                }, "源码"),
+                h("button", { class: "ppui-btn", onClick: copyPrompt }, "复制"),
+                h("button", { class: "ppui-btn primary", onClick: applySelected }, "应用到节点输出")
               ])
             ]),
             previewMode.value === "markdown"
               ? h("div", { class: "pp-preview-markdown", innerHTML: renderMarkdown(renderedPrompt.value) })
               : h("textarea", { class: "ppui-search pp-preview-textarea", readonly: true, value: renderedPrompt.value })
           ])
-        ]),
-
-        // 底部操作
-        h("div", { class: "pp-detail-actions" }, [
-          h("button", { class: "ppui-btn", onClick: copyPrompt }, "复制"),
-          h("button", { class: "ppui-btn primary", onClick: applySelected }, "应用到节点输出")
         ])
       ]);
     }
@@ -1606,10 +1987,27 @@ var PromptPresetsApp = {
           : errorMessage.value
             ? h("div", { class: "ppui-error" }, [errorMessage.value, h("button", { class: "ppui-btn", onClick: loadTemplates }, "重试")])
             : h("div", { class: "ppui-main", style: { flex: "1 1 auto", overflow: "hidden", minHeight: "0", height: "100%" } }, [
-                h("div", { style: { display: "grid", gridTemplateColumns: "minmax(250px, 34%) minmax(0, 1fr)", width: "100%", height: "100%", minWidth: "0", minHeight: "0", overflow: "hidden" } }, [
-                  h("aside", { class: "ppui-sidebar pp-master" }, filteredTemplates.value.length
+                h("div", { class: "pp-split-layout" }, [
+                  h("aside", {
+                    class: "ppui-sidebar pp-master",
+                    style: { flex: "0 0 " + (masterRatio.value * 100).toFixed(3) + "%", width: "auto" }
+                  }, filteredTemplates.value.length
                     ? filteredTemplates.value.map(renderMasterItem)
                     : [h("div", { class: "ppui-empty" }, "没有匹配的模板")]),
+                  h("div", {
+                    class: "pp-splitter",
+                    role: "separator",
+                    tabindex: "0",
+                    "aria-orientation": "vertical",
+                    title: "拖拽调整模板列表与详情区比例",
+                    onPointerdown: beginMasterResize,
+                    onKeydown: function(event) {
+                      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                      event.preventDefault();
+                      masterRatio.value = Math.max(0.20, Math.min(0.60, masterRatio.value + (event.key === "ArrowLeft" ? -0.02 : 0.02)));
+                      persistSplitLayout(true);
+                    }
+                  }),
                   renderDetail()
                 ])
               ]),
@@ -1666,6 +2064,18 @@ app.registerExtension({
 
     var HIDDEN_WIDGETS = ["prompt", "template", "local_variables", "ui_state"];
 
+    var inputDefs = nodeData && (nodeData.input || nodeData.inputs);
+    ["required", "optional"].forEach(function(groupName) {
+      var group = inputDefs && inputDefs[groupName];
+      HIDDEN_WIDGETS.forEach(function(name) {
+        var definition = group && group[name];
+        if (!Array.isArray(definition)) return;
+        definition[1] = Object.assign({}, definition[1] || {}, {
+          hidden: true, vueNode: "never", hideInPanel: true
+        });
+      });
+    });
+
     var hideWidgets = function(node) {
       if (!node.widgets || !node.widgets.length) return false;
       var found = false;
@@ -1673,9 +2083,12 @@ app.registerExtension({
         var widget = node.widgets[i];
         if (HIDDEN_WIDGETS.indexOf(widget.name) < 0) continue;
         widget.type = "hidden";
+        widget.options = widget.options || {};
+        Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
         widget.computeSize = function() { return [0, -4]; };
         widget.hidden = true;
         widget.draw = function() {};
+        node.widgets.splice(i, 1, widget);
         found = true;
       }
       if (found) node.setDirtyCanvas(true, true);
@@ -1689,7 +2102,9 @@ app.registerExtension({
       this._ppMounting = true;
 
       var node = this;
-      this.setSize([900, 700]);
+      if (!this.size || Number(this.size[0]) < 420 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
       hideWidgets(this);
 
       setTimeout(function() {
@@ -1707,14 +2122,25 @@ app.registerExtension({
           container.className = "eagle-prompt-presets-root";
           // ComfyUI may cache a DOM widget host's creation-time percentage width.
           // Start with the node's real pixel width and keep it synchronized below.
-          container.style.cssText = "width:880px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
+          container.style.cssText = "width:940px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
 
+          var PRESETS_MIN_VIEWPORT_HEIGHT = 280;
+          var PRESETS_DEFAULT_VIEWPORT_HEIGHT = 600;
+          var currentViewportHeight = PRESETS_DEFAULT_VIEWPORT_HEIGHT;
+          var MAX_VIEWPORT_HEIGHT = 4096;
           var domWidget = this.addDOMWidget("preview", "div", container, {
             serialize: false,
             hideOnZoom: false,
-            canvasOnly: true
+            hideInPanel: true,
+            getMinHeight: function() { return PRESETS_MIN_VIEWPORT_HEIGHT; },
+            getMaxHeight: function() { return MAX_VIEWPORT_HEIGHT; },
+            getHeight: function() { return currentViewportHeight; },
           });
           domWidget.width = undefined;
+          domWidget._eagleViewportHeight = PRESETS_DEFAULT_VIEWPORT_HEIGHT;
+          // No instance computeSize: that opts this full-surface DOMWidget into
+          // LiteGraph's fixed-height path. The native computeLayoutSize keeps
+          // the minimum bounded while assigning the user's remaining height.
           this._ppWidget = domWidget;
 
       var vueApp = createApp({
@@ -1744,22 +2170,22 @@ app.registerExtension({
       this._ppMounting = false;
 
           // LiteGraph 会在选中、拖动或恢复工作流时重新测量 DOMWidget。
-          // 不能把节点像素宽度直接写到 Vue 根元素，否则下一次测量会把旧宽度
-          // 当成可用宽度并持续收缩。根元素始终跟随宿主，computeSize 只返回本轮尺寸。
+          // 根元素使用节点的实时像素宽高；DOMWidget 本身继续使用原生可增长
+          // 布局契约，避免固定最小高度裁剪及恢复时的高度反馈。
           var syncLayout = function(target, size) {
             if (!target || !target._ppContainer) return;
-            var currentSize = size || target.size || [900, 700];
-            var nodeWidth = Math.max(440, Number(currentSize[0]) || 900);
-            var nodeHeight = Math.max(500, Number(currentSize[1]) || 700);
+            var currentSize = size || target.size || [960, 720];
+            var nodeWidth = Math.max(440, Number(currentSize[0]) || 960);
             var width = Math.max(420, nodeWidth - 20);
-            var height = Math.max(410, nodeHeight - 104);
+            currentViewportHeight = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(PRESETS_MIN_VIEWPORT_HEIGHT, (Number(currentSize[1]) || 720) - 120));
+            target._ppWidget._eagleViewportHeight = currentViewportHeight;
             var root = target._ppContainer;
 
             root.style.width = width + "px";
             root.style.maxWidth = "none";
             root.style.minWidth = "0";
             root.style.boxSizing = "border-box";
-            root.style.height = height + "px";
+            root.style.height = currentViewportHeight + "px";
             root.style.overflow = "hidden";
 
             var host = root.parentElement;
@@ -1770,7 +2196,7 @@ app.registerExtension({
               host.style.boxSizing = "border-box";
               host.style.overflow = "hidden";
             }
-            // 不设置 computeSize，避免高度反馈循环（参考 lora_gallery 写法）
+            // The renderer owns the host height; inner panes scroll internally.
           };
           this._ppSyncLayout = function(size) {
             syncLayout(this, size || this.size);
@@ -1789,6 +2215,7 @@ app.registerExtension({
           this.onConfigure = function() {
             if (previousOnConfigure) previousOnConfigure.apply(this, arguments);
             hideWidgets(this);
+            this._ppRestoreSplitLayout?.();
             setTimeout(() => this._eagleRestoreUiState?.(), 0);
             requestAnimationFrame(() => {
               hideWidgets(this);
@@ -1807,6 +2234,7 @@ app.registerExtension({
 
       var previousOnRemoved = this.onRemoved;
       this.onRemoved = function() {
+        this._ppStopSplitDrag?.();
         if (this._ppVueApp) this._ppVueApp.unmount();
             this._ppVueApp = null;
             this._ppContainer = null;
@@ -1902,13 +2330,14 @@ function syncLinkedPromptVariableNames(node, names) {
   }
 }
 
-function templateCoverUrl(cover) {
-  if (!cover) return "";
-  if (String(cover).startsWith("http://") || String(cover).startsWith("https://")) return cover;
-  if (String(cover).startsWith("data:")) return cover;
-  if (String(cover).startsWith("blob:")) return cover;
-  if (/^\/(?:eaglePromptPresets\/cover(?:\?|$)|view\?|api\/)/.test(String(cover))) return cover;
-  return "/eaglePromptPresets/cover?path=" + encodeURIComponent(cover);
+function templateCoverUrl(cover, templateFilePath) {
+  var resolvedCover = resolveTemplateCoverSource(cover, templateFilePath);
+  if (!resolvedCover) return "";
+  if (String(resolvedCover).startsWith("http://") || String(resolvedCover).startsWith("https://")) return resolvedCover;
+  if (String(resolvedCover).startsWith("data:")) return resolvedCover;
+  if (String(resolvedCover).startsWith("blob:")) return resolvedCover;
+  if (/^\/(?:eaglePromptPresets\/cover(?:\?|$)|view\?|api\/)/.test(String(resolvedCover))) return resolvedCover;
+  return "/eaglePromptPresets/cover?path=" + encodeURIComponent(resolvedCover);
 }
 
 function renderMarkdownLegacy(text) {

@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""
-Eagle Suite - 延迟路由注册表
+"""Eagle Suite routes registered once a PromptServer is fully initialized."""
 
-解决 ComfyUI 在导入 custom_nodes 时 PromptServer.instance 尚未就绪的问题。
-所有画廊节点模块使用本模块提供的 @route 装饰器登记路由处理函数，
-由 eagle_suite/__init__.py 在 PromptServer.instance 可用后统一注册。
-"""
+import functools
+import logging
+import threading
 
 _route_handlers = []
 _route_keys = set()
 _registered_keys = set()
+_ready_hook_lock = threading.RLock()
+_READY_CALLBACKS_ATTR = "_eagle_suite_route_ready_callbacks"
 
 
 def route(method: str, path: str):
@@ -28,11 +28,11 @@ def route(method: str, path: str):
     return decorator
 
 
-def register_all_routes(server) -> None:
-    """在 PromptServer 实例可用后，将登记的所有路由注册到 server.routes。"""
-    if not server:
-        return
-    routes = server.routes
+def register_all_routes(server) -> bool:
+    """Register pending routes; return whether the server route table is ready."""
+    routes = getattr(server, "routes", None)
+    if routes is None:
+        return False
     for method, path, handler in _route_handlers:
         key = (id(server), method, path)
         if key in _registered_keys:
@@ -41,8 +41,51 @@ def register_all_routes(server) -> None:
             getattr(routes, method.lower())(path)(handler)
             _registered_keys.add(key)
         except Exception as e:
-            import logging
             logging.warning(f"[EagleRouteRegistry] 注册路由 {method} {path} 失败: {e}")
+    return True
+
+
+def register_when_ready(prompt_server_cls, callback, callback_key="eagle_suite") -> bool:
+    """Run callback now or after the next PromptServer constructor completes.
+
+    ComfyUI sets ``PromptServer.instance`` near the start of ``__init__``, before
+    ``routes`` exists. Wrapping the constructor lets us register on the same
+    startup thread after the route table is available, without polling or
+    touching aiohttp from a background thread. A callback key replaces stale
+    callbacks on hot reload rather than stacking constructor wrappers.
+    """
+    server = getattr(prompt_server_cls, "instance", None)
+    if getattr(server, "routes", None) is not None:
+        callback(server)
+        return True
+
+    with _ready_hook_lock:
+        callbacks = getattr(prompt_server_cls, _READY_CALLBACKS_ATTR, None)
+        if callbacks is None:
+            callbacks = {}
+            setattr(prompt_server_cls, _READY_CALLBACKS_ATTR, callbacks)
+            original_init = prompt_server_cls.__init__
+
+            @functools.wraps(original_init)
+            def _init_and_register(self, *args, **kwargs):
+                original_init(self, *args, **kwargs)
+                for ready_callback in tuple(
+                    getattr(prompt_server_cls, _READY_CALLBACKS_ATTR).values()
+                ):
+                    try:
+                        ready_callback(self)
+                    except Exception:
+                        logging.exception("[EagleRouteRegistry] PromptServer 就绪后注册失败")
+
+            prompt_server_cls.__init__ = _init_and_register
+        callbacks[callback_key] = callback
+
+    # The server could have completed construction while the hook was installed.
+    server = getattr(prompt_server_cls, "instance", None)
+    if getattr(server, "routes", None) is not None:
+        callback(server)
+        return True
+    return False
 
 
 def clear_routes() -> None:
@@ -52,4 +95,4 @@ def clear_routes() -> None:
     _registered_keys.clear()
 
 
-__all__ = ["route", "register_all_routes", "clear_routes"]
+__all__ = ["route", "register_all_routes", "register_when_ready", "clear_routes"]

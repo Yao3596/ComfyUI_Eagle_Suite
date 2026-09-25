@@ -379,6 +379,124 @@ var EagleGallery = {
     var apiToken = ref("");
     var offset = ref(0);
     var hasMore = ref(true);
+    var sideWidth = ref(220);
+    var previewHeight = ref(64);
+    var sideRatio = ref(0.235);
+    var previewRatio = ref(0.11);
+    var activeDragCleanup = null;
+    var layoutResizeObserver = null;
+    var restoreTimer = null;
+
+    function clampLayoutValue(value, min, max) {
+      return Math.max(min, Math.min(max, Number(value) || min));
+    }
+
+    function availableLayoutWidth() {
+      var mountedWidth = Number(rootElRef?.clientWidth);
+      return Math.max(340, mountedWidth || (Number(props.node.size?.[0]) || 960) - 20);
+    }
+
+    function availableLayoutHeight() {
+      var mountedHeight = Number(rootElRef?.clientHeight);
+      return Math.max(300, mountedHeight || (Number(props.node.size?.[1]) || 720) - 120);
+    }
+
+    function persistSplitLayout(notifyGraph) {
+      var width = availableLayoutWidth();
+      var height = availableLayoutHeight();
+      sideRatio.value = clampLayoutValue(sideWidth.value / width, 0.12, 0.48);
+      previewRatio.value = clampLayoutValue(previewHeight.value / height, 0.08, 0.45);
+      props.node.properties = props.node.properties || {};
+      props.node.properties.eagle_gallery_split_layout = {
+        version: 1,
+        side_ratio: Number(sideRatio.value.toFixed(5)),
+        preview_ratio: Number(previewRatio.value.toFixed(5)),
+      };
+      props.node.setDirtyCanvas?.(true, true);
+      if (notifyGraph) props.node.graph?.change?.();
+    }
+
+    function applySplitLayout() {
+      var width = availableLayoutWidth();
+      var height = availableLayoutHeight();
+      sideWidth.value = clampLayoutValue(width * sideRatio.value, 120, Math.max(120, width - 200));
+      previewHeight.value = clampLayoutValue(height * previewRatio.value, 56, Math.max(56, Math.min(260, height - 240)));
+    }
+
+    function restoreSplitLayout() {
+      var saved = props.node.properties?.eagle_gallery_split_layout;
+      if (saved && Number(saved.version) >= 1) {
+        if (Number.isFinite(Number(saved.side_ratio))) sideRatio.value = clampLayoutValue(saved.side_ratio, 0.12, 0.48);
+        if (Number.isFinite(Number(saved.preview_ratio))) previewRatio.value = clampLayoutValue(saved.preview_ratio, 0.08, 0.45);
+      }
+      applySplitLayout();
+    }
+
+    props.node._eagleRestoreSplitLayout = restoreSplitLayout;
+
+    function makePointerDragHandler(axis, refVar, getBounds) {
+      return function(e) {
+        if (e.pointerType !== "touch" && e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        activeDragCleanup?.();
+
+        var target = e.currentTarget;
+        var pointerId = e.pointerId;
+        var start = axis === "x" ? e.clientX : e.clientY;
+        var startValue = refVar.value;
+        var previousCursor = document.body.style.cursor;
+        var previousUserSelect = document.body.style.userSelect;
+        document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
+        document.body.style.userSelect = "none";
+        target.setPointerCapture?.(pointerId);
+
+        function onMove(ev) {
+          if (ev.pointerId !== pointerId) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          var delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
+          var bounds = getBounds();
+          refVar.value = clampLayoutValue(startValue + delta, bounds[0], bounds[1]);
+          persistSplitLayout(false);
+        }
+
+        function finish(ev) {
+          if (ev && ev.pointerId !== pointerId) return;
+          target.removeEventListener("pointermove", onMove);
+          target.removeEventListener("pointerup", finish);
+          target.removeEventListener("pointercancel", finish);
+          target.removeEventListener("lostpointercapture", finish);
+          if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+          document.body.style.cursor = previousCursor;
+          document.body.style.userSelect = previousUserSelect;
+          if (activeDragCleanup === finish) activeDragCleanup = null;
+          persistSplitLayout(true);
+        }
+
+        activeDragCleanup = finish;
+        target.addEventListener("pointermove", onMove);
+        target.addEventListener("pointerup", finish);
+        target.addEventListener("pointercancel", finish);
+        target.addEventListener("lostpointercapture", finish);
+      };
+    }
+
+    function makeKeyboardResizeHandler(axis, refVar, getBounds) {
+      return function(e) {
+        var delta = 0;
+        if (axis === "x" && e.key === "ArrowLeft") delta = -16;
+        else if (axis === "x" && e.key === "ArrowRight") delta = 16;
+        else if (axis === "y" && e.key === "ArrowUp") delta = -16;
+        else if (axis === "y" && e.key === "ArrowDown") delta = 16;
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+        var bounds = getBounds();
+        refVar.value = clampLayoutValue(refVar.value + delta, bounds[0], bounds[1]);
+        persistSplitLayout(true);
+      };
+    }
 
     function thumbUrl(id) {
       // 主 URL: 通过 ComfyUI 代理
@@ -691,13 +809,27 @@ var EagleGallery = {
 
     onMounted(function() {
       loadSettings(); loadFolders(); loadMore();
+      restoreSplitLayout();
+      if (typeof ResizeObserver === "function" && rootElRef) {
+        layoutResizeObserver = new ResizeObserver(function() {
+          if (!activeDragCleanup) applySplitLayout();
+        });
+        layoutResizeObserver.observe(rootElRef);
+      }
       // ComfyUI 节点创建之初 id 可能还是临时 id，稍等一下再按最终 id 恢复
-      setTimeout(restoreSelection, 500);
+      restoreTimer = setTimeout(function() { restoreTimer = null; restoreSelection(); }, 500);
     });
 
     onBeforeUnmount(function() {
+      if (restoreTimer != null) clearTimeout(restoreTimer);
+      activeDragCleanup?.();
+      layoutResizeObserver?.disconnect();
+      layoutResizeObserver = null;
       if (props.node._eagleRestoreUiState === restoreSelection) {
         delete props.node._eagleRestoreUiState;
+      }
+      if (props.node._eagleRestoreSplitLayout === restoreSplitLayout) {
+        delete props.node._eagleRestoreSplitLayout;
       }
     });
 
@@ -788,13 +920,28 @@ var EagleGallery = {
         ]),
 
         // ═══ 状态栏：已选图像预览条 + 总数 + 整夹输出（移到工具栏下方，方便预览） ═══
-        h("div", { class: "eg-foot" }, [
+        h("div", { class: "eg-foot", style: "height:" + previewHeight.value + "px" }, [
           h("button", { class: "eg-btn eg-folder-out", onClick: selectAllForOutput, title: "\u8F93\u51FA\u5F53\u524D\u6587\u4EF6\u5939/\u7B5B\u9009\u7ED3\u679C\u7684\u5168\u90E8\u56FE\u7247" }, "\u6574\u5939\u8F93\u51FA"),
           h(SelectionBar, {
             selectedItems: selectedItems.value,
             onRemove: removeSelected, onClear: clearSel
           }),
-          h("div", { class: "eg-sta" }, "\u5171 " + total.value + " \u5F20 \u2502 \u9009\u4E2D " + selectedIds.value.length + " \u5F20")
+          h("div", { class: "eg-sta" }, "\u5171 " + total.value + " \u5F20 \u2502 \u9009\u4E2D " + selectedIds.value.length + " \u5F20"),
+          h("div", {
+            class: "eg-resizer-row",
+            role: "separator",
+            tabindex: 0,
+            "aria-orientation": "horizontal",
+            onPointerdown: makePointerDragHandler("y", previewHeight, function() {
+              var height = availableLayoutHeight();
+              return [56, Math.max(56, Math.min(260, height - 240))];
+            }),
+            onKeydown: makeKeyboardResizeHandler("y", previewHeight, function() {
+              var height = availableLayoutHeight();
+              return [56, Math.max(56, Math.min(260, height - 240))];
+            }),
+            title: "拖拽调整预览区高度"
+          })
         ]),
 
         // 标签筛选弹窗
@@ -807,7 +954,22 @@ var EagleGallery = {
 
         // ═══ 主体 ═══
         h("div", { class: "eg-body" }, [
-          h("div", { class: "eg-side" }, [
+          h("div", { class: "eg-side", style: "width:" + sideWidth.value + "px" }, [
+            h("div", {
+              class: "eg-resizer-col",
+              role: "separator",
+              tabindex: 0,
+              "aria-orientation": "vertical",
+              onPointerdown: makePointerDragHandler("x", sideWidth, function() {
+                var width = availableLayoutWidth();
+                return [120, Math.max(120, width - 200)];
+              }),
+              onKeydown: makeKeyboardResizeHandler("x", sideWidth, function() {
+                var width = availableLayoutWidth();
+                return [120, Math.max(120, width - 200)];
+              }),
+              title: "拖拽调整文件夹栏宽度"
+            }),
             h("div", { class: "eg-folder-hd" }, [
               h("input", { class: "eg-folder-srch", type: "text", value: folderQuery.value, placeholder: "\u641C\u7D22\u6587\u4EF6\u5939...",
                 onInput: function(e) { folderQuery.value = e.target.value; }
@@ -826,7 +988,7 @@ var EagleGallery = {
 // CSS
 // ============================================================
 var CSS = [
-  ".eg-root{display:flex;flex-direction:column;height:100%;background:#121216;color:#bbb;font:12px/1.5 system-ui}",
+  ".eg-root{display:flex;flex-direction:column;height:100%;min-width:0;min-height:0;overflow:hidden;box-sizing:border-box;background:#121216;color:#bbb;font:12px/1.5 system-ui}",
   ".eg-bar{display:flex;gap:6px;padding:6px 8px;background:#1a1a22;border-bottom:1px solid #2a2a32;align-items:center;flex-wrap:wrap}",
   ".eg-srch{flex:1;min-width:100px;padding:5px 8px;border:1px solid #333;border-radius:4px;background:#0e0e12;color:#c8c8cc;font-size:12px}",
   ".eg-srch:focus{outline:none;border-color:#4a7de0}",
@@ -859,7 +1021,9 @@ var CSS = [
   ".cl-clr:hover{color:#fff;background:rgba(255,255,255,0.08)}",
   /* 主体 */
   ".eg-body{display:flex;flex:1;min-height:0;overflow:hidden;background:#0e0e12}",
-  ".eg-side{width:220px;min-width:180px;max-width:280px;border-right:1px solid #2a2a32;background:#16161e;overflow:auto;padding:8px 0;scrollbar-width:thin;flex-shrink:0}",
+  ".eg-side{position:relative;width:220px;min-width:120px;max-width:none;border-right:1px solid #2a2a32;background:#16161e;overflow:auto;padding:8px 0;scrollbar-width:thin;flex-shrink:0}",
+  ".eg-resizer-col{position:absolute;top:0;right:0;width:7px;height:100%;z-index:120;cursor:col-resize;background:transparent;touch-action:none;user-select:none}",
+  ".eg-resizer-col:hover{background:rgba(74,125,224,.35)}",
   ".ft-wrap{user-select:none}",
   ".ft-empty{padding:12px;color:#555;font-size:11px;text-align:center}",
   ".ft-r{display:flex;align-items:center;padding:6px 12px;cursor:pointer;white-space:nowrap;overflow:hidden;border-radius:0 20px 20px 0;margin:1px 0;transition:all .15s;font-size:11px;color:#999;position:relative}",
@@ -869,7 +1033,7 @@ var CSS = [
   ".ft-arr.open{transform:rotate(90deg);color:#999}",
   ".ft-ico{flex-shrink:0;margin:0 6px;font-size:12px}",
   ".ft-nm{overflow:hidden;text-overflow:ellipsis;flex:1}",
-  ".eg-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:400px;min-height:0;background:#0f0f14;position:relative}",
+  ".eg-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:200px;min-height:0;background:#0f0f14;position:relative}",
   ".eg-err{padding:12px;color:#f66;font-size:12px;text-align:center;background:rgba(255,0,0,0.05)}",
   /* 图片网格 - 响应式列数，最小160px，使用 auto-fill 确保列数随宽度变化 */
   ".g-wrap{display:grid;grid-template-columns:repeat(auto-fill, minmax(160px, 1fr));gap:12px;padding:16px;overflow-y:scroll;overflow-x:hidden;flex:1 1 0;height:0;align-content:start;width:100%;box-sizing:border-box;min-height:0;scrollbar-width:auto;scrollbar-color:#596273 #171920;scrollbar-gutter:stable}",
@@ -893,7 +1057,9 @@ var CSS = [
   ".g-check::after{content:'\u2714';width:32px;height:32px;background:#4a7de0;border-radius:50%;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.4);border:2px solid #fff}",
   ".g-load-more{padding:30px;color:#777;font-size:13px;text-align:center;grid-column:1/-1;background:linear-gradient(transparent, rgba(26,26,36,0.8));border-radius:0 0 10px 10px}",
   /* 已选图像预览条 */
-  ".eg-foot{display:flex;align-items:center;padding:4px 8px;border-bottom:1px solid #2a2a32;background:#1a1a22;min-height:56px;box-shadow:0 4px 10px rgba(0,0,0,.2);z-index:100}",
+  ".eg-foot{position:relative;display:flex;align-items:center;padding:4px 8px;border-bottom:1px solid #2a2a32;background:#1a1a22;min-height:56px;max-height:none;box-sizing:border-box;box-shadow:0 4px 10px rgba(0,0,0,.2);z-index:100;flex-shrink:0;overflow:hidden}",
+  ".eg-resizer-row{position:absolute;left:0;right:0;bottom:0;height:7px;z-index:130;cursor:row-resize;background:transparent;touch-action:none;user-select:none}",
+  ".eg-resizer-row:hover{background:rgba(74,125,224,.35)}",
   ".sb-wrap{display:flex;align-items:center;flex:1;overflow:hidden;gap:12px;padding:0 4px}",
   ".sb-list{display:flex;gap:6px;overflow-x:auto;flex:1;padding:6px 0;scrollbar-width:thin;mask-image: linear-gradient(to right, black 95%, transparent);}",
   ".sb-list::-webkit-scrollbar {height:4px;}",
@@ -969,6 +1135,19 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "EagleGalleryNode") return;
 
+    // Nodes 2.0 can render parameter rows directly from the definition before
+    // onNodeCreated mutates the instance widgets. Suppress transport-only
+    // values at both levels; their values remain serializable and executable.
+    var inputDefs = nodeData && (nodeData.input || nodeData.inputs);
+    ["required", "optional"].forEach(function (groupName) {
+      var group = inputDefs && inputDefs[groupName];
+      ["trigger", "selection_data"].forEach(function (name) {
+        var definition = group && group[name];
+        if (!Array.isArray(definition)) return;
+        definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+      });
+    });
+
     // 隐藏原生 widgets：trigger（隐藏触发用）/ selection_data（由本组件写入，
     // 无需展示）。用 setTimeout 重试而不是依赖 onDrawBackground 硬压 y/height，
     // 后者只是不画出来，widget 占的布局空间还在，容易和 DOM widget 高度计算打架。
@@ -980,9 +1159,12 @@ app.registerExtension({
         var w = node.widgets[i];
         if (names.indexOf(w.name) === -1) continue;
         w.type = "hidden";
+        w.options = w.options || {};
+        Object.assign(w.options, { hidden: true, vueNode: "never", hideInPanel: true });
         w.computeSize = function () { return [0, -4]; };
         w.hidden = true;
         w.draw = function () {};
+        node.widgets.splice(i, 1, w);
         found = true;
       }
       if (found) node.setDirtyCanvas(true, true);
@@ -995,10 +1177,19 @@ app.registerExtension({
       if (this._egInit) return; // 防止同一节点被重复初始化
       this._egInit = true;
 
-      this.setSize([960, 760]);
-      setTimeout(function (node) {
-        return function () { if (!hideWidgets(node)) setTimeout(function () { hideWidgets(node); }, 500); };
-      }(this), 300);
+      if (!this.size || Number(this.size[0]) < 480 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
+      // Nodes 2.0 creates a Vue row for every native widget.  Hiding only in a
+      // delayed timer is too late: the row can already be mounted and keep its
+      // layout space until the workflow is reopened.  Hide the widgets before
+      // adding our DOM surface, then repeat for frontends that add inputs
+      // asynchronously.
+      hideWidgets(this);
+      var hideNodeRef = this;
+      setTimeout(function () { hideWidgets(hideNodeRef); }, 0);
+      setTimeout(function () { hideWidgets(hideNodeRef); }, 250);
+      setTimeout(function () { hideWidgets(hideNodeRef); }, 500);
 
       if (!document.getElementById("eg-style")) {
         var s = document.createElement("style"); s.id = "eg-style"; s.textContent = CSS; document.head.appendChild(s);
@@ -1007,17 +1198,29 @@ app.registerExtension({
       var el = document.createElement("div");
       el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;";
 
-      var widget = this.addDOMWidget("eagle_gallery", "div", el, { serialize: false, canvasOnly: true });
+      var INITIAL_VIEWPORT_HEIGHT = 600;
+      var MIN_VIEWPORT_HEIGHT = 300;
+      var currentViewportHeight = INITIAL_VIEWPORT_HEIGHT;
+      var MAX_VIEWPORT_HEIGHT = 4096;
+      var widget = this.addDOMWidget("eagle_gallery", "div", el, {
+        serialize: false, hideInPanel: true,
+        getMinHeight: function () { return MIN_VIEWPORT_HEIGHT; },
+        getMaxHeight: function () { return MAX_VIEWPORT_HEIGHT; },
+        getHeight: function () { return currentViewportHeight; },
+      });
       widget.width = undefined;
+      widget._eagleViewportHeight = INITIAL_VIEWPORT_HEIGHT;
 
       // Percent widths can stay pinned to a DOM widget's creation-time host width.
-      // Synchronize the real node width in pixels, without introducing a computeSize
-      // feedback loop that would make the node grow on each graph measurement.
+      // Keep the DOMWidget's inherited computeLayoutSize contract intact: ComfyUI
+      // can then allocate the remaining body height instead of treating this full
+      // preview as a fixed MIN_VIEWPORT_HEIGHT widget.
       var applyFrame = function (size) {
         var nodeWidth = Number(size && size[0]) || 960;
-        var nodeHeight = Number(size && size[1]) || 760;
         var w = Math.max(320, nodeWidth - 20);
-        var h = Math.max(400, nodeHeight - 100);
+        var h = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, (Number(size && size[1]) || 720) - 120));
+        currentViewportHeight = h;
+        widget._eagleViewportHeight = h;
         el.style.width = w + "px";
         el.style.height = h + "px";
         var host = el.parentElement;
@@ -1064,8 +1267,12 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function () {
       var result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
       var node = this;
+      hideWidgets(node);
+      setTimeout(function () { hideWidgets(node); }, 0);
+      setTimeout(function () { hideWidgets(node); }, 250);
       requestAnimationFrame(function () {
         node._egApplyFrame?.(node.size);
+        node._eagleRestoreSplitLayout?.();
         node._eagleRestoreUiState?.();
       });
       return result;
@@ -1078,6 +1285,7 @@ app.registerExtension({
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
       this._egApplyFrame = null;
       this._eagleRestoreUiState = null;
+      this._eagleRestoreSplitLayout = null;
       if (onRemoved) onRemoved.apply(this, arguments);
     };
   }

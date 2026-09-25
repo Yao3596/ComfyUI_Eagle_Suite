@@ -32,6 +32,8 @@ class EagleH3ReviewWorkspaceNode(EagleH3CheckpointReviewNode):
     @classmethod
     def INPUT_TYPES(cls):
         inputs = deepcopy(super().INPUT_TYPES())
+        # New base widgets must not consume old workflows' workspace_state JSON.
+        read_only = inputs.get("optional", {}).pop("read_only", None)
         inputs.setdefault("optional", {})["workspace_state"] = (
             "STRING",
             {"default": WORKSPACE_STATE_DEFAULT, "multiline": False},
@@ -46,6 +48,8 @@ class EagleH3ReviewWorkspaceNode(EagleH3CheckpointReviewNode):
                 "tooltip": "0 表示不覆盖；其他值必须满足 17k+5（5、22、39……）",
             },
         )
+        if read_only is not None:
+            inputs["optional"]["read_only"] = read_only
         return inputs
 
     async def execute(self, state, workspace_state=WORKSPACE_STATE_DEFAULT, **kwargs):

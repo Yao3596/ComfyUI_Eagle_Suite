@@ -11,23 +11,24 @@ const HIDDEN_WIDGETS = new Set([
 ]);
 
 const CSS = `
-.emte-root{box-sizing:border-box;width:100%;height:100%;min-height:620px;display:flex;flex-direction:column;gap:8px;padding:10px;
+.emte-root{box-sizing:border-box;width:100%;height:100%;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px;
  background:var(--eagle-vue-bg,#101116);color:var(--eagle-vue-text,#e4e7ee);font:12px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
 .emte-root.fullscreen{position:fixed!important;inset:12px!important;z-index:100000;width:auto!important;height:auto!important;border:1px solid #48556d;border-radius:10px;box-shadow:0 20px 70px #000}
 .emte-head,.emte-row,.emte-actions{display:flex;align-items:center;gap:7px}.emte-head{justify-content:space-between}.emte-title{font-weight:800;font-size:14px}
 .emte-status{color:#91a1b9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:620px}.emte-btn{height:29px;padding:0 9px;border:1px solid #354055;border-radius:5px;background:#202634;color:#e5e9f2;cursor:pointer}
 .emte-btn:hover{border-color:#3e98e8}.emte-btn.primary{background:#245a9b;border-color:#3d8ee1}.emte-btn.danger{color:#ffb4b4}.emte-btn:disabled{opacity:.45;cursor:not-allowed}
 .emte-drop{display:flex;align-items:center;justify-content:center;gap:10px;min-height:42px;border:1px dashed #3c6c91;border-radius:7px;background:#111a26;color:#9ec8ea}
-.emte-drop.hot{border-color:#42bff5;background:#14283b}.emte-main{display:grid;grid-template-columns:245px minmax(0,1fr);gap:8px;min-height:260px}
+.emte-drop.hot{border-color:#42bff5;background:#14283b}.emte-workspace{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}.emte-main{display:flex;min-width:0;min-height:150px;overflow:hidden}
+.emte-splitter-v{flex:0 0 8px;width:8px;cursor:col-resize;touch-action:none;user-select:none;border-left:1px solid #30394b;border-right:1px solid #30394b;background:#111827}.emte-splitter-h{flex:0 0 8px;height:8px;cursor:row-resize;touch-action:none;user-select:none;border-top:1px solid #30394b;border-bottom:1px solid #30394b;background:#111827}.emte-splitter-v:hover,.emte-splitter-h:hover,.emte-splitter-v:focus-visible,.emte-splitter-h:focus-visible{background:var(--eagle-vue-primary,#2f82db);outline:none}
 .emte-bin,.emte-panel,.emte-timeline,.emte-settings{border:1px solid #30394b;border-radius:7px;background:#151922;overflow:hidden}.emte-section-head{height:31px;display:flex;align-items:center;justify-content:space-between;padding:0 9px;border-bottom:1px solid #2c3545;font-weight:700}
-.emte-assets{height:255px;padding:7px;overflow:auto;display:flex;flex-direction:column;gap:5px}.emte-asset{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:7px;align-items:center;padding:6px;border:1px solid #303a4d;border-radius:5px;background:#1b2130;cursor:grab}
+.emte-bin{min-width:140px;display:flex;flex-direction:column}.emte-panel{flex:1;min-width:240px;display:flex;flex-direction:column}.emte-assets{flex:1;min-height:0;padding:7px;overflow:auto;display:flex;flex-direction:column;gap:5px}.emte-asset{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:7px;align-items:center;padding:6px;border:1px solid #303a4d;border-radius:5px;background:#1b2130;cursor:grab}
 .emte-asset.active{border-color:#3d91df}.emte-icon{width:28px;height:28px;display:grid;place-items:center;border-radius:4px;background:#29364b}.emte-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}.emte-meta{font-size:10px;color:#8f9bb0}
-.emte-preview-head{height:34px;display:flex;align-items:center;gap:7px;padding:0 8px;border-bottom:1px solid #2c3545;background:#111827}.emte-preview-head .emte-name{flex:1}.emte-player{height:220px;position:relative;display:grid;place-items:center;background-color:#070a0f;background-image:linear-gradient(45deg,#0d121b 25%,transparent 25%),linear-gradient(-45deg,#0d121b 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#0d121b 75%),linear-gradient(-45deg,transparent 75%,#0d121b 75%);background-size:24px 24px;background-position:0 0,0 12px,12px -12px,-12px 0}.emte-player video{width:100%;height:100%;object-fit:contain;background:#000}.emte-player audio{width:90%}.emte-player-empty{color:#7e899b;text-align:center}.emte-inspector{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;padding:7px;border-top:1px solid #2c3545}.emte-field{display:flex;flex-direction:column;gap:3px;min-width:0}.emte-field label{font-size:10px;color:#8e99ab}.emte-field input,.emte-field select{box-sizing:border-box;width:100%;height:28px;padding:3px 6px;border:1px solid #354055;border-radius:4px;background:#0e121a;color:#e4e8f0}
-.emte-timeline{flex:1;min-height:220px;display:flex;flex-direction:column}.emte-tl-head{height:35px;padding:0 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #2c3545;background:#111827}.emte-spacer{flex:1}.emte-scroll{overflow:auto;flex:1}.emte-canvas{position:relative;min-width:100%;min-height:180px}.emte-ruler,.emte-track{display:grid;grid-template-columns:64px minmax(0,1fr)}.emte-ruler{height:28px}.emte-track{height:50px;border-top:1px solid #293243}
+.emte-preview-head{height:34px;display:flex;align-items:center;gap:7px;padding:0 8px;border-bottom:1px solid #2c3545;background:#111827}.emte-preview-head .emte-name{flex:1}.emte-player{min-height:105px;flex:1;position:relative;display:grid;place-items:center;background-color:#070a0f;background-image:linear-gradient(45deg,#0d121b 25%,transparent 25%),linear-gradient(-45deg,#0d121b 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#0d121b 75%),linear-gradient(-45deg,transparent 75%,#0d121b 75%);background-size:24px 24px;background-position:0 0,0 12px,12px -12px,-12px 0}.emte-player video{width:100%;height:100%;object-fit:contain;background:#000}.emte-player audio{width:90%}.emte-player-empty{color:#7e899b;text-align:center}.emte-inspector{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;padding:7px;border-top:1px solid #2c3545}.emte-field{display:flex;flex-direction:column;gap:3px;min-width:0}.emte-field label{font-size:10px;color:#8e99ab}.emte-field input,.emte-field select{box-sizing:border-box;width:100%;height:28px;padding:3px 6px;border:1px solid #354055;border-radius:4px;background:#0e121a;color:#e4e8f0}
+.emte-timeline{flex:1;min-height:100px;display:flex;flex-direction:column}.emte-tl-head{height:35px;padding:0 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #2c3545;background:#111827}.emte-spacer{flex:1}.emte-scroll{overflow:auto;flex:1}.emte-canvas{position:relative;min-width:100%;min-height:180px}.emte-ruler,.emte-track{display:grid;grid-template-columns:64px minmax(0,1fr)}.emte-ruler{height:28px}.emte-track{height:50px;border-top:1px solid #293243}
 .emte-label{position:sticky;left:0;z-index:12;display:grid;place-items:center;border-right:1px solid #30394b;background:#111827;font-weight:750}.emte-label.audio{color:#f4d45c}.emte-lane{position:relative;min-width:0;background:#0c111b}.emte-ruler-lane{position:relative;background:#111827}.emte-tick{position:absolute;bottom:0;height:8px;border-left:1px solid #68768d}.emte-tick span{position:absolute;bottom:11px;left:3px;font:9px monospace;color:#aab4c5;white-space:nowrap}
 .emte-clip{position:absolute;top:5px;bottom:5px;min-width:18px;border:1px solid #438bcc;border-radius:5px;background:linear-gradient(180deg,#244b70,#193752);overflow:hidden;cursor:ew-resize}.emte-clip.audio{border-color:#169968;background:linear-gradient(180deg,#0b6548,#074732)}.emte-clip.selected{box-shadow:0 0 0 2px #62c4ff inset}.emte-frame-strip{position:absolute;inset:0;display:flex;opacity:.74}.emte-frame-strip img{min-width:0;width:1px;flex:1 1 0;object-fit:cover}.emte-clip-label{position:relative;z-index:2;display:block;height:100%;background:linear-gradient(90deg,rgba(4,10,18,.78),rgba(4,10,18,.08) 70%)}.emte-clip-title{display:block;padding:5px 6px 1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:700;text-shadow:0 1px 2px #000}.emte-clip-time{display:block;padding:0 6px;color:#d6e7f7;font-size:9px;text-shadow:0 1px 2px #000}.emte-drag-handle{position:absolute;right:3px;top:3px;z-index:4;padding:0 3px;border-radius:3px;background:#07101bcc;cursor:grab}.emte-playhead{position:absolute;top:0;bottom:0;width:2px;background:#ffd21f;z-index:9;pointer-events:none}.emte-playhead:before{content:"";position:absolute;top:0;left:-5px;border-left:6px solid transparent;border-right:6px solid transparent;border-top:7px solid #ffd21f}
 .emte-lane,.emte-ruler-lane{touch-action:none;cursor:ew-resize}.emte-settings{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;padding:8px;flex-shrink:0}.emte-hint{color:#7f8ca1;font-size:10px}.emte-toggle{display:flex;align-items:center;gap:5px;padding-top:6px}.emte-file{display:none}
-@media(max-width:850px){.emte-main{grid-template-columns:1fr}.emte-bin{display:none}.emte-settings{grid-template-columns:repeat(3,1fr)}.emte-inspector{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:850px){.emte-bin{min-width:120px}.emte-settings{grid-template-columns:repeat(3,1fr)}.emte-inspector{grid-template-columns:repeat(3,1fr)}}
 `;
 
 function installStyle() {
@@ -86,11 +87,17 @@ function previewFrameUrl(frame) {
   return api.apiURL(`/view?${query}`);
 }
 function hideWidgets(node) {
-  for (const widget of node.widgets || []) {
+  const widgets = node.widgets || [];
+  for (let index = 0; index < widgets.length; index++) {
+    const widget = widgets[index];
     if (!HIDDEN_WIDGETS.has(widget.name)) continue;
     widget.type = "hidden";
+    widget.hidden = true;
+    widget.options ||= {};
+    Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
     widget.computeSize = () => [0, -4];
     widget.draw = () => {};
+    widgets.splice(index, 1, widget);
   }
 }
 
@@ -129,6 +136,92 @@ const TimelineEditor = {
     const includeVideoAudio = ref(Boolean(widgetValue(node, "include_video_audio", true)));
     const frameStep = ref(finite(widgetValue(node, "frame_step", 1), 1));
     const maxFrames = ref(finite(widgetValue(node, "max_frames", 0), 0));
+    const binRatio = ref(0.25);
+    const mainRatio = ref(0.48);
+    let activeSplitCleanup = null;
+
+    function restoreSplitLayout() {
+      const savedSplit = node.properties?.eagle_media_timeline_split_layout || {};
+      binRatio.value = Math.max(0.16, Math.min(0.48, finite(savedSplit.bin_ratio, 0.25)));
+      mainRatio.value = Math.max(0.28, Math.min(0.74, finite(savedSplit.main_ratio, 0.48)));
+    }
+    restoreSplitLayout();
+
+    function persistSplitLayout(commit = false) {
+      node.properties ||= {};
+      node.properties.eagle_media_timeline_split_layout = {
+        version: 1,
+        bin_ratio: Number(binRatio.value.toFixed(5)),
+        main_ratio: Number(mainRatio.value.toFixed(5)),
+      };
+      node.setDirtyCanvas?.(true, true);
+      if (commit) node.graph?.change?.();
+    }
+
+    function stopSplitDrag() { activeSplitCleanup?.(); }
+
+    function beginSplit(event, axis, ratioRef, minRatio, maxRatio) {
+      if (event.pointerType !== "touch" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      stopSplitDrag();
+      const target = event.currentTarget;
+      const layout = target?.parentElement;
+      const rect = layout?.getBoundingClientRect?.();
+      const total = axis === "x" ? rect?.width : rect?.height;
+      if (!target || !rect || !Number.isFinite(total) || total < 1) return;
+      const pointerId = event.pointerId;
+      const start = axis === "x" ? event.clientX : event.clientY;
+      const startPixels = ratioRef.value * total;
+      const oldCursor = document.body.style.cursor;
+      const oldUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
+      document.body.style.userSelect = "none";
+      target.setPointerCapture?.(pointerId);
+      const move = moveEvent => {
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        const liveRect = layout.getBoundingClientRect();
+        const liveTotal = Math.max(1, axis === "x" ? liveRect.width : liveRect.height);
+        const delta = (axis === "x" ? moveEvent.clientX : moveEvent.clientY) - start;
+        ratioRef.value = Math.max(minRatio, Math.min(maxRatio, (startPixels + delta) / liveTotal));
+        persistSplitLayout(false);
+      };
+      const finish = finishEvent => {
+        if (finishEvent?.pointerId != null && finishEvent.pointerId !== pointerId) return;
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", finish);
+        target.removeEventListener("pointercancel", finish);
+        target.removeEventListener("lostpointercapture", finish);
+        if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
+        document.body.style.cursor = oldCursor;
+        document.body.style.userSelect = oldUserSelect;
+        if (activeSplitCleanup === finish) activeSplitCleanup = null;
+        persistSplitLayout(true);
+      };
+      activeSplitCleanup = finish;
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", finish);
+      target.addEventListener("pointercancel", finish);
+      target.addEventListener("lostpointercapture", finish);
+    }
+
+    const beginBinResize = event => beginSplit(event, "x", binRatio, 0.16, 0.48);
+    const beginMainResize = event => beginSplit(event, "y", mainRatio, 0.28, 0.74);
+    function nudgeBinResize(event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      binRatio.value = Math.max(0.16, Math.min(0.48, binRatio.value + (event.key === "ArrowRight" ? 0.02 : -0.02)));
+      persistSplitLayout(true);
+    }
+    function nudgeMainResize(event) {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      mainRatio.value = Math.max(0.28, Math.min(0.74, mainRatio.value + (event.key === "ArrowDown" ? 0.02 : -0.02)));
+      persistSplitLayout(true);
+    }
+    node._emteStopSplitDrag = stopSplitDrag;
+    node._emteRestoreSplitLayout = restoreSplitLayout;
 
     const assetsById = computed(() => Object.fromEntries(project.value.assets.map((asset) => [asset.id, asset])));
     const videoDuration = computed(() => project.value.video_clips.reduce((sum, clip) => sum + Math.max(0, finite(clip.out) - finite(clip.in)), 0));
@@ -544,7 +637,13 @@ const TimelineEditor = {
     }
     node._emteRestore = restore;
     node._emteExecuted = executed;
-    onBeforeUnmount(() => { delete node._emteRestore; delete node._emteExecuted; });
+    onBeforeUnmount(() => {
+      stopSplitDrag();
+      if (node._emteStopSplitDrag === stopSplitDrag) delete node._emteStopSplitDrag;
+      if (node._emteRestoreSplitLayout === restoreSplitLayout) delete node._emteRestoreSplitLayout;
+      delete node._emteRestore;
+      delete node._emteExecuted;
+    });
     Promise.resolve().then(() => loadAllFrameStrips());
     return {
       project, selected, fileInput, player, currentTime, renderedUrl, status, uploading, dropHot, fullscreen, zoom,
@@ -554,7 +653,7 @@ const TimelineEditor = {
       openFilePicker, startAssetDrag, dropOnTrack, dropTrack, addVideo, addAudio, selectClip, startClipDrag, reorderVideo, normalizeSelected, deleteSelected,
       duplicateSelected, splitAtPlayhead, removeAsset, beginSeek, dragSeek, endSeek, onPlayerLoaded, onPlayerTime,
       togglePlayback, returnToIn, loadAllFrameStrips, syncSize, persistSettings,
-      renderTimeline, toggleFullscreen,
+      renderTimeline, toggleFullscreen, binRatio, mainRatio, beginBinResize, beginMainResize, nudgeBinResize, nudgeMainResize,
     };
   },
   template: `
@@ -568,8 +667,9 @@ const TimelineEditor = {
         <span class="emte-hint">上传后自动加入 V1 或 A1，可从素材箱重复拖入轨道</span>
         <input ref="fileInput" class="emte-file" type="file" multiple accept="video/*,audio/*,.mkv,.m4v,.flac,.ogg,.opus" @change="uploadFiles($event.target.files)">
       </div>
-      <div class="emte-main">
-        <div class="emte-bin">
+      <div class="emte-workspace">
+      <div class="emte-main" :style="{flex:'0 0 '+(mainRatio*100).toFixed(3)+'%'}">
+        <div class="emte-bin" :style="{flex:'0 0 '+(binRatio*100).toFixed(3)+'%'}">
           <div class="emte-section-head"><span>素材箱 {{ project.assets.length }}</span><span class="emte-hint">拖入轨道</span></div>
           <div class="emte-assets">
             <div v-if="!project.assets.length" class="emte-player-empty" style="padding:35px 5px">暂无素材</div>
@@ -579,6 +679,7 @@ const TimelineEditor = {
             </div>
           </div>
         </div>
+        <div class="emte-splitter-v" role="separator" tabindex="0" aria-orientation="vertical" title="拖拽调整素材箱与预览区比例" @pointerdown="beginBinResize" @keydown="nudgeBinResize"></div>
         <div class="emte-panel">
           <div class="emte-preview-head">
             <span class="emte-name" :title="previewLabel">{{ previewLabel }}</span>
@@ -603,6 +704,7 @@ const TimelineEditor = {
           <div v-else class="emte-inspector"><span class="emte-hint" style="grid-column:1/-1">选择片段后编辑入点、出点、音量、淡入淡出；视频原声可独立关闭。</span></div>
         </div>
       </div>
+      <div class="emte-splitter-h" role="separator" tabindex="0" aria-orientation="horizontal" title="拖拽调整预览区与时间线比例" @pointerdown="beginMainResize" @keydown="nudgeMainResize"></div>
       <div class="emte-timeline">
         <div class="emte-tl-head"><b>时间线</b><span>{{ formatTime(timelineDuration) }}</span><span>播放头 {{ formatTime(currentTime) }}</span><button class="emte-btn" @click="splitAtPlayhead">✂ 切分</button><button class="emte-btn" @click="duplicateSelected" :disabled="!selectedClip">复制</button><button class="emte-btn danger" @click="deleteSelected" :disabled="!selectedClip">删除</button><span class="emte-spacer"></span><label>缩放 <input type="range" min="20" max="300" step="10" v-model.number="zoom"></label></div>
         <div class="emte-scroll">
@@ -613,14 +715,15 @@ const TimelineEditor = {
           </div>
         </div>
       </div>
+      </div>
       <div class="emte-settings">
-        <div class="emte-field"><label>输出内容</label><select v-model="outputMode" @change="persistSettings"><option value="video_audio">视频 + 音频（图像口首帧）</option><option value="video_audio_frames">视频 + 音频 + 全部帧</option><option value="frames">仅图像帧</option><option value="audio">仅音频</option></select></div>
+        <div class="emte-field"><label>输出内容</label><select v-model="outputMode" @change="persistSettings"><option value="video_audio">视频 + 音频（图像口首帧）</option><option value="video_audio_frames">视频 + 音频 + 图像帧</option><option value="frames">仅图像帧</option><option value="audio">仅音频</option></select></div>
         <div class="emte-field"><label>画布尺寸</label><select v-model="sizeMode" @change="persistSettings"><option value="follow_first">跟随首段</option><option value="custom">自定义</option></select></div>
         <div v-if="sizeMode==='custom'" class="emte-field"><label>宽度</label><input type="number" min="64" step="8" v-model.number="width" @change="syncSize('width')"></div>
         <div v-if="sizeMode==='custom'" class="emte-field"><label>高度</label><input type="number" min="64" step="8" v-model.number="height" @change="syncSize('height')"></div>
         <div class="emte-field"><label>适配方式</label><select v-model="fitMode" @change="persistSettings"><option value="contain">完整适应</option><option value="cover">填充裁剪</option><option value="stretch">拉伸</option></select></div>
         <div class="emte-field"><label>输出 FPS（0 跟随）</label><input type="number" min="0" max="240" step=".001" v-model.number="outputFps" @change="persistSettings"></div>
-        <div class="emte-field"><label>帧步长 / 最大帧</label><div class="emte-row"><input type="number" min="1" v-model.number="frameStep" @change="persistSettings"><input type="number" min="0" v-model.number="maxFrames" @change="persistSettings"></div></div>
+        <div class="emte-field"><label>帧步长 / 最大帧</label><div class="emte-row"><input type="number" min="1" v-model.number="frameStep" @change="persistSettings"><input type="number" min="0" v-model.number="maxFrames" title="0 为自动安全上限；帧输出还受内存预算限制" @change="persistSettings"></div></div>
         <div class="emte-field"><label>宽高比与原声</label><div class="emte-toggle"><label><input type="checkbox" v-model="lockRatio" @change="syncSize('width')">锁定</label><label><input type="checkbox" v-model="includeVideoAudio" @change="persistSettings">原声</label></div></div>
       </div>
     </div>
@@ -631,20 +734,46 @@ app.registerExtension({
   name: "EagleSuite.MediaTimelineEditor",
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "EagleMediaTimelineEditor") return;
+    const inputDefs = nodeData?.input || nodeData?.inputs;
+    for (const groupName of ["required", "optional"]) {
+      const group = inputDefs?.[groupName];
+      for (const name of HIDDEN_WIDGETS) {
+        const definition = group?.[name];
+        if (!Array.isArray(definition)) continue;
+        definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+      }
+    }
     const created = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const result = created?.apply(this, arguments);
       if (this._emteVue) return result;
       installStyle();
-      this.setSize([1020, 900]);
+      if (!this.size || Number(this.size[0]) < 520 || Number(this.size[1]) < 260) {
+        this.setSize([960, 720]);
+      }
+      hideWidgets(this);
       setTimeout(() => hideWidgets(this), 50);
       const element = document.createElement("div");
-      element.style.cssText = "box-sizing:border-box;width:1000px;height:790px;overflow:hidden";
-      const widget = this.addDOMWidget("media_timeline_editor", "div", element, { serialize: false, canvasOnly: true, hideOnZoom: false });
+      element.style.cssText = "box-sizing:border-box;width:940px;height:100%;overflow:hidden";
+      const TIMELINE_MIN_VIEWPORT_HEIGHT = 320;
+      const TIMELINE_DEFAULT_VIEWPORT_HEIGHT = 610;
+      let currentViewportHeight = TIMELINE_DEFAULT_VIEWPORT_HEIGHT;
+      const MAX_VIEWPORT_HEIGHT = 4096;
+      const widget = this.addDOMWidget("media_timeline_editor", "div", element, {
+        serialize: false, hideInPanel: true, hideOnZoom: false,
+        getMinHeight: () => TIMELINE_MIN_VIEWPORT_HEIGHT,
+        getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
+        getHeight: () => currentViewportHeight,
+      });
       widget.width = undefined;
+      widget._eagleViewportHeight = TIMELINE_DEFAULT_VIEWPORT_HEIGHT;
+      // Keep DOMWidgetImpl.computeLayoutSize inherited so the timeline is a
+      // growable body widget instead of a fixed 320px slot.
       const applyFrame = (size) => {
-        element.style.width = `${Math.max(760, finite(size?.[0], 1020) - 20)}px`;
-        element.style.height = `${Math.max(620, finite(size?.[1], 900) - 110)}px`;
+        currentViewportHeight = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(TIMELINE_MIN_VIEWPORT_HEIGHT, finite(size?.[1], 720) - 110));
+        widget._eagleViewportHeight = currentViewportHeight;
+        element.style.width = `${Math.max(520, finite(size?.[0], 960) - 20)}px`;
+        element.style.height = `${currentViewportHeight}px`;
       };
       applyFrame(this.size);
       this._emteApplyFrame = applyFrame;
@@ -657,12 +786,18 @@ app.registerExtension({
     const configured = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function () {
       const result = configured?.apply(this, arguments);
+      this._emteRestoreSplitLayout?.();
       setTimeout(() => { hideWidgets(this); this._emteApplyFrame?.(this.size); this._emteRestore?.(); }, 0);
       return result;
     };
     const executed = nodeType.prototype.onExecuted;
     nodeType.prototype.onExecuted = function (data) { executed?.apply(this, arguments); this._emteExecuted?.(data); };
     const removed = nodeType.prototype.onRemoved;
-    nodeType.prototype.onRemoved = function () { this._emteVue?.unmount?.(); this._emteVue = null; return removed?.apply(this, arguments); };
+    nodeType.prototype.onRemoved = function () {
+      this._emteStopSplitDrag?.();
+      this._emteVue?.unmount?.();
+      this._emteVue = null;
+      return removed?.apply(this, arguments);
+    };
   },
 });

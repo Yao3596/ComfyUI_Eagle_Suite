@@ -2,6 +2,8 @@ import { app } from "../../../scripts/app.js";
 
 const NODE_NAME = "EagleLocalLLMNode";
 const LOCAL_WIDGETS = new Set(["model_path", "device", "dtype"]);
+const SYSTEM_PROMPT_INPUT = "system_prompt";
+const CUSTOM_SYSTEM_TEMPLATE = "custom";
 
 function hasLink(node, inputName) {
   const input = (node.inputs || []).find((slot) => slot && slot.name === inputName);
@@ -49,6 +51,40 @@ function setWidgetDisabled(widget, disabled) {
     : widget.name;
 }
 
+function switchConnectedSystemPromptToCustom(node) {
+  if (!hasLink(node, SYSTEM_PROMPT_INPUT)) return false;
+  const widget = (node.widgets || []).find((item) => item && item.name === "system_template");
+  if (!widget || widget.value === CUSTOM_SYSTEM_TEMPLATE) return false;
+
+  widget.value = CUSTOM_SYSTEM_TEMPLATE;
+  try {
+    widget.callback?.(CUSTOM_SYSTEM_TEMPLATE, widget, node);
+  } catch (error) {
+    console.error("[Eagle Suite] system_template callback failed", error);
+  }
+  // Mark the automatic semantic change exactly once. Merely refreshing the
+  // node or disconnecting system_prompt must not rewrite user state.
+  node.graph?.change?.();
+  node.setDirtyCanvas?.(true, true);
+  node.graph?.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+function isSystemPromptConnectEvent(node, args) {
+  const index = Number(args && args[1]);
+  const connected = Boolean(args && args[2]);
+  const linkInfo = args && args[3];
+  if (!connected || !Number.isInteger(index)) return false;
+  const input = (node.inputs || [])[index];
+  if (!input || input.name !== SYSTEM_PROMPT_INPUT) return false;
+  // LiteGraph reports the callback on both endpoints. If link metadata is
+  // available, only treat the target endpoint as an input connection.
+  if (linkInfo && linkInfo.target_id != null && node.id != null && String(linkInfo.target_id) !== String(node.id)) {
+    return false;
+  }
+  return true;
+}
+
 function refreshModelSource(node) {
   const state = sourceState(node);
   (node.widgets || []).forEach((widget) => setWidgetDisabled(widget, state.external));
@@ -71,14 +107,25 @@ app.registerExtension({
     const configured = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function () {
       const result = configured?.apply(this, arguments);
-      setTimeout(() => refreshModelSource(this), 0);
+      setTimeout(() => {
+        // Existing workflows can already contain the input link while still
+        // carrying the old image_expert default.
+        switchConnectedSystemPromptToCustom(this);
+        refreshModelSource(this);
+      }, 0);
       return result;
     };
 
     const connectionsChanged = nodeType.prototype.onConnectionsChange;
     nodeType.prototype.onConnectionsChange = function () {
       const result = connectionsChanged?.apply(this, arguments);
-      setTimeout(() => refreshModelSource(this), 0);
+      const connectionArgs = Array.from(arguments);
+      setTimeout(() => {
+        if (isSystemPromptConnectEvent(this, connectionArgs)) {
+          switchConnectedSystemPromptToCustom(this);
+        }
+        refreshModelSource(this);
+      }, 0);
       return result;
     };
 

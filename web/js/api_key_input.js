@@ -1,10 +1,11 @@
 /**
  * Eagle API Key Input - 密码输入控件与 API 配置加载器前端
- * - EagleAPIKeyNode: 密码输入，ENC:Base64 混淆存储
+ * - EagleAPIKeyNode: 运行时密码输入；旧版 ENC:Base64 工作流仍可读取
  * - EagleAPILoader: 从唯一的 api_config.json 统一管理大语言/生图 API 模型
  */
 
 import { app } from "../../../scripts/app.js";
+import { redactSecretWidgetFromWorkflow } from "./workflow_secret_redaction.js";
 
 // ── 混淆工具（Base64，防止明文直接暴露）─────────────────────────
 const _ENC_PREFIX = 'ENC:'
@@ -733,21 +734,29 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData, app) {
     // ── EagleAPIKeyNode：密码输入控件 ────────────────────────
     if (nodeData.name === 'EagleAPIKeyNode') {
+      const inputDefs = nodeData?.input || nodeData?.inputs
+      for (const groupName of ['required', 'optional']) {
+        const definition = inputDefs?.[groupName]?.api_key
+        if (!Array.isArray(definition)) continue
+        definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: 'never', hideInPanel: true }
+      }
       const onConfigure = nodeType.prototype.onConfigure
-      nodeType.prototype.onConfigure = function (widgets_values) {
-        let decoded_values = widgets_values
-        if (Array.isArray(widgets_values) && widgets_values.length > 0) {
-          decoded_values = [...widgets_values]
-          decoded_values[0] = _decodeKey(widgets_values[0])
-        }
-        onConfigure?.apply(this, [decoded_values])
+      nodeType.prototype.onConfigure = function (info) {
+        const w = this.widgets?.find(w => w.name === 'api_key')
+        const idx = w ? this.widgets.indexOf(w) : -1
+        const saved = info?.widgets_values_named?.api_key
+          ?? (idx >= 0 ? info?.widgets_values?.[idx] : undefined)
+        const result = onConfigure?.apply(this, arguments)
 
-        const plain = (decoded_values?.[0] || '').trim()
-        if (plain) {
-          const w = this.widgets?.find(w => w.name === 'api_key')
-          if (w) w.value = plain
-          if (this._eagleKeyInput) this._eagleKeyInput.value = plain
+        const restoreLegacyKey = () => {
+          const value = saved ?? w?.value
+          const plain = typeof value === 'string' ? _decodeKey(value).trim() : ''
+          if (plain && w) w.value = plain
+          if (plain && this._eagleKeyInput) this._eagleKeyInput.value = plain
         }
+        restoreLegacyKey()
+        queueMicrotask(restoreLegacyKey)
+        return result
       }
 
       const origNodeCreated = nodeType.prototype.onNodeCreated
@@ -759,24 +768,22 @@ app.registerExtension({
         if (originalWidget) {
           originalWidget.type = 'hidden'
           originalWidget.computeSize = () => [0, -4]
+          originalWidget.hidden = true
+          originalWidget.options ||= {}
+          Object.assign(originalWidget.options, { hidden: true, vueNode: 'never', hideInPanel: true })
+          const widgetIndex = node.widgets?.indexOf(originalWidget) ?? -1
+          if (widgetIndex >= 0) node.widgets.splice(widgetIndex, 1, originalWidget)
         }
 
         const origSerialize = node.serialize?.bind(node)
         node.serialize = function () {
           const data = origSerialize ? origSerialize() : {}
-          if (data.widgets_values && originalWidget) {
-            const idx = node.widgets.indexOf(originalWidget)
-            if (idx >= 0) {
-              // Credentials are runtime-only and must never enter exported workflows.
-              data.widgets_values[idx] = ''
-            }
-          }
-          return data
+          // Credentials are runtime-only and must never enter exported workflows.
+          return redactSecretWidgetFromWorkflow(data, node, originalWidget)
         }
 
         const container = document.createElement('div')
-        container.style.cssText = 'position:absolute;pointer-events:auto;z-index:10;'
-        document.body.appendChild(container)
+        container.style.cssText = 'box-sizing:border-box;width:100%;min-height:36px;padding:2px 8px;pointer-events:auto;'
 
         const ip = document.createElement('input')
         ip.type = 'password'
@@ -802,30 +809,13 @@ app.registerExtension({
           if (originalWidget) originalWidget.value = val
         })
 
-        const posWidget = {
-          type: 'custom_password',
-          name: 'api_key_display',
-          computeSize: () => [200, 36],
-          draw(ctx, node, widget_width, y, widget_height) {
-            const canvas = app.canvas
-            const rect = canvas.canvas.getBoundingClientRect()
-            const transform = canvas.ds
-            const scale = transform.scale
-            const offsetX = transform.offset[0]
-            const offsetY = transform.offset[1]
-            const screenX = rect.left + (node.pos[0] + offsetX) * scale + 8 * scale
-            const screenY = rect.top  + (node.pos[1] + y + offsetY) * scale
-            Object.assign(container.style, {
-              left:   `${screenX}px`,
-              top:    `${screenY}px`,
-              width:  `${(widget_width - 16) * scale}px`,
-              height: `${widget_height * scale}px`,
-            })
-            ip.style.fontSize = `${12 * scale}px`
-          },
-        }
-
-        node.addCustomWidget(posWidget)
+        // The classic canvas calls custom widget.draw(), but Nodes 2.0 renders
+        // the node body through Vue and does not position document.body overlays
+        // with that callback. A node-owned DOM widget works in both renderers.
+        node.addDOMWidget('eagle_api_key_input', 'div', container, {
+          serialize: false,
+          hideInPanel: true,
+        })
 
         const onRemoved = node.onRemoved
         node.onRemoved = () => {

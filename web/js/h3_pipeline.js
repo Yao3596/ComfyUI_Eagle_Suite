@@ -46,6 +46,8 @@ const H3C_CSS = `
 .h3c-root.compact{padding:5px;}
 .h3c-root.compact .h3c-card{padding:7px;gap:4px;}
 .h3c-root.review .h3c-video{display:block;max-height:220px;object-fit:contain;}
+.h3c-root.review{overflow-y:auto;}
+.h3c-root.review>.h3c-root{flex-shrink:0;height:auto;overflow:visible;}
 .h3c-review-history{display:flex;gap:5px;overflow-x:auto;padding:2px 0 4px;scrollbar-width:thin;}
 .h3c-review-take{flex:0 0 auto;min-width:64px;padding:4px 8px;}
 .h3c-review-take.active{background:var(--h3c-primary);border-color:var(--h3c-primary);color:#fff;}
@@ -75,18 +77,24 @@ function setWidgetValue(node, name, value) {
   if (w) w.value = value;
 }
 
+const REVIEW_HIDDEN_WIDGETS = [
+  "review_decision", "retry_prompt", "retry_seed", "retry_length",
+  "resume_scene", "assemble_partial_on_stop", "auto_continue_timeout_minutes",
+  "unload_models_while_waiting",
+];
+
 function hideReviewDecisionWidget(node) {
   let found = false;
-  for (const name of [
-    "review_decision", "retry_prompt", "retry_seed", "retry_length",
-    "resume_scene", "assemble_partial_on_stop", "auto_continue_timeout_minutes",
-    "unload_models_while_waiting",
-  ]) {
+  for (const name of REVIEW_HIDDEN_WIDGETS) {
     const widget = getWidget(node, name);
     if (!widget) continue;
     widget.type = "hidden";
     widget.hidden = true;
+    widget.options ||= {};
+    Object.assign(widget.options, { hidden: true, vueNode: "never", hideInPanel: true });
     widget.computeSize = () => [0, -4];
+    const widgetIndex = node.widgets?.indexOf(widget) ?? -1;
+    if (widgetIndex >= 0) node.widgets.splice(widgetIndex, 1, widget);
     found = true;
   }
   return found;
@@ -102,8 +110,8 @@ function resizeReviewPanel(node, vueApp, review = {}) {
   const hasHistory = (review.history || []).length > 1;
   const hasActions = Boolean(review.awaiting_review);
   const panelHeight = hasPreview
-    ? (hasActions ? (hasHistory ? 560 : 520) : (hasHistory ? 330 : 290))
-    : (hasActions ? 335 : 115);
+    ? (hasActions ? (hasHistory ? 730 : 690) : (hasHistory ? 440 : 400))
+    : (hasActions ? 470 : 185);
   const nodeHeight = panelHeight + 225;
   widget._h3cHeight = panelHeight;
 
@@ -295,6 +303,11 @@ function createReviewPanel(node) {
     setup() {
       const review = ref({});
       const busy = ref(false);
+      const decisionError = ref("");
+      const loadingHistory = ref(false);
+      const historyError = ref("");
+      const availableRuns = ref([]);
+      const selectedRun = ref(node.properties?.h3_review_run || "");
       const selectedIndex = ref(-1);
       const retryPrompt = ref("");
       const retrySeed = ref(-1);
@@ -320,7 +333,56 @@ function createReviewPanel(node) {
         return `场景 ${Number(take.index || 0) + 1} · r${String(Number(take.revision || 1)).padStart(4, "0")}`;
       });
 
+      async function loadHistory() {
+        if (review.value.awaiting_review || loadingHistory.value) return;
+        loadingHistory.value = true;
+        historyError.value = "";
+        node._h3cHistoryAbort?.abort();
+        const controller = new AbortController();
+        node._h3cHistoryAbort = controller;
+        const before = review.value;
+        try {
+          const response = await api.fetchApi('/eagle_h3_pipeline/runs', { signal: controller.signal });
+          if (!response.ok) throw new Error(`历史运行读取失败 (${response.status})`);
+          availableRuns.value = (await response.json()).runs || [];
+          if (!selectedRun.value) {
+            const director = findUpstreamNode(node, 'EagleH3DirectorNode');
+            const start = findUpstreamNode(node, 'EagleH3NativeLoopStartNode');
+            try {
+              selectedRun.value = getWidget(start || {}, 'run_name_override')?.value
+                || JSON.parse(director?._h3ContextLoopPlanJson?.() || '{}').run_name
+                || (director ? 'eagle_h3_director' : '');
+            } catch { /* The editor may be mounting. */ }
+          }
+          if (!selectedRun.value || !availableRuns.value.some(r => r.run_name === selectedRun.value)) return;
+          const result = await api.fetchApi(`/eagle_h3_pipeline/manifest?run=${encodeURIComponent(selectedRun.value)}`, { signal: controller.signal });
+          if (!result.ok) throw new Error(`检查点读取失败 (${result.status})`);
+          const manifest = await result.json();
+          // A live execution event wins over an older asynchronous disk read.
+          if (review.value !== before) return;
+          const rows = (manifest.shots || []).flatMap(item => (item.revisions?.length ? item.revisions : [item]).map(take => ({
+            ...take, index: Number(item.index || 0), clip_path: take.clip || item.clip || '',
+            revision: Number(take.revision || item.active_revision || 1),
+          }))).filter(take => take.clip_path).sort((a, b) => a.index - b.index || a.revision - b.revision);
+          applyReviewPayload(node, { run_name: manifest.run_name, current_index: manifest.current_index,
+            restored_history: true,
+            clip_count: manifest.total_shots, mode: manifest.mode, history: rows,
+            preview_clip: rows.at(-1)?.clip_path || '', awaiting_review: false,
+            summary: `已保存 ${new Set(rows.map(take => take.index)).size} / ${manifest.total_shots || 0} 场景 · ${rows.length} 个版本（磁盘历史）`,
+          });
+        } catch (error) {
+          if (error.name !== 'AbortError') historyError.value = error.message;
+        } finally { loadingHistory.value = false; }
+      }
+
       async function decide(decision) {
+        if (busy.value) return;
+        decisionError.value = "";
+        const length = Number(retryLength.value || 0);
+        if (!Number.isInteger(length) || length < 0 || length > 3592 || (length !== 0 && (length < 5 || (length - 5) % 17 !== 0))) {
+          decisionError.value = 'H3 帧长需要为 0 或 17k+5（5、22、39…3592）';
+          return;
+        }
         busy.value = true;
         setWidgetValue(node, "retry_prompt", retryPrompt.value || "");
         setWidgetValue(node, "retry_seed", Number(retrySeed.value ?? -1));
@@ -354,9 +416,12 @@ function createReviewPanel(node) {
               },
             );
             if (!response.ok) throw new Error(await response.text());
+            if ((await response.json()).resolved !== true) throw new Error('审片等待已结束，请等待最新执行状态');
             return;
           } catch (error) {
-            console.warn("[EagleH3Pipeline] live review resume failed; falling back to queue", error);
+            decisionError.value = error.message;
+            busy.value = false;
+            return;
           }
         }
         setWidgetValue(node, "review_decision", decision);
@@ -365,7 +430,8 @@ function createReviewPanel(node) {
       }
 
       return {
-        review, busy, history, selectedIndex, selectedTake, selectedLabel, previewUrl,
+        review, busy, decisionError, history, selectedIndex, selectedTake, selectedLabel, previewUrl,
+        availableRuns, selectedRun, loadingHistory, historyError, loadHistory,
         retryPrompt, retrySeed, retryLength, assemblePartial, timeoutMinutes, unloadModels, decide,
       };
     },
@@ -373,6 +439,15 @@ function createReviewPanel(node) {
       <div class="h3c-root">
         <div class="h3c-card">
           <div class="h3c-title">🦅 H3 链 · 审查门</div>
+          <div class="h3c-row">
+            <select class="h3c-input" v-model="selectedRun" @change="loadHistory" :disabled="review.awaiting_review">
+              <option value="">选择历史运行</option>
+              <option v-for="run in availableRuns" :key="run.run_name" :value="run.run_name">{{ run.run_name }}</option>
+            </select>
+            <button class="h3c-btn" @click="loadHistory" :disabled="loadingHistory || review.awaiting_review">{{ loadingHistory ? '读取中…' : '刷新历史片段' }}</button>
+          </div>
+          <div v-if="historyError" class="h3c-muted" role="alert">{{ historyError }}</div>
+          <div v-if="decisionError" class="h3c-muted" role="alert">{{ decisionError }}</div>
           <div class="h3c-row">
             <span class="h3c-muted">{{ selectedLabel }}</span>
             <span class="h3c-muted" v-if="review.clip_count">累计预览: {{ history.length }} / {{ review.clip_count }}</span>
@@ -387,7 +462,7 @@ function createReviewPanel(node) {
             </button>
           </div>
           <div v-if="previewUrl" style="margin:6px 0;">
-            <video class="h3c-video" :src="previewUrl" controls></video>
+            <video class="h3c-video" :src="previewUrl" controls playsinline preload="metadata"></video>
           </div>
           <div v-else class="h3c-muted">等待预览视频…</div>
           <div v-if="review.summary" class="h3c-muted">{{ review.summary }}</div>
@@ -396,7 +471,7 @@ function createReviewPanel(node) {
             <textarea class="h3c-textarea" v-model="retryPrompt" placeholder="当前镜头提示词"></textarea>
             <div class="h3c-row">
               <label class="h3c-muted">种子 <input class="h3c-input" type="number" v-model.number="retrySeed"></label>
-              <label class="h3c-muted">length <input class="h3c-input" type="number" min="5" max="3592" step="17" v-model.number="retryLength"></label>
+              <label class="h3c-muted">length <input class="h3c-input" type="number" min="0" max="3592" step="1" v-model.number="retryLength"></label>
               <label class="h3c-muted"><input type="checkbox" v-model="assemblePartial"> 停止时合成已批准片段</label>
               <label class="h3c-muted">自动通过(分) <input class="h3c-input" type="number" min="0" step="0.5" v-model.number="timeoutMinutes"></label>
               <label class="h3c-muted"><input type="checkbox" v-model="unloadModels"> 等待时卸载模型</label>
@@ -418,15 +493,37 @@ function createReviewPanel(node) {
   };
 }
 
+function unwrapUiPayload(value) {
+  if (Array.isArray(value)) return value.findLast(item => item && typeof item === 'object' && !Array.isArray(item)) || null;
+  return value && typeof value === 'object' ? value : null;
+}
+
 function applyReviewPayload(node, payload) {
-  const view = node?._h3cVueApp?._instance?.data;
+  payload = unwrapUiPayload(payload);
+  const view = node?._h3cVueApp?._h3cView;
   if (!view || !payload) return;
-  view.busy.value = false;
-  view.review.value = payload;
+  view.busy = false;
+  view.review = payload;
+  if (!payload.restored_history) {
+    const start = findUpstreamNode(node, 'EagleH3NativeLoopStartNode');
+    const startView = start?._h3cVueApp?._h3cView;
+    if (startView) startView.info = { ...startView.info,
+      run_name: payload.run_name, mode: payload.mode,
+      total_shots: payload.clip_count,
+      current_index: payload.current_index,
+      completed_shots: new Set((payload.history || []).filter(take => take.decision === 'approved').map(take => take.index)).size,
+      summary: payload.awaiting_review ? '当前场景已生成，等待审片决策' : payload.summary,
+    };
+  }
+  if (payload.run_name) {
+    node.properties ||= {};
+    node.properties.h3_review_run = payload.run_name;
+    view.selectedRun = payload.run_name;
+  }
   if (payload.awaiting_review) {
-    view.retryPrompt.value = payload.prompt || "";
-    view.retrySeed.value = Number(payload.seed ?? -1);
-    view.retryLength.value = Number(payload.length || 0);
+    view.retryPrompt = payload.prompt || "";
+    view.retrySeed = Number(payload.seed ?? -1);
+    view.retryLength = Number(payload.length || 0);
   }
   if (payload.reset_decision) {
     setWidgetValue(node, "review_decision", "");
@@ -442,16 +539,15 @@ function installLiveReviewEvent() {
   api.addEventListener("eagle_h3_review_pending", event => {
     const payload = event?.detail || {};
     const rawId = String(payload.node_id || "");
-    let node = rawId && app.graph?.getNodeById?.(Number(rawId));
-    if (!node) {
+    const displayId = rawId.split(/[.:/]/).filter(Boolean).at(-1);
+    let node = displayId && app.graph?.getNodeById?.(Number(displayId));
+    if (!rawId) {
       const candidates = (app.graph?._nodes || []).filter(
         item => item.type === "EagleH3CheckpointReviewNode"
       );
-      node = candidates.length === 1 ? candidates[0] : candidates.find(
-        item => String(item.id) === rawId || rawId.endsWith(`.${item.id}`)
-      );
+      node = candidates.length === 1 ? candidates[0] : null;
     }
-    if (node) applyReviewPayload(node, payload);
+    if (node?.type === "EagleH3CheckpointReviewNode") applyReviewPayload(node, payload);
   });
 }
 
@@ -509,12 +605,22 @@ function createSeamPanel() {
 function mountVueWidget(node, componentFactory, key, options = {}) {
   injectCSS();
   const el = document.createElement("div");
+  el.dataset.h3NodeId = String(node.id);
   el.className = "h3c-root" + (options.className ? " " + options.className : "");
   const vueApp = createApp(componentFactory(node));
-  vueApp.mount(el);
-  const widget = node.addDOMWidget(`h3c_${key}_ui`, "div", el, { serialize: false, canvasOnly: true });
+  // mount() returns the supported public proxy; setup refs are unwrapped here.
+  // Production Vue does not expose app._instance and setup() is not data().
+  vueApp._h3cView = vueApp.mount(el);
+  const viewportHeight = options.height || 190;
+  const widget = node.addDOMWidget(`h3c_${key}_ui`, "div", el, {
+    serialize: false,
+    hideInPanel: true,
+    getMinHeight: () => viewportHeight,
+    getMaxHeight: () => viewportHeight,
+    getHeight: () => viewportHeight,
+  });
   widget.width = undefined;
-  widget._h3cHeight = options.height || 190;
+  widget._h3cHeight = viewportHeight;
   widget.computeSize = function (width) {
     return [Math.max(280, width || (node.size && node.size[0]) || 320), widget._h3cHeight];
   };
@@ -536,6 +642,10 @@ function mountVueWidget(node, componentFactory, key, options = {}) {
   }
   const oldRemoved = node.onRemoved;
   node.onRemoved = function () {
+    node._h3cHistoryAbort?.abort();
+    for (const video of el.querySelectorAll('video')) {
+      video.pause(); video.removeAttribute('src'); video.load();
+    }
     try { vueApp.unmount(); } catch (_) {}
     if (oldRemoved) oldRemoved.apply(this, arguments);
   };
@@ -706,8 +816,8 @@ function syncNativeLoopStartInfo(director) {
   const graph = director?.graph;
   const start = uniqueNode(graph, "EagleH3NativeLoopStartNode");
   const exporter = director?._h3ContextLoopPlanJson;
-  const infoRef = start?._h3cVueApp?._instance?.data?.info;
-  if (!(start && infoRef && typeof exporter === "function")) return false;
+  const view = start?._h3cVueApp?._h3cView;
+  if (!(start && view && typeof exporter === "function")) return false;
   let mirror;
   try {
     mirror = JSON.parse(String(exporter() || "{}"));
@@ -716,9 +826,9 @@ function syncNativeLoopStartInfo(director) {
     return false;
   }
   const total = Array.isArray(mirror.shots) ? mirror.shots.length : 0;
-  const old = infoRef.value || {};
+  const old = view.info || {};
   const running = old.run_name || old.base_dir;
-  infoRef.value = {
+  view.info = {
     ...old,
     current_index: running ? Number(old.current_index || 0) : 0,
     completed_shots: running ? Number(old.completed_shots || 0) : 0,
@@ -1128,6 +1238,18 @@ function graphLink(graph, linkId) {
     (graph._links && graph._links[linkId]) || null;
 }
 
+function findUpstreamNode(node, type, visited = new Set()) {
+  if (!node || visited.has(String(node.id))) return null;
+  visited.add(String(node.id));
+  if (node.type === type) return node;
+  for (const input of node.inputs || []) {
+    const link = graphLink(node.graph, input.link);
+    const found = link && findUpstreamNode(node.graph.getNodeById(link.origin_id), type, visited);
+    if (found) return found;
+  }
+  return null;
+}
+
 /**
  * 旧节点端口按开发顺序交错排列。加载旧工作流时按名称语义重连到 V2，
  * 不依赖旧索引，也不要求用户手工重接已有链路。
@@ -1190,11 +1312,26 @@ app.registerExtension({
       installContextLoopPlanSync(uniqueNode(app.graph, "EagleH3DirectorNode"));
       repairContextLoopAuthoringLinks(app.graph, { onlyIfEmpty: true, createMissing: true });
       repairContextLoopReferenceLinks(app.graph);
+      for (const node of app.graph?._nodes || []) {
+        if (node.type === 'EagleH3CheckpointReviewNode') node._h3cVueApp?._h3cView?.loadHistory();
+      }
     }, 0);
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     const name = nodeData.name;
     installCoreQuickAdd(nodeType, nodeData);
+
+    if (name === "EagleH3CheckpointReviewNode") {
+      const inputDefs = nodeData?.input || nodeData?.inputs;
+      for (const groupName of ["required", "optional"]) {
+        const group = inputDefs?.[groupName];
+        for (const widgetName of REVIEW_HIDDEN_WIDGETS) {
+          const definition = group?.[widgetName];
+          if (!Array.isArray(definition)) continue;
+          definition[1] = { ...(definition[1] || {}), hidden: true, vueNode: "never", hideInPanel: true };
+        }
+      }
+    }
 
     if (name === "EagleH3ReferenceConditionNode") {
       const _configured = nodeType.prototype.onConfigure;
@@ -1236,7 +1373,7 @@ app.registerExtension({
       nodeType.prototype.onExecuted = function (data) {
         if (_exec) _exec.apply(this, arguments);
         if (this._h3cVueApp && data && data.h3_plan) {
-          this._h3cVueApp._instance.data.info.value = data.h3_plan;
+          this._h3cVueApp._h3cView.info = unwrapUiPayload(data.h3_plan) || this._h3cVueApp._h3cView.info;
         }
       };
     }
@@ -1254,7 +1391,7 @@ app.registerExtension({
       nodeType.prototype.onExecuted = function (data) {
         if (_exec) _exec.apply(this, arguments);
         if (this._h3cVueApp && data && data.h3_start) {
-          this._h3cVueApp._instance.data.info.value = data.h3_start;
+          this._h3cVueApp._h3cView.info = unwrapUiPayload(data.h3_start) || this._h3cVueApp._h3cView.info;
         }
       };
     }
@@ -1276,7 +1413,6 @@ app.registerExtension({
         const r = _configured ? _configured.apply(this, arguments) : undefined;
         setTimeout(() => {
           repairNativeEndWidgets(this);
-          if (this.size && this.size[1] > 410) this.setSize([Math.max(390, this.size[0]), 330]);
         }, 0);
         return r;
       };
@@ -1284,7 +1420,7 @@ app.registerExtension({
       nodeType.prototype.onExecuted = function (data) {
         if (_exec) _exec.apply(this, arguments);
         if (this._h3cVueApp && data && data.h3_native_loop) {
-          this._h3cVueApp._instance.data.loop.value = data.h3_native_loop;
+          this._h3cVueApp._h3cView.loop = unwrapUiPayload(data.h3_native_loop) || this._h3cVueApp._h3cView.loop;
         }
       };
     }
@@ -1310,7 +1446,7 @@ app.registerExtension({
         const r = _configured ? _configured.apply(this, arguments) : undefined;
         setTimeout(() => {
           hideReviewDecisionWidget(this);
-          const review = this._h3cVueApp?._instance?.data?.review?.value || {};
+          const review = this._h3cVueApp?._h3cView?.review || {};
           resizeReviewPanel(this, this._h3cVueApp, review);
         }, 0);
         return r;
@@ -1339,7 +1475,7 @@ app.registerExtension({
       nodeType.prototype.onExecuted = function (data) {
         if (_exec) _exec.apply(this, arguments);
         if (this._h3cVueApp && data) {
-          this._h3cVueApp._instance.data.data.value = data;
+          this._h3cVueApp._h3cView.data = data;
         }
       };
     }

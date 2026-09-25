@@ -66,6 +66,29 @@ assert.match(adapterSource, /new AbortController\(\)/);
 assert.match(adapterSource, /removeAttribute\("src"\)/);
 assert.match(adapterSource, /_eagleH3ResolvedToken/);
 
+const routingContract = adapterSource.match(
+  /\/\* ROUTING_CONTRACT_START \*\/[\s\S]*?\/\* ROUTING_CONTRACT_END \*\//,
+)?.[0]
+  .replace(/\/\* ROUTING_CONTRACT_(?:START|END) \*\//g, "")
+  .replace(/export\s+/g, "");
+assert.ok(routingContract, "review adapter routing contract must remain extractable");
+const routing = new Function(
+  `${routingContract}; return { terminalDisplayNodeId, payloadMatches, reviewRecoveryUrl };`,
+)();
+assert.equal(routing.terminalDisplayNodeId("29.0.0.86"), "86");
+assert.equal(routing.payloadMatches({ id: 86 }, { node_id: "29.0.0.86" }), true);
+assert.equal(routing.payloadMatches({ id: 28 }, { node_id: "29.0.0.86" }), false);
+assert.equal(routing.payloadMatches({ id: 86 }, { node_id: "29:0:0:86" }), true);
+assert.equal(routing.payloadMatches({ id: 86 }, { node_id: "29/0/0/86" }), true);
+assert.equal(routing.payloadMatches({ id: 186 }, { node_id: "29.0.0.86" }), false);
+assert.equal(
+  routing.reviewRecoveryUrl("run A", 86),
+  "/eagle_h3_pipeline/review/pending?run=run+A&node=86",
+);
+assert.match(adapterSource, /properties\.h3_review_run/);
+assert.match(adapterSource, /_eagleH3RecoveryAbortController/);
+assert.match(adapterSource, /String\(payload\?\.run_name \|\| ""\)\.trim\(\) !== runName/);
+
 const componentSource = await readFile(
   new URL("../src/nodes/H3ReviewWorkspace.svelte", import.meta.url),
   "utf8",

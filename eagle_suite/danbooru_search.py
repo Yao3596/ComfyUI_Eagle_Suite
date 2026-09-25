@@ -387,6 +387,20 @@ def _detect_tag_csv_encoding():
     return "utf-8-sig"
 
 
+def _catalog_nsfw(value):
+    """Keep missing catalog safety as unknown, not an implicit SFW vote."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    marker = str(value).strip().lower()
+    if marker in {"0", "false", "safe", "general"}:
+        return False
+    if marker in {"1", "true", "adult", "questionable", "explicit"}:
+        return True
+    return None
+
+
 def _load_tag_catalog():
     """读取轻量标签元数据。只读 CSV，不加载语义模型或向量索引。"""
     global _tag_catalog
@@ -415,7 +429,7 @@ def _load_tag_catalog():
                         "wiki": str(row.get("wiki") or "").strip(),
                         "post_count": post_count,
                         "category": {0: "general", 1: "artist", 3: "copyright", 4: "character", 5: "meta"}.get(category_code, "general"),
-                        "nsfw": str(row.get("nsfw") or "0").strip() in {"1", "true", "True"},
+                        "nsfw": _catalog_nsfw(row.get("nsfw")),
                     })
         except Exception as error:
             logger.warning(f"[DanbooruSearch] 标签目录读取失败: {error}")
@@ -433,7 +447,7 @@ def _load_tag_catalog():
                         "wiki": str(record.get("wiki") or "").strip(),
                         "post_count": int(record.get("post_count") or record.get("count") or 0),
                         "category": str(record.get("category") or "general").lower(),
-                        "nsfw": str(record.get("nsfw") or "0") == "1",
+                        "nsfw": _catalog_nsfw(record.get("nsfw")),
                     })
         except Exception as error:
             logger.warning(f"[DanbooruSearch] metadata 后备目录读取失败: {error}")
@@ -583,8 +597,10 @@ def _classify_tag_kind(tag, cn_name="", category="general"):
     避免为了界面分组常驻第二份模型，也避免相同标签每次得到不同类别。
     """
     category = str(category or "general").lower()
-    if category in {"artist", "copyright", "character", "meta"}:
-        return category
+    if category == "character":
+        return "identity"
+    if category in {"artist", "copyright", "meta"}:
+        return "general"
 
     text = f"{tag or ''} {cn_name or ''}".lower().replace(" ", "_")
     patterns = (
@@ -596,7 +612,10 @@ def _classify_tag_kind(tag, cn_name="", category="general"):
         ("outfit", r"(?:dress|shirt|skirt|coat|jacket|uniform|clothes|clothing|pants|shorts|socks|stockings|thighhighs|pantyhose|legwear|boots|shoes|gloves|hat|cap|ribbon|tie|collar|scarf|swimsuit|bikini|lingerie|armor|apron|hoodie|sweater|bra|panties|accessory|jewelry)"),
         ("environment", r"(?:rain|snow|weather|sky|cloud|sunset|sunrise|night|day|morning|evening|season|wind|fog|mist|water|fire|flower|tree|grass)"),
         ("scene", r"(?:indoors|outdoors|room|bedroom|classroom|school|street|city|forest|garden|beach|ocean|mountain|library|station|platform|park|cafe|restaurant|office|background|scenery)"),
-        ("appearance", r"(?:hair|eyes|skin|breast|chest|ass|hips|waist|body|face|ears|horns|tail|wings|age|girl|boy|female|male|solo|multiple_)"),
+        ("body", r"(?:skin|breast|chest|hips|waist|shoulders|limbs|body|anatomy|muscular|slender|curvy|proportions)"),
+        ("face", r"(?:eyes|pupils|face|eyebrows|nose|lips|ears)"),
+        ("identity", r"(?:girl|boy|female|male|solo|multiple_|species|human|fox_girl)"),
+        ("appearance", r"(?:hair|horns|tail|wings|age)"),
     )
     for kind, pattern in patterns:
         if re.search(pattern, text):
@@ -910,11 +929,12 @@ def _direct_catalog_search(query, category="all", show_nsfw=False, limit=80, pop
     log_max = max(1.0, math.log1p(max_count))
     for item in _load_tag_catalog():
         item_category = str(item.get("category") or "general").lower()
+        nsfw_flag = _catalog_nsfw(item.get("nsfw"))
         if category != "all" and item_category != category:
             continue
         if allowed_types and item_category not in allowed_types:
             continue
-        if item.get("nsfw") and not show_nsfw:
+        if nsfw_flag is not False and not show_nsfw:
             continue
         tag = str(item.get("tag") or "").lower()
         cn = str(item.get("cn_name") or "").lower()
@@ -944,7 +964,8 @@ def _direct_catalog_search(query, category="all", show_nsfw=False, limit=80, pop
             "kind": _classify_tag_kind(item["tag"], item.get("cn_name", ""), item_category),
             "count": int(item.get("post_count") or 0), "source": "direct",
             "layer": "标签数据", "wiki": item.get("wiki", ""),
-            "nsfw": "1" if item.get("nsfw") else "0",
+            "rating": "unknown" if nsfw_flag is None else ("adult" if nsfw_flag else "safe"),
+            "nsfw": None if nsfw_flag is None else int(nsfw_flag),
         }))
     ranked.sort(key=lambda pair: (-pair[0], -pair[1]["count"], pair[1]["tag"]))
     results = [item for _, item in ranked[:max(1, int(limit))]]
@@ -957,10 +978,10 @@ def _direct_catalog_search(query, category="all", show_nsfw=False, limit=80, pop
             facets = item.get("facets", [])
             by_name[item["tag"]] = {
                 "tag": item["tag"], "cn_name": item["cn_name"], "category": item["category"],
-                "kind": FACETS[facets[0]][1] if facets else _classify_tag_kind(item["tag"], item["cn_name"], item["category"]),
+                "kind": item["kind"] if item.get("annotation") else _classify_tag_kind(item["tag"], item["cn_name"], item["category"]),
                 "facets": facets, "count": item["post_count"], "source": "direct",
                 "score": 1.0 if item["tag"] == query else 0.8, "layer": "本地扩展词库",
-                "wiki": item["wiki"], "nsfw": "1" if item["nsfw"] else "0",
+                "wiki": item["wiki"], "rating": item["rating"], "nsfw": item["nsfw"],
             }
         results = sorted(by_name.values(), key=lambda item: (-item["score"], -item["count"], item["tag"]))[:limit]
     return results
@@ -1017,7 +1038,8 @@ async def _search_with_engine(query, search_mode, category, show_nsfw):
 
     results = []
     for item in response.results:
-        if not show_nsfw and str(item.nsfw) == "1":
+        nsfw_flag = _catalog_nsfw(item.nsfw)
+        if not show_nsfw and nsfw_flag is not False:
             continue
         results.append({
             "tag": item.tag,
@@ -1030,7 +1052,8 @@ async def _search_with_engine(query, search_mode, category, show_nsfw):
             "source": item.source,
             "layer": item.layer,
             "wiki": item.wiki,
-            "nsfw": item.nsfw,
+            "rating": "unknown" if nsfw_flag is None else ("adult" if nsfw_flag else "safe"),
+            "nsfw": None if nsfw_flag is None else int(nsfw_flag),
         })
     return results, response.keywords
 
@@ -1055,9 +1078,11 @@ async def _related_with_engine(tags, limit, show_nsfw):
             "sources": item.sources,
             "post_count": int(item.post_count),
             "wiki": item.wiki,
-            "nsfw": item.nsfw,
+            "rating": "unknown" if _catalog_nsfw(item.nsfw) is None else ("adult" if _catalog_nsfw(item.nsfw) else "safe"),
+            "nsfw": None if _catalog_nsfw(item.nsfw) is None else int(_catalog_nsfw(item.nsfw)),
         }
         for item in related
+        if show_nsfw or _catalog_nsfw(item.nsfw) is False
     ]
 
 
@@ -1110,12 +1135,17 @@ async def route_search(request):
         if os.path.isfile(LIBRARY_PATH):
             metadata = dict(await asyncio.to_thread(_library_lookup, [item["tag"] for item in results]))
             results = [item for item in results if not metadata.get(item["tag"], {}).get("deprecated")
-                       and (show_nsfw or metadata.get(item["tag"], {}).get("nsfw", 0) == 0)]
+                       and (show_nsfw or _catalog_nsfw(metadata.get(item["tag"], item).get("nsfw")) is False)]
             for item in results:
                 entry = metadata.get(item["tag"], {})
                 if entry.get("cn_name"):
                     item["cn_name"] = entry["cn_name"]
-                item["facets"] = entry.get("facets", [])
+                if entry:
+                    item["rating"] = entry.get("rating", "unknown")
+                    item["nsfw"] = entry.get("nsfw")
+                    if entry.get("annotation"):
+                        item["kind"] = entry.get("kind") or item.get("kind", "general")
+                item["facets"] = [facet for facet in entry.get("facets", []) if facet in FACETS]
                 item["facet_labels"] = {key: FACETS[key][0] for key in item["facets"]}
         return web.json_response({
             "success": True,
@@ -1194,18 +1224,27 @@ def _fetch_related_tags(tags, limit):
 async def route_translate_batch(request):
     try:
         data = await request.json()
-        tags = data.get("tags", [])
+        raw_tags = data.get("tags", [])
+        tags = [str(tag).strip() for tag in raw_tags[:200] if isinstance(tag, str) and str(tag).strip()] if isinstance(raw_tags, list) else []
         translations = _load_tag_translations()
 
         result = {}
+        metadata = {}
         for tag in tags:
             result[tag] = translations.get(tag, "")
 
         if os.path.isfile(LIBRARY_PATH):
             for tag, item in await asyncio.to_thread(_library_lookup, tags):
                 result[tag] = item.get("cn_name") or result.get(tag, "")
+                if item.get("annotation"):
+                    facets = [facet for facet in item.get("facets", []) if facet in FACETS]
+                    metadata[tag] = {
+                        "cn_name": item.get("cn_name") or "", "kind": item.get("kind") or "general",
+                        "facets": facets, "facet_labels": {facet: FACETS[facet][0] for facet in facets},
+                        "rating": item.get("rating", "unknown"), "nsfw": item.get("nsfw"),
+                    }
 
-        return web.json_response({"success": True, "translations": result})
+        return web.json_response({"success": True, "translations": result, "metadata": metadata})
     except Exception as e:
         traceback.print_exc()
         return web.json_response({"success": False, "error": str(e)})
@@ -1773,11 +1812,40 @@ def _generate_text_from_ports(system, prompt, api_config=None, local_model=None,
     return content, "api:" + transport["model"]
 
 
-def _run_library_port_fill(request, node_id, api_config=None, local_model=None):
+def _selected_library_rows(library, selected_tags, batch, requested_tags):
+    """Resolve an explicit small user selection against known local catalog tags."""
+    allowed = {
+        str(tag).strip().lower().replace(" ", "_") for tag in requested_tags[:50]
+        if isinstance(tag, str)
+    } if isinstance(requested_tags, list) else set()
+    if not allowed:
+        return []
+    names = []
+    for item in selected_tags if isinstance(selected_tags, list) else []:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        name = str(item.get("tag") or "").strip().lower().replace(" ", "_")
+        if not re.fullmatch(r"[a-z0-9_()'\-]{1,128}", name) or name not in allowed or name in names:
+            continue
+        names.append(name)
+        if len(names) >= batch:
+            break
+    if not names:
+        return []
+    wanted = set(names)
+    catalog_rows = [item for item in _load_tag_catalog() if str(item.get("tag") or "").lower() in wanted]
+    library.seed_selected(catalog_rows)
+    return library.candidates(batch, names=names)
+
+
+def _run_library_port_fill(request, node_id, api_config=None, local_model=None, selected_tags=None):
     """Run one enrichment batch, either legacy one-shot or opt-in per queue."""
     global _tag_translations, _gacha_buckets, _gacha_catalog_source
     request = request if isinstance(request, dict) else {}
     continuous = bool(request.get("continuous", False))
+    selected_only = bool(request.get("selected_only", False))
+    if selected_only and continuous:
+        raise ValueError("已选标签定向翻译必须由当前节点显式发起一次请求")
     request_id = str(request.get("id") or "").strip()
     if not continuous and not request_id:
         return
@@ -1787,7 +1855,8 @@ def _run_library_port_fill(request, node_id, api_config=None, local_model=None):
         # run on the copy without an explicit click from its own settings UI.
         return
     batch = max(1, min(50, int(request.get("batch") or 20)))
-    resource = "port_fill:" + re.sub(r"[^A-Za-z0-9_.-]+", "_", str(node_id or "node"))
+    resource = ("selected_tag_fill:" if selected_only else "port_fill:") + re.sub(
+        r"[^A-Za-z0-9_.-]+", "_", str(node_id or "node"))
     library = Library(LIBRARY_PATH)
     if not continuous and str(library.checkpoint(resource).get("request_id") or "") == request_id:
         return
@@ -1802,12 +1871,12 @@ def _run_library_port_fill(request, node_id, api_config=None, local_model=None):
         )
     message = ""
     try:
-        rows = library.candidates(batch)
+        rows = _selected_library_rows(library, selected_tags, batch, request.get("tags")) if selected_only else library.candidates(batch)
         checkpoint = {"request_id": request_id, "completed_at": time.time(), "batch": len(rows)}
         if not rows:
             if not continuous:
                 library.save_checkpoint(resource, checkpoint)
-            message = "没有尚未处理的候选标签"
+            message = "所选标签未在本地词表中或已有审核记录" if selected_only else "没有尚未处理的候选标签"
         else:
             payload, model = _library_model_from_ports(rows, api_config, local_model)
             library.save_drafts(
@@ -3397,6 +3466,15 @@ class DanbooruVueSearchNode:
             pass
 
         library_fill_request = parsed.get("library_fill_request")
+        selected_fill_request = parsed.get("selected_tag_enrichment_request")
+        if isinstance(selected_fill_request, dict):
+            try:
+                _run_library_port_fill(
+                    {**selected_fill_request, "selected_only": True}, node_id,
+                    api_config=api_config, local_model=local_model, selected_tags=selected_tags,
+                )
+            except Exception as error:
+                logger.warning(f"[DanbooruSearch] 已选标签模型填充未完成: {error}")
         if isinstance(library_fill_request, dict):
             try:
                 _run_library_port_fill(

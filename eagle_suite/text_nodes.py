@@ -269,31 +269,7 @@ class EagleRandomLine:
         return (result, text)
 
 
-# ── 6. 文本条件分支 ───────────────────────────────────────────────────────────
-
-class EagleTextSwitch:
-    """根据布尔条件选择文本"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "condition": ("BOOLEAN", {"default": True}),
-                "text_true": ("STRING", {"default": "", "multiline": True}),
-                "text_false": ("STRING", {"default": "", "multiline": True}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("text",)
-    FUNCTION = "switch"
-    CATEGORY = "🦅 Eagle/文本"
-
-    def switch(self, condition, text_true, text_false):
-        return (text_true if condition else text_false,)
-
-
-# ── 7. 模板替换 ───────────────────────────────────────────────────────────────
+# ── 6. 模板替换 ───────────────────────────────────────────────────────────────
 
 class EagleTemplateReplace:
     """模板字符串变量替换，支持 {var1} / {var2} / ..."""
@@ -332,7 +308,7 @@ class EagleTemplateReplace:
         return (self._PATTERN.sub(repl, template),)
 
 
-# ── 8. 提示词预设 ─────────────────────────────────────────────────────────────
+# ── 7. 提示词预设 ─────────────────────────────────────────────────────────────
 
 class EaglePromptPreset:
     """提示词预设快速插入（支持多组预设选择）"""
@@ -366,7 +342,7 @@ class EaglePromptPreset:
         return (", ".join(parts),)
 
 
-# ── 9. 智能文本工作台 ─────────────────────────────────────────────────────────
+# ── 8. 智能文本工作台 ─────────────────────────────────────────────────────────
 
 class EagleTextStudio:
     """可编辑、可外接并带结果预览的现代文本处理节点。"""
@@ -537,7 +513,6 @@ NODE_CLASS_MAPPINGS_TEXT = {
     "EagleLoadTextFiles": EagleLoadTextFiles,
     "EagleSplitString": EagleSplitString,
     "EagleRandomLine": EagleRandomLine,
-    "EagleTextSwitch": EagleTextSwitch,
     "EagleTextStudio": EagleTextStudio,
 }
 
@@ -547,7 +522,6 @@ NODE_DISPLAY_NAME_MAPPINGS_TEXT = {
     "EagleLoadTextFiles": "🦅 加载文本文件",
     "EagleSplitString": "🦅 分割文本",
     "EagleRandomLine": "🦅 随机选择文本",
-    "EagleTextSwitch": "🦅 文本条件分支",
     "EagleTextStudio": "🦅 智能文本工作台",
 }
 

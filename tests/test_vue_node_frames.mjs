@@ -14,7 +14,7 @@ const audited = [
   ['danbooru_search_vue.js', /container\.style\.width = width \+ "px";/, /host\.style\.width = width \+ "px";/],
   ['eagle_gallery.js', /el\.style\.width = w \+ "px";/, /host\.style\.width = w \+ "px";/],
   ['wallhaven_gallery.js', /container\.style\.width = width \+ "px";/, /host\.style\.width = width \+ "px";/],
-  ['lora_gallery.js', /el\.style\.width = w \+ "px";/, /onResize/],
+  ['lora_gallery.js', /el\.style\.width = w \+ "px";/, /host\.style\.width = w \+ "px";/],
   ['unified_media_browser.js', /el\.style\.width = w \+ "px";/, /onResize/],
   ['audio_browser.js', /el\.style\.width = w \+ "px";/, /onResize/],
   ['h3_director.js', /el\.style\.width = w \+ 'px';/, /onResize/],
@@ -26,13 +26,26 @@ for (const [name, rootWidth, resizeOrHost] of audited) {
   const source = read(name);
   assert.match(source, rootWidth, `${name} must synchronize its root to the node's pixel width`);
   assert.match(source, resizeOrHost, `${name} must synchronize on resize or size its DOM host`);
-  assert.match(source, /canvasOnly:\s*true/, `${name} must stay out of ComfyUI's parameter sidebar`);
+  assert.match(source, /hideInPanel:\s*true/, `${name} must remain visible in Nodes 2.0 while staying out of the parameter sidebar`);
   assert.match(source, /\.width\s*=\s*undefined/, `${name} must clear stale sidebar width state`);
+}
+
+// Every full-surface widget must render on both the classic canvas and the
+// Nodes 2.0 Vue node body; canvasOnly suppresses the latter entirely.
+for (const name of [
+  'audio_browser.js', 'eagle_gallery.js', 'director_skill_node.js',
+  'danbooru_search_vue.js', 'wallhaven_gallery.js', 'media_timeline_editor.js',
+  'video_frame_extractor_vue.js', 'unified_media_browser.js', 'lora_gallery.js',
+  'prompt_presets.js', 'h3_pipeline.js', 'h3_director.js',
+  'h3_review_workspace_svelte.js', 'text_studio.js', 'api_unified.js',
+]) {
+  const source = read(name);
+  assert.match(source, /hideInPanel:\s*true/, `${name} must hide only in the parameter panel`);
+  assert.doesNotMatch(source, /canvasOnly:\s*true/, `${name} must not hide in Nodes 2.0`);
 }
 
 for (const name of [
   'prompt_presets.js',
-  'director_skill_node.js',
   'danbooru_search_vue.js',
   'eagle_gallery.js',
   'wallhaven_gallery.js',
@@ -40,11 +53,16 @@ for (const name of [
   const source = read(name);
   assert.match(source, /setTimeout\([^\n]*250/, `${name} must resync after workflow restoration settles`);
 }
+assert.match(
+  read('director_skill_node.js'),
+  /scheduleDirectorSkillTimer\([^\n]*250/,
+  'director_skill_node.js must resync after workflow restoration settles through its cancellable lifecycle timer',
+);
 
 const promptPresets = read('prompt_presets.js');
 assert.match(
   promptPresets,
-  /\/eaglePromptPresets\/cover\?path=" \+ encodeURIComponent\(cover\)/,
+  /\/eaglePromptPresets\/cover\?path=" \+ encodeURIComponent\((?:resolvedCover|cover)\)/,
   'prompt preset local covers must use the backend query-string route',
 );
 assert.doesNotMatch(
@@ -61,7 +79,7 @@ assert.doesNotMatch(
 );
 assert.match(
   danbooru,
-  /eagle_dbs_layout_version[\s\S]*?restoredHeight > 1200[\s\S]*?760/,
+  /eagle_dbs_layout_version[\s\S]*?restoredHeight > 1800[\s\S]*?720/,
   'Danbooru must repair heights already persisted by the old feedback loop',
 );
 assert.match(
@@ -153,7 +171,7 @@ assert.match(
 );
 assert.match(
   persistence,
-  /python_module === "custom_nodes\.ComfyUI_Eagle_Suite"/,
+  /python_module \|\| ""\)\.includes\("ComfyUI_Eagle_Suite"\)/,
   'the persistence compatibility layer must stay scoped to Eagle Suite nodes',
 );
 

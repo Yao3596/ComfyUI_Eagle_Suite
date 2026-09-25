@@ -27,26 +27,46 @@ function getWidget(node, name) {
   return (node.widgets || []).find(function(widget) { return widget.name === name; });
 }
 
-function moveRatingBeforeText(node) {
+var STAR_LABELS = [
+  "0 ☆☆☆☆☆", "1 ★☆☆☆☆", "2 ★★☆☆☆",
+  "3 ★★★☆☆", "4 ★★★★☆", "5 ★★★★★"
+];
+
+function normalizeRating(widget) {
+  if (!widget) return;
+  var parsed = parseInt(String(widget.value == null ? "0" : widget.value).trim().split(/\s+/)[0], 10);
+  parsed = Math.max(0, Math.min(5, Number.isFinite(parsed) ? parsed : 0));
+  widget.value = STAR_LABELS[parsed];
+}
+
+function applyLabels(node) {
   if (!node.widgets) return;
-  var starIndex = node.widgets.findIndex(function(widget) { return widget.name === "star"; });
-  var tagsIndex = node.widgets.findIndex(function(widget) { return widget.name === "tags"; });
-  if (starIndex < 0 || tagsIndex < 0 || starIndex < tagsIndex) return;
-  var starWidget = node.widgets.splice(starIndex, 1)[0];
-  tagsIndex = node.widgets.findIndex(function(widget) { return widget.name === "tags"; });
-  node.widgets.splice(tagsIndex, 0, starWidget);
+  node.widgets.forEach(function(w) {
+    if (w.name && LABEL_MAP[w.name]) w.label = LABEL_MAP[w.name];
+  });
+  var tagsWidget = getWidget(node, "tags");
+  var annotationWidget = getWidget(node, "annotation");
+  var starWidget = getWidget(node, "star");
+  if (tagsWidget && tagsWidget.inputEl) tagsWidget.inputEl.placeholder = "Eagle 标签：用逗号或换行分隔";
+  if (annotationWidget && annotationWidget.inputEl) annotationWidget.inputEl.placeholder = "Eagle 注释";
+  normalizeRating(starWidget);
+  node.setDirtyCanvas?.(true, true);
 }
 
 function migrateLegacyWidgetOrder(node) {
   var starWidget = getWidget(node, "star");
   var tagsWidget = getWidget(node, "tags");
   if (!starWidget || !tagsWidget) return;
-  // 旧工作流保存顺序为 tags → star；新版视觉顺序为 star → tags。
-  // 如果加载后类型明显反转，则交换回对应字段，避免旧工作流串值。
-  if (typeof starWidget.value === "string" && typeof tagsWidget.value === "number") {
+  var isRating = function(value) {
+    return /^[0-5](?:\s|$)/.test(String(value == null ? "" : value).trim());
+  };
+  // 更旧的工作流可能以 tags → star 位置保存。现在后端实际声明
+  // star → tags → annotation，不再靠前端移动 widget，因此同时稳定
+  // ComfyUI 1.0 位置数组和 2.0 按名字恢复。
+  if (!isRating(starWidget.value) && isRating(tagsWidget.value)) {
     var oldTags = starWidget.value;
     var oldStar = tagsWidget.value;
-    starWidget.value = Math.max(0, Math.min(5, Number(oldStar) || 0));
+    starWidget.value = oldStar;
     tagsWidget.value = oldTags;
   }
 }
@@ -54,34 +74,21 @@ function migrateLegacyWidgetOrder(node) {
 app.registerExtension({
   name: "EagleSuite.EagleSaverLabels",
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== "EagleSaver") return;
+    var targetNodes = ["EagleSaver", "EagleImagesToVideo", "EagleVideoConverter"];
+    if (targetNodes.indexOf(nodeData.name) < 0) return;
+    var isImageSaver = nodeData.name === "EagleSaver";
 
     var orig = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function() {
       if (orig) orig.apply(this, arguments);
-      var node = this;
-      if (!node.widgets) return;
-      node.widgets.forEach(function(w) {
-        if (w.name && LABEL_MAP[w.name]) {
-          w.label = LABEL_MAP[w.name];
-        }
-      });
-      var tagsWidget = getWidget(node, "tags");
-      var annotationWidget = getWidget(node, "annotation");
-      var starWidget = getWidget(node, "star");
-      if (tagsWidget && tagsWidget.inputEl) tagsWidget.inputEl.placeholder = "Eagle 标签：用逗号或换行分隔";
-      if (annotationWidget && annotationWidget.inputEl) annotationWidget.inputEl.placeholder = "Eagle 注释";
-      if (starWidget && (starWidget.value === undefined || starWidget.value === null || starWidget.value === "")) starWidget.value = 0;
-      moveRatingBeforeText(node);
-      node.setDirtyCanvas(true, true);
+      applyLabels(this);
     };
 
     var origConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function(info) {
       if (origConfigure) origConfigure.apply(this, arguments);
-      migrateLegacyWidgetOrder(this);
-      moveRatingBeforeText(this);
-      this.setDirtyCanvas(true, true);
+      if (isImageSaver) migrateLegacyWidgetOrder(this);
+      applyLabels(this);
     };
   }
 });

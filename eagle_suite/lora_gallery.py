@@ -534,10 +534,10 @@ async def _fetch_civitai_model(model_id, api_key=""):
                         _civitai_cache["data"][cache_key] = result
                     return result
                 else:
-                    text = await resp.text()
-                    logger.warning(f"[LoraGallery] Civitai API HTTP {resp.status}: {text[:200]}")
+                    # An upstream error body can echo authorization data.
+                    logger.warning(f"[LoraGallery] Civitai API HTTP {resp.status}")
     except Exception as e:
-        logger.warning(f"[LoraGallery] Civitai API 请求失败: {e}")
+        logger.warning(f"[LoraGallery] Civitai API 请求失败: {_redact_civitai_error(e, api_key)}")
     return None
 
 
@@ -596,7 +596,7 @@ async def _fetch_civitai_version_by_hash(path, api_key=""):
                 if resp.status != 404:
                     logger.warning(f"[LoraGallery] Civitai hash API HTTP {resp.status}")
     except Exception as e:
-        logger.warning(f"[LoraGallery] Civitai hash 查询失败: {e}")
+        logger.warning(f"[LoraGallery] Civitai hash 查询失败: {_redact_civitai_error(e, api_key)}")
     return None, file_hash
 
 
@@ -887,12 +887,26 @@ def _metadata_summary(metadata):
     return result
 
 
+def _request_civitai_api_key(request):
+    """Prefer the private local request header; accept legacy query clients."""
+    return (
+        request.headers.get("X-Eagle-Civitai-Key", "").strip()
+        or request.query.get("api_key", "").strip()
+    )
+
+
+def _redact_civitai_error(error, api_key):
+    message = str(error)
+    secret = str(api_key or "")
+    return message.replace(secret, "[redacted]") if secret else message
+
+
 @route("GET", "/lora_gallery/model_details")
 async def lora_model_details_route(request):
     """通过文件哈希定位版本，只向前端返回 civitai.red 模型信息。"""
     try:
         lora_id = request.query.get("id", "")
-        api_key = request.query.get("api_key", "")
+        api_key = _request_civitai_api_key(request)
         item = _find_lora_item(lora_id)
         if not item:
             return web.json_response({"success": False, "error": "not found"}, status=404)
@@ -962,8 +976,9 @@ async def lora_model_details_route(request):
             },
         })
     except Exception as e:
-        logger.error(f"[LoraGallery] model_details error: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
+        message = _redact_civitai_error(e, locals().get("api_key", ""))
+        logger.error(f"[LoraGallery] model_details error: {message}")
+        return web.json_response({"success": False, "error": message}, status=500)
 
 
 @route("GET", "/lora_gallery/civitai_info")
@@ -971,7 +986,7 @@ async def lora_civitai_info_route(request):
     """查询单个 LoRA 的 Civitai 元数据，支持 API Key。"""
     try:
         lora_id = request.query.get("id", "")
-        api_key = request.query.get("api_key", "")
+        api_key = _request_civitai_api_key(request)
         item = _find_lora_item(lora_id)
         if not item:
             return web.json_response({"success": False, "error": "not found"}, status=404)
@@ -990,8 +1005,9 @@ async def lora_civitai_info_route(request):
             "cached": bool(info or version),
         })
     except Exception as e:
-        logger.error(f"[LoraGallery] civitai_info error: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
+        message = _redact_civitai_error(e, locals().get("api_key", ""))
+        logger.error(f"[LoraGallery] civitai_info error: {message}")
+        return web.json_response({"success": False, "error": message}, status=500)
 
 
 @route("POST", "/lora_gallery/civitai_info")
@@ -1016,8 +1032,9 @@ async def lora_civitai_info_post_route(request):
             }
         return web.json_response({"success": True, "results": results})
     except Exception as e:
-        logger.error(f"[LoraGallery] civitai_info_post error: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
+        message = _redact_civitai_error(e, locals().get("api_key", ""))
+        logger.error(f"[LoraGallery] civitai_info_post error: {message}")
+        return web.json_response({"success": False, "error": message}, status=500)
 
 
 async def _download_url(url, dest_path, api_key=""):
@@ -1033,8 +1050,7 @@ async def _download_url(url, dest_path, api_key=""):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status >= 400:
-                    text = await resp.text()
-                    return False, f"HTTP {resp.status}: {text[:200]}"
+                    return False, f"HTTP {resp.status}"
                 declared = int(resp.headers.get("Content-Length") or 0)
                 if declared > _LORA_MODEL_MAX_BYTES:
                     return False, "model file is too large"
@@ -1049,7 +1065,7 @@ async def _download_url(url, dest_path, api_key=""):
                 os.replace(temp_path, dest_path)
                 return True, ""
     except Exception as e:
-        return False, str(e)
+        return False, _redact_civitai_error(e, api_key)
     finally:
         if os.path.exists(temp_path):
             try:
@@ -1110,7 +1126,7 @@ async def _download_preview_image(url, base_path, api_key=""):
         destination = await asyncio.to_thread(_validate_and_save)
         return True, destination, ""
     except Exception as e:
-        return False, "", str(e)
+        return False, "", _redact_civitai_error(e, api_key)
 
 
 @route("POST", "/lora_gallery/set_preview")
@@ -1131,7 +1147,7 @@ async def lora_set_preview_route(request):
         base = os.path.splitext(item["path"])[0]
         ok, dest, err = await _download_preview_image(image_url, base, api_key)
         if not ok:
-            return web.json_response({"success": False, "error": err})
+            return web.json_response({"success": False, "error": _redact_civitai_error(err, api_key)})
 
         # 清理其它扩展名残留的旧封面文件（比如旧封面是 .jpg，新选的图是 .png，
         # 避免同一模型底下堆出好几张封面图，导致下次扫描时用到哪张不确定）
@@ -1149,8 +1165,9 @@ async def lora_set_preview_route(request):
 
         return web.json_response({"success": True, "preview": dest})
     except Exception as e:
-        logger.error(f"[LoraGallery] set_preview error: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
+        message = _redact_civitai_error(e, locals().get("api_key", ""))
+        logger.error(f"[LoraGallery] set_preview error: {message}")
+        return web.json_response({"success": False, "error": message}, status=500)
 
 
 @route("POST", "/lora_gallery/download_preview")
@@ -1210,7 +1227,7 @@ async def lora_download_preview_route(request):
             if ok:
                 break
         if not ok:
-            return web.json_response({"success": False, "error": err})
+            return web.json_response({"success": False, "error": _redact_civitai_error(err, api_key)})
 
         words = version.get("trainedWords") or (info.get("trainedWords", []) if info else [])
         item["preview"] = dest
@@ -1223,8 +1240,9 @@ async def lora_download_preview_route(request):
             "triggerWords": words,
         })
     except Exception as e:
-        logger.error(f"[LoraGallery] download_preview error: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
+        message = _redact_civitai_error(e, locals().get("api_key", ""))
+        logger.error(f"[LoraGallery] download_preview error: {message}")
+        return web.json_response({"success": False, "error": message}, status=500)
 
 
 @route("POST", "/lora_gallery/save_trigger_words")
@@ -1299,10 +1317,9 @@ async def lora_download_model_route(request):
                     if resp.status == 200:
                         version_data = await resp.json()
                     else:
-                        text = await resp.text()
-                        return web.json_response({"success": False, "error": f"Civitai HTTP {resp.status}: {text[:200]}"})
+                        return web.json_response({"success": False, "error": f"Civitai HTTP {resp.status}"})
         except Exception as e:
-            return web.json_response({"success": False, "error": f"fetch version failed: {e}"})
+            return web.json_response({"success": False, "error": f"fetch version failed: {_redact_civitai_error(e, api_key)}"})
 
         files = version_data.get("files", [])
         if not files:
@@ -1328,7 +1345,7 @@ async def lora_download_model_route(request):
 
         ok, err = await _download_url(download_url, dest, api_key)
         if not ok:
-            return web.json_response({"success": False, "error": err})
+            return web.json_response({"success": False, "error": _redact_civitai_error(err, api_key)})
 
         # 尝试保存 civitai.info
         try:
@@ -1341,8 +1358,9 @@ async def lora_download_model_route(request):
         _clear_scan_cache()
         return web.json_response({"success": True, "path": dest, "name": name})
     except Exception as e:
-        logger.error(f"[LoraGallery] download_model error: {e}")
-        return web.json_response({"success": False, "error": str(e)}, status=500)
+        message = _redact_civitai_error(e, locals().get("api_key", ""))
+        logger.error(f"[LoraGallery] download_model error: {message}")
+        return web.json_response({"success": False, "error": message}, status=500)
 
 
 # ── ComfyUI 节点 ───────────────────────────────────────────────────────────────
@@ -1437,7 +1455,8 @@ class EagleLoraGalleryNode:
                     )
                 )
             except Exception as error:
-                logger.warning(f"[LoraGallery] Civitai 模型信息查询失败 {item['name']}: {error}")
+                message = _redact_civitai_error(error, civitai_api_key)
+                logger.warning(f"[LoraGallery] Civitai 模型信息查询失败 {item['name']}: {message}")
                 model_id, version, model_info = "", {}, None
 
             raw_model = model_info.get("raw", {}) if model_info else {}

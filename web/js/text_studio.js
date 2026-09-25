@@ -66,7 +66,11 @@ function createPreview(node) {
 
   node.addDOMWidget("text_studio_preview", "div", root, {
     serialize: false,
+    hideInPanel: true,
     hideOnZoom: false,
+    getMinHeight: () => 150,
+    getMaxHeight: () => 240,
+    getHeight: () => 150,
   });
   node._eagleTextStudio = { root, stats, status, preview };
   const width = Math.max(440, Number(node.size?.[0]) || 440);
@@ -107,6 +111,14 @@ app.registerExtension({
       view.status.textContent = status;
       view.status.classList.toggle("is-warning", status !== "处理完成");
       this.setDirtyCanvas?.(true, true);
+    };
+
+    const previousRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      const view = this._eagleTextStudio;
+      this._eagleTextStudio = null;
+      view?.root?.remove?.();
+      return previousRemoved?.apply(this, arguments);
     };
   },
 });

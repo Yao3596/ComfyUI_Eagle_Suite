@@ -34,6 +34,11 @@ MAX_ASSETS = 128
 MAX_CLIPS = 256
 TIMELINE_PREVIEW_COUNT = 12
 TIMELINE_PREVIEW_WIDTH = 192
+MAX_OUTPUT_FRAMES = 128
+MAX_OUTPUT_FRAME_PIXELS = 24_000_000
+MAX_SCANNED_VIDEO_FRAMES = 1200
+MAX_FRAMES_MODE_SECONDS = 300
+MAX_FRAMES_MODE_RENDER_PIXELS = 6_000_000_000
 
 
 def _empty_project():
@@ -434,29 +439,61 @@ def _render_key(project, paths, settings):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
+def _usable_cached_media(path, stream_type):
+    """Do not reuse a partial render left by an interrupted FFmpeg process."""
+    try:
+        if not path.is_file() or path.stat().st_size < 64:
+            return False
+        if path.suffix.lower() == ".wav":
+            with wave.open(str(path), "rb") as stream:
+                payload_bytes = stream.getnframes() * stream.getnchannels() * stream.getsampwidth()
+            if payload_bytes <= 0 or path.stat().st_size < 44 + payload_bytes:
+                return False
+        metadata = _probe_media(str(path))
+        return bool(metadata.get(f"has_{stream_type}")) and metadata.get("duration", 0) > 0.001
+    except (OSError, ValueError, wave.Error):
+        return False
+
+
 def _decode_frames(path, frame_step=1, max_frames=0):
     import cv2
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
-        return torch.zeros((1, 64, 64, 3), dtype=torch.float32), 0
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32), 0, False
     step = max(1, int(frame_step or 1))
-    limit = max(0, int(max_frames or 0))
+    # IMAGE batches live entirely in RAM. A zero user limit means "automatic",
+    # not unbounded; also cap source reads when frame_step is very large.
+    limit = min(MAX_OUTPUT_FRAMES, max(1, int(max_frames or MAX_OUTPUT_FRAMES)))
     frames = []
     index = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if index % step == 0:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(torch.from_numpy(frame.astype(np.float32) / 255.0))
-            if limit and len(frames) >= limit:
+    pixels = 0
+    truncated = False
+    try:
+        while index < MAX_SCANNED_VIDEO_FRAMES:
+            ok, frame = cap.read()
+            if not ok:
                 break
-        index += 1
-    cap.release()
+            if index % step == 0:
+                frame_pixels = int(frame.shape[0]) * int(frame.shape[1])
+                if pixels + frame_pixels > MAX_OUTPUT_FRAME_PIXELS:
+                    if not frames:
+                        raise ValueError("视频单帧过大，无法安全输出 IMAGE 张量")
+                    truncated = True
+                    break
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(torch.from_numpy(frame).float().div_(255.0))
+                pixels += frame_pixels
+                if len(frames) >= limit:
+                    truncated = True
+                    break
+            index += 1
+        else:
+            truncated = True
+    finally:
+        cap.release()
     if not frames:
-        return torch.zeros((1, 64, 64, 3), dtype=torch.float32), 0
-    return torch.stack(frames, dim=0), len(frames)
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32), 0, truncated
+    return torch.stack(frames, dim=0), len(frames), truncated
 
 
 class EagleMediaTimelineEditor:
@@ -479,7 +516,8 @@ class EagleMediaTimelineEditor:
                 "audio_sample_rate": (["44100", "48000"], {"default": "48000"}),
                 "video_crf": ("INT", {"default": 18, "min": 0, "max": 40, "step": 1}),
                 "frame_step": ("INT", {"default": 1, "min": 1, "max": 240, "step": 1}),
-                "max_frames": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "max_frames": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1,
+                                       "tooltip": "0 表示自动安全上限；图像帧还受内存和扫描预算限制。"}),
                 "render_revision": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
             },
             "optional": {
@@ -531,26 +569,6 @@ class EagleMediaTimelineEditor:
                 "fade_in": 0.0, "fade_out": 0.0, "include_audio": True,
             }]
 
-        connected_audio = [audio_1, audio_2]
-        for index, value in enumerate(connected_audio):
-            track = project["audio_tracks"][index]
-            if value is None or track["clips"]:
-                continue
-            asset_id = f"__connected_audio_{index + 1}__"
-            wav_path, duration = _write_audio_wav(value, render_root / f"connected_audio_{index + 1}.wav")
-            if wav_path and duration > 0:
-                assets[asset_id] = {
-                    "id": asset_id, "type": "audio", "filename": "",
-                    "name": f"外接 AUDIO {index + 1}", "duration": duration,
-                    "width": 0, "height": 0, "fps": 0, "has_audio": True,
-                }
-                paths[asset_id] = wav_path
-                track["clips"].append({
-                    "id": f"connected-audio-{index + 1}", "asset_id": asset_id,
-                    "in": 0.0, "out": duration, "start": 0.0, "volume": 1.0,
-                    "mute": False, "fade_in": 0.0, "fade_out": 0.0,
-                })
-
         if not video_clips and output_mode != "audio":
             raise ValueError("剪辑时间线没有可用视频片段；请拖入视频或连接 VIDEO")
 
@@ -570,6 +588,49 @@ class EagleMediaTimelineEditor:
         output_width -= output_width % 2
         output_height -= output_height % 2
         fps = _safe_number(output_fps, 0, 0, 240) or _safe_number(first_asset.get("fps"), 24, 1, 240)
+        wants_video = output_mode in {"video_audio", "video_audio_frames"}
+        wants_frames = output_mode in {"video_audio_frames", "frames"}
+        wants_audio = output_mode in {"video_audio", "video_audio_frames", "audio"}
+        if wants_frames:
+            # This renderer encodes the full timeline before extracting IMAGEs.
+            # Reject oversized jobs up front rather than spending hours encoding
+            # video that cannot be returned as a resident tensor anyway.
+            estimated_seconds = 0.0
+            for clip in video_clips:
+                asset = assets.get(clip["asset_id"], {})
+                source_end = float(asset.get("duration") or clip["out"])
+                estimated_seconds += max(0.0, min(float(clip["out"]), source_end) - float(clip["in"]))
+            render_pixels = estimated_seconds * fps * output_width * output_height
+            if estimated_seconds > MAX_FRAMES_MODE_SECONDS or render_pixels > MAX_FRAMES_MODE_RENDER_PIXELS:
+                raise ValueError(
+                    "图像帧模式的时间线过长或分辨率/FPS 过高；请缩短片段、降低尺寸/FPS，"
+                    "或切换为‘视频 + 音频’以保留完整视频输出"
+                )
+
+        connected_audio = [audio_1, audio_2]
+        connected_audio_root = None
+        for index, value in enumerate(connected_audio):
+            track = project["audio_tracks"][index]
+            if value is None or track["clips"]:
+                continue
+            asset_id = f"__connected_audio_{index + 1}__"
+            if connected_audio_root is None:
+                # Never share a mutable WAV pathname between overlapping runs.
+                connected_audio_root = render_root / "connected_inputs" / uuid.uuid4().hex
+                connected_audio_root.mkdir(parents=True, exist_ok=False)
+            wav_path, duration = _write_audio_wav(value, connected_audio_root / f"connected_audio_{index + 1}.wav")
+            if wav_path and duration > 0:
+                assets[asset_id] = {
+                    "id": asset_id, "type": "audio", "filename": "",
+                    "name": f"外接 AUDIO {index + 1}", "duration": duration,
+                    "width": 0, "height": 0, "fps": 0, "has_audio": True,
+                }
+                paths[asset_id] = wav_path
+                track["clips"].append({
+                    "id": f"connected-audio-{index + 1}", "asset_id": asset_id,
+                    "in": 0.0, "out": duration, "start": 0.0, "volume": 1.0,
+                    "mute": False, "fade_in": 0.0, "fade_out": 0.0,
+                })
         sample_rate = int(audio_sample_rate)
         settings = {
             "width": output_width, "height": output_height, "fps": fps,
@@ -600,7 +661,7 @@ class EagleMediaTimelineEditor:
                 if duration <= 0.001:
                     continue
                 segment_path = target / f"segment_{index:04d}.mp4"
-                if not segment_path.is_file():
+                if not _usable_cached_media(segment_path, "video"):
                     command = [
                         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                         "-ss", f"{clip_in:.6f}", "-i", path, "-t", f"{duration:.6f}",
@@ -609,8 +670,10 @@ class EagleMediaTimelineEditor:
                         "-pix_fmt", "yuv420p", str(segment_path),
                     ]
                     _run(command, f"视频片段 {index + 1} 编码")
+                    if not _usable_cached_media(segment_path, "video"):
+                        raise RuntimeError(f"视频片段 {index + 1} 编码未产生完整文件")
                 segment_paths.append(str(segment_path))
-                if include_video_audio and clip.get("include_audio", True) and asset.get("has_audio") and not clip.get("mute"):
+                if wants_audio and include_video_audio and clip.get("include_audio", True) and asset.get("has_audio") and not clip.get("mute"):
                     source_audio_segments.append({
                         "path": path, "in": clip_in, "out": clip_out,
                         "start": timeline_cursor, "volume": clip.get("volume", 1),
@@ -620,7 +683,7 @@ class EagleMediaTimelineEditor:
 
         total_duration = timeline_cursor
         video_only = target / "video_only.mp4"
-        if segment_paths and not video_only.is_file():
+        if segment_paths and not _usable_cached_media(video_only, "video"):
             concat_file = target / "concat.txt"
             with concat_file.open("w", encoding="utf-8") as stream:
                 for path in segment_paths:
@@ -631,9 +694,11 @@ class EagleMediaTimelineEditor:
                 "-f", "concat", "-safe", "0", "-i", str(concat_file),
                 "-c", "copy", "-movflags", "+faststart", str(video_only),
             ], "视频拼接")
+            if not _usable_cached_media(video_only, "video"):
+                raise RuntimeError("视频拼接未产生完整文件")
 
         audio_segments = list(source_audio_segments)
-        for track in project["audio_tracks"]:
+        for track in (project["audio_tracks"] if wants_audio else []):
             for clip in track["clips"]:
                 if clip.get("mute") or clip["asset_id"] not in paths:
                     continue
@@ -651,7 +716,7 @@ class EagleMediaTimelineEditor:
                 total_duration = max(total_duration, float(clip.get("start") or 0) + clip_out - clip_in)
 
         mixed_audio_path = target / "mixed.wav"
-        if audio_segments and not mixed_audio_path.is_file():
+        if audio_segments and not _usable_cached_media(mixed_audio_path, "audio"):
             command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
             filters = []
             labels = []
@@ -681,14 +746,15 @@ class EagleMediaTimelineEditor:
                 "-c:a", "pcm_s16le", str(mixed_audio_path),
             ])
             _run(command, "音频混音")
+            if not _usable_cached_media(mixed_audio_path, "audio"):
+                raise RuntimeError("音频混音未产生完整文件")
 
-        wants_video = output_mode in {"video_audio", "video_audio_frames"}
-        wants_frames = output_mode in {"video_audio_frames", "frames"}
-        wants_audio = output_mode in {"video_audio", "video_audio_frames", "audio"}
         final_video = target / "timeline.mp4"
-        if wants_video and video_only.is_file():
-            if mixed_audio_path.is_file():
-                if not final_video.is_file():
+        video_ready = _usable_cached_media(video_only, "video")
+        audio_ready = _usable_cached_media(mixed_audio_path, "audio")
+        if wants_video and video_ready:
+            if audio_ready:
+                if not _usable_cached_media(final_video, "video"):
                     _run([
                         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                         "-i", str(video_only), "-i", str(mixed_audio_path),
@@ -696,20 +762,24 @@ class EagleMediaTimelineEditor:
                         "-c:a", "aac", "-b:a", "192k", "-shortest",
                         "-movflags", "+faststart", str(final_video),
                     ], "音视频封装")
-            elif not final_video.is_file():
+            elif not _usable_cached_media(final_video, "video"):
                 shutil.copy2(video_only, final_video)
+            if not _usable_cached_media(final_video, "video"):
+                raise RuntimeError("音视频封装未产生完整文件")
 
-        frame_source = str(final_video if final_video.is_file() else video_only)
-        if wants_frames and os.path.isfile(frame_source):
-            images, image_count = _decode_frames(frame_source, frame_step, max_frames)
-        elif wants_video and os.path.isfile(frame_source):
+        final_video_ready = _usable_cached_media(final_video, "video")
+        frame_source = str(final_video if final_video_ready else video_only)
+        frames_limited = False
+        if wants_frames and (final_video_ready or video_ready):
+            images, image_count, frames_limited = _decode_frames(frame_source, frame_step, max_frames)
+        elif wants_video and (final_video_ready or video_ready):
             # Keep the IMAGE output meaningful in the default lightweight mode:
             # one real preview frame instead of a misleading 64x64 black tensor.
-            images, image_count = _decode_frames(frame_source, 1, 1)
+            images, image_count, _ = _decode_frames(frame_source, 1, 1)
         else:
             images, image_count = torch.zeros((1, 64, 64, 3), dtype=torch.float32), 0
-        video_output = VideoFromFile(str(final_video)) if wants_video and final_video.is_file() else None
-        audio_output = get_audio(str(mixed_audio_path)) if wants_audio and mixed_audio_path.is_file() else {
+        video_output = VideoFromFile(str(final_video)) if wants_video and final_video_ready else None
+        audio_output = get_audio(str(mixed_audio_path)) if wants_audio and audio_ready else {
             "waveform": torch.zeros((1, 2, 1), dtype=torch.float32), "sample_rate": sample_rate,
         }
         public_json = json.dumps(project, ensure_ascii=False, separators=(",", ":"))
@@ -719,9 +789,11 @@ class EagleMediaTimelineEditor:
         )
         if wants_frames:
             info += f" · 输出帧 {image_count}"
+            if frames_limited:
+                info += "（已按安全帧/内存/扫描预算截取）"
         elif wants_video and image_count:
             info += " · 图像口首帧预览"
-        preview_url = _register_video_preview(str(final_video)) if final_video.is_file() else ""
+        preview_url = _register_video_preview(str(final_video)) if final_video_ready else ""
         return {
             "ui": {
                 "status": [info],

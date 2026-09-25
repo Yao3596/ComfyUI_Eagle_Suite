@@ -69,6 +69,27 @@ class EagleAdvancedVideoSaver:
             if sibling.is_file():
                 return str(sibling)
         return name
+
+    @staticmethod
+    def _reserve_output_path(output_path, filename_prefix, format):
+        """Reserve one numbered media name, including names with orphan sidecars."""
+        counter = 1
+        while counter <= 99999999:
+            filename = f"{filename_prefix}_{counter:05d}.{format}"
+            target = Path(output_path) / filename
+            if target.with_suffix(".json").exists() or target.with_name(
+                target.stem + ".workflow.png"
+            ).exists():
+                counter += 1
+                continue
+            try:
+                descriptor = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                counter += 1
+                continue
+            os.close(descriptor)
+            return counter, filename, target
+        raise RuntimeError("无法分配高级视频保存编号")
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -210,22 +231,6 @@ class EagleAdvancedVideoSaver:
             output_path = Path(local_save_path)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # === 2. 生成唯一文件名 ===
-        # ... 后续代码保持不变
-
-
-        # === 2. 生成唯一文件名 ===
-        counter = 1
-        while True:
-            filename = f"{filename_prefix}_{counter:05d}.{format}"
-            full_path = output_path / filename
-            if not full_path.exists():
-                break
-            counter += 1
-        
-        base_name = f"{filename_prefix}_{counter:05d}"
-        logger.debug(f"输出文件: {filename}")
-        
         # === 3. 处理视频源 ===
         actual_fps = fps
         source_video_path = None
@@ -308,11 +313,10 @@ class EagleAdvancedVideoSaver:
             h, w = video_frames.shape[1:3]
             logger.debug(f"视频尺寸: {w}x{h}; 帧率: {actual_fps}; 编码器: {codec} ({quality})")
 
-        
         # === 4. 保存临时视频文件 ===
         temp_owner = tempfile.TemporaryDirectory(prefix="eagle_video_saver_")
         temp_dir = temp_owner.name
-        temp_video_path = Path(temp_dir) / f"temp_{counter:05d}.{format}"
+        temp_video_path = Path(temp_dir) / f"temp_video.{format}"
         
         if source_video_path:
             # 直接转码已有视频
@@ -323,20 +327,42 @@ class EagleAdvancedVideoSaver:
             self._save_frames_to_video(video_frames, temp_video_path, actual_fps, codec, quality, pixel_format)
         
         # === 5. 合并音频（如果有） ===
-        final_path = full_path
         if audio is not None:
             logger.debug("合并音频")
-            temp_audio_path = Path(temp_dir) / f"temp_audio_{counter:05d}.wav"
+            temp_audio_path = Path(temp_dir) / "temp_audio.wav"
+            complete_video_path = Path(temp_dir) / f"temp_complete.{format}"
             self._save_audio(audio, temp_audio_path)
-            self._merge_audio_video(temp_video_path, temp_audio_path, final_path, audio_codec, audio_bitrate)
+            self._merge_audio_video(temp_video_path, temp_audio_path, complete_video_path, audio_codec, audio_bitrate)
             
             # 删除临时音频
             if temp_audio_path.exists():
                 os.remove(temp_audio_path)
         else:
-            # 直接重命名临时视频
-            if temp_video_path.exists():
-                shutil.move(str(temp_video_path), str(final_path))
+            complete_video_path = temp_video_path
+
+        # 编码完整后才分配编号，再在目标目录暂存并原子替换自己占位的文件。
+        # 临时目录可能与本地保存目录位于不同磁盘，不能直接 os.replace。
+        counter, filename, full_path = self._reserve_output_path(
+            output_path, filename_prefix, format
+        )
+        base_name = f"{filename_prefix}_{counter:05d}"
+        logger.debug(f"输出文件: {filename}")
+        try:
+            descriptor, staged_path = tempfile.mkstemp(
+                prefix=f".{filename}.", suffix=".tmp", dir=str(output_path)
+            )
+        except Exception:
+            full_path.unlink(missing_ok=True)
+            raise
+        os.close(descriptor)
+        try:
+            shutil.copy2(complete_video_path, staged_path)
+            os.replace(staged_path, full_path)
+        except Exception:
+            Path(staged_path).unlink(missing_ok=True)
+            full_path.unlink(missing_ok=True)
+            raise
+        final_path = full_path
         
         # === 6. 获取视频信息 ===
         file_size = final_path.stat().st_size
