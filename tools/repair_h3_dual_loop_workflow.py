@@ -396,6 +396,8 @@ def repair_workflow(source):
     _connect(workflow, nodes[86], "clip", nodes[28], "video", "VIDEO")
     nodes[28]["title"] = "H3 历史回看（只读，不重复保存）"
 
+    _connect(workflow, nodes[86], "state", nodes[29], "state", "EAGLE_H3_STATE")
+    _connect(workflow, nodes[86], "decision", nodes[29], "decision", "STRING")
     _connect(workflow, nodes[77], "upscaled_images", nodes[29], "images", "IMAGE")
     _connect(workflow, nodes[47], "output", nodes[29], "sampled_latent", "LATENT")
     _connect(workflow, nodes[77], "upscaled_images", nodes[80], "images", "IMAGE")

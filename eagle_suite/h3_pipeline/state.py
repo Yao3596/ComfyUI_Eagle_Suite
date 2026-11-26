@@ -20,6 +20,7 @@ from .constants import MANIFEST_VERSION, RESUME_POLICIES
 
 
 _RUNTIME_STATE_KEYS = frozenset(("previous_frames", "previous_latent"))
+_APPROVED_DECISIONS = frozenset(("approved", "approve", "auto", "approve_stop"))
 
 
 def _safe_run_name(name):
@@ -128,6 +129,31 @@ def _normalize_shot_bounds(state, plan=None, max_shots=0,
     return state
 
 
+def is_approved_shot(shot):
+    return str(shot.get("decision") or "").strip().lower() in _APPROVED_DECISIONS
+
+
+def _resume_stopped_state(state):
+    approved = {
+        int(shot.get("index", -1)) for shot in state["shots"]
+        if isinstance(shot, dict) and is_approved_shot(shot)
+    }
+    cursor = state["current_index"]
+    total = state["total_shots"]
+    # Older manifests intentionally left their cursor on the last reviewed
+    # scene so the partial assembler knew whether to include that take.
+    while cursor < total and cursor in approved:
+        cursor += 1
+    state["current_index"] = cursor
+    state["reroll_index"] = None
+    state["stop"] = False
+    state["awaiting_review"] = False
+    state.pop("pending_decision", None)
+    state.pop("assemble_partial_on_stop", None)
+    if cursor < total:
+        state["manifest_status"] = "running"
+
+
 def init_state(plan, output_root, run_name_override="", resume_policy="resume", mode="auto", max_shots=0):
     """
     根据 plan 初始化或恢复一个运行状态。
@@ -164,6 +190,7 @@ def init_state(plan, output_root, run_name_override="", resume_policy="resume", 
             return state
         # resume：加载已有状态，但 plan 可能被更新，这里合并 plan
         old = load_state(base_dir)
+        was_stopped = old.get("stop") or old.get("pending_decision") == "stop"
         # 如果 plan 的生成合同有变化，从最早受影响镜头起失效旧检查点。
         # 不能只依赖 plan_hash：旧版 manifest 可能没有 hash，或者曾错误
         # 复用了 hash。
@@ -208,6 +235,8 @@ def init_state(plan, output_root, run_name_override="", resume_policy="resume", 
         _normalize_shot_bounds(
             old, plan=plan, max_shots=max_shots, use_plan_count=True
         )
+        if was_stopped:
+            _resume_stopped_state(old)
         old["mode"] = mode if mode in ("auto", "interactive") else old.get("mode", "auto")
         old["updated_at"] = datetime.now().isoformat()
         save_state(old)
@@ -230,6 +259,7 @@ def load_state(base_dir):
     if not isinstance(state, dict):
         raise ValueError("manifest 不是有效的 JSON 对象")
     # 兼容：补齐缺失字段
+    state.setdefault("base_dir", str(base_dir))
     state.setdefault("version", MANIFEST_VERSION)
     state.setdefault("current_index", 0)
     state.setdefault("reroll_index", None)
@@ -277,6 +307,9 @@ def shot_params(state):
     compat = plan.get("compatibility") or {}
     anchor = compat.get("anchor_mode", "head")
     global_blend = int(compat.get("video_blend_frames", 0) or 0) if anchor == "head" else 0
+    context_length = shot.get("context_length")
+    if context_length in (None, ""):
+        context_length = compat.get("context_length", 0)
     return {
         "index": idx,
         "total": state.get("total_shots", len(shots)),
@@ -284,7 +317,7 @@ def shot_params(state):
         "effective_seed": int(effective_seed or 0),
         "compatibility": compat,
         "blend_frames": shot.get("blend_frames", global_blend),
-        "context_length": shot.get("context_length") or compat.get("context_length", 0),
+        "context_length": context_length,
         "continuation_mode": shot.get("continuation_mode") or compat.get("continuation_mode", "guide"),
         "fps": int(compat.get("fps", 24) or 24),
         "width": int(compat.get("width", 1080) or 1080),
@@ -293,7 +326,6 @@ def shot_params(state):
 
 
 def _valid_h3_length(value):
-    value = int(value or 0)
     return 5 <= value <= 3592 and value % 17 == 5
 
 
@@ -306,25 +338,46 @@ def apply_shot_overrides(state, prompt="", seed=None, length=0):
 
     overrides = state.setdefault("shot_overrides", {})
     current = dict(overrides.get(str(idx), overrides.get(idx, {})) or {})
+    authored_shot = state["plan"]["shots"][idx]
+    effective_shot = params["shot"]
     prompt = str(prompt or "").strip()
     if prompt:
-        current["prompt"] = prompt
-        current["prompt_hash"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if prompt == str(authored_shot.get("prompt") or "").strip():
+            current.pop("prompt", None)
+            current.pop("prompt_hash", None)
+        else:
+            current["prompt"] = prompt
+            current["prompt_hash"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
-    if length:
-        length = int(length)
-        if not _valid_h3_length(length):
-            raise ValueError(
-                f"H3 length={length} 无效；必须位于 5..3592 且满足 17k+5（length % 17 == 5）"
-            )
-        context = int(params.get("context_length", 0) or 0) if idx > 0 else 0
-        current["raw_frames"] = length
-        current["length"] = length
-        current["delivered_frames"] = max(1, length - context)
-        current["duration_seconds"] = round(length / float(params.get("fps", 24) or 24), 6)
+    requested = int(length or 0)
+    if (isinstance(length, float) and length != requested) or (requested and not _valid_h3_length(requested)):
+        raise ValueError(
+            f"H3 length={length} 无效；必须为 0 或位于 5..3592 且满足 17k+5（length % 17 == 5）"
+        )
+    current_raw = int(effective_shot.get("raw_frames", effective_shot.get("length", 0)) or 0)
+    if requested and requested != current_raw:
+        context = 0
+        if idx > 0 and params["compatibility"].get("anchor_mode", "head") == "head":
+            context = int(authored_shot.get("context_trim_frames", params["context_length"]) or 0)
+        if requested <= context:
+            raise ValueError(f"H3 length={requested} 必须大于片头上下文 {context} 帧")
+        generated_seconds = requested / params["fps"]
+        current.update({
+            "raw_frames": requested,
+            "length": requested,
+            "delivered_frames": requested - context,
+            "context_trim_frames": context,
+            "tail_trim_frames": 0,
+            "generated_duration_seconds": generated_seconds,
+            "audio_duration_seconds": generated_seconds,
+        })
+        current.pop("duration_seconds", None)  # Drop the legacy generation-time alias.
 
+    overrides.pop(idx, None)
     if current:
         overrides[str(idx)] = current
+    else:
+        overrides.pop(str(idx), None)
 
     if seed is not None and int(seed) >= 0:
         state.setdefault("seed_overrides", {})[str(idx)] = int(seed)
@@ -465,6 +518,7 @@ __all__ = [
     "load_state",
     "save_state",
     "shot_params",
+    "is_approved_shot",
     "advance",
     "record_shot_result",
     "apply_shot_overrides",

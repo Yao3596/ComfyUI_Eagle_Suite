@@ -4,8 +4,45 @@
  */
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, onMounted, onBeforeUnmount } from "../lib/vue.esm-browser.js";
+import { loadGalleryWhenVisible, fetchGalleryReadJson } from "./gallery_visibility.js";
+import { createLoraAutoEnrichScheduler } from "./lora_auto_enrich.js";
 import { redactSecretWidgetFromWorkflow } from "./workflow_secret_redaction.js";
+import { moveKey } from "./reorder_utils.js";
+import { bindNodeWidgetScroll } from "./node_scroll.js";
 import "./eagle_vue_theme.js";
+
+// Several LoRA galleries often show the same models. Share automatic cover and
+// metadata requests so each model is fetched once and large hashes run serially.
+var autoPreviewRequests = new Map();
+var autoPreviewTail = Promise.resolve();
+function queueAutoPreviewRequest(id, apiKey) {
+  var existing = autoPreviewRequests.get(id);
+  if (existing) return existing;
+  var request = autoPreviewTail.then(function() {
+    return fetch("/lora_gallery/download_preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: id, api_key: apiKey, complete_info: true })
+    }).then(function(response) { return response.json(); });
+  });
+  autoPreviewTail = request.then(function() {}, function() {});
+  autoPreviewRequests.set(id, request);
+  request.then(function() {
+    setTimeout(function() {
+      if (autoPreviewRequests.get(id) === request) autoPreviewRequests.delete(id);
+    }, 30000);
+  }, function() {
+    setTimeout(function() {
+      if (autoPreviewRequests.get(id) === request) autoPreviewRequests.delete(id);
+    }, 30000);
+  });
+  return request;
+}
+
+var autoEnrichment = createLoraAutoEnrichScheduler({
+  readCatalog: function() { return fetchGalleryReadJson("/lora_gallery/quick_list"); },
+  completeItem: queueAutoPreviewRequest,
+});
 
 // ============================================================
 // 文件夹树（复用 Eagle Gallery 逻辑）
@@ -87,6 +124,8 @@ var LoraGallery = {
     var loading = ref(false);
 
     var selectedIds = ref([]);
+    var selectedDrop = ref(null);
+    var draggedSelectedId = null;
     var weights = ref({});
     // “已选择”与“本次应用”是两个独立状态。关闭后仍保留顺序、权重和触发词，
     // 便于临时做 LoRA A/B，而不是只能把模型从列表中删除。
@@ -124,11 +163,45 @@ var LoraGallery = {
     var activeDragCleanup = null;
     var layoutResizeObserver = null;
     var restoreTimer = null;
+    var stopVisibleLoad = null;
     var autoPreviewEnabled = ref(localStorage.getItem("eagle_lora_auto_preview") !== "0");
-    var autoPreviewQueue = [];
-    var autoPreviewQueued = {};
-    var autoPreviewRunning = false;
+    var stopAutoEnrichment = null;
+    var galleryVisible = false;
+    var autoProgress = ref({ done: 0, total: 0, running: false });
     var destroyed = false;
+
+    function onAutoEnrichmentResult(id, result) {
+      if (destroyed || !result?.success) return;
+      var item = items.value.find(function(entry) { return entry.id === id; });
+      var quickItem = quickItems.value.find(function(entry) { return entry.id === id; });
+      var selectedItem = selectedItems.value[id];
+      [item, quickItem, selectedItem].forEach(function(entry) {
+        if (!entry) return;
+        entry.hasPreview = result.hasPreview !== false;
+        entry.hasModelInfo = !!result.hasModelInfo;
+        if (result.civitaiId) entry.civitaiId = String(result.civitaiId);
+        if (result.civitaiUrl) entry.civitaiUrl = result.civitaiUrl;
+        if (Array.isArray(result.triggerWords) && result.triggerWords.length) entry.triggerWords = result.triggerWords;
+      });
+      if (result.hasPreview && (item || quickItem || selectedItem)) {
+        thumbRevision.value[id] = String(Date.now());
+        thumbRevision.value = Object.assign({}, thumbRevision.value);
+      }
+    }
+
+    function updateAutoEnrichmentRegistration() {
+      var shouldRegister = galleryVisible && !galleryCollapsed.value && autoPreviewEnabled.value && !destroyed;
+      if (shouldRegister && !stopAutoEnrichment) {
+        stopAutoEnrichment = autoEnrichment.register({
+          getApiKey: function() { return apiKey.value; },
+          onResult: onAutoEnrichmentResult,
+          onProgress: function(value) { autoProgress.value = value; },
+        });
+      } else if (!shouldRegister && stopAutoEnrichment) {
+        stopAutoEnrichment();
+        stopAutoEnrichment = null;
+      }
+    }
 
     function thumbUrl(id) {
       var revision = thumbRevision.value[id] || "0";
@@ -156,7 +229,7 @@ var LoraGallery = {
     }
 
     function loadFolders() {
-      fetch("/lora_gallery/folders").then(function(r) { return r.json(); }).then(function(d) {
+      fetchGalleryReadJson("/lora_gallery/folders").then(function(d) {
         if (d.success && Array.isArray(d.folders)) {
           var list = d.folders.slice();
           list.unshift({ id: "_all", name: "全部", children: [] });
@@ -228,9 +301,8 @@ var LoraGallery = {
     function setGalleryCollapsed(value) {
       galleryCollapsed.value = !!value;
       localStorage.setItem(collapseStorageKey, galleryCollapsed.value ? "1" : "0");
+      updateAutoEnrichmentRegistration();
       if (galleryCollapsed.value) {
-        autoPreviewQueue = [];
-        autoPreviewQueued = {};
         items.value = [];
         page.value = 1;
         total.value = 0;
@@ -247,7 +319,7 @@ var LoraGallery = {
       var p = targetPage || page.value || 1;
       if (galleryCollapsed.value || loading.value || !hasMore.value) return;
       loading.value = true;
-      fetch("/lora_gallery/list", {
+      fetchGalleryReadJson("/lora_gallery/list", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -258,7 +330,7 @@ var LoraGallery = {
           sortBy: sortBy.value,
           sortDir: sortDir.value,
         })
-      }).then(function(r) { return r.json(); }).then(function(d) {
+      }).then(function(d) {
         loading.value = false;
         if (galleryCollapsed.value) return;
         if (d.success) {
@@ -271,7 +343,6 @@ var LoraGallery = {
           total.value = d.total || 0;
           page.value = d.page || 1;
           hasMore.value = newItems.length >= pageSize.value;
-          scheduleAutoPreviews(newItems);
         }
       }).catch(function(e) {
         loading.value = false;
@@ -294,8 +365,6 @@ var LoraGallery = {
       items.value = [];
       page.value = 1;
       hasMore.value = true;
-      autoPreviewQueue = [];
-      autoPreviewQueued = {};
       loadItems(1, false);
     }
 
@@ -345,6 +414,51 @@ var LoraGallery = {
       delete weights.value[id];
       delete enabledMap.value[id];
       delete selectedItems.value[id];
+      syncSelection();
+    }
+
+    function selectedDropSide(event) {
+      var rect = event.currentTarget.getBoundingClientRect();
+      return event.clientY >= rect.top + rect.height / 2;
+    }
+
+    function startSelectedDrag(event, id) {
+      event.stopPropagation();
+      draggedSelectedId = id;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(id));
+    }
+
+    function hoverSelectedDrag(event, id) {
+      if (draggedSelectedId == null || draggedSelectedId === id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+      var after = selectedDropSide(event);
+      if (!selectedDrop.value || selectedDrop.value.id !== id || selectedDrop.value.after !== after) {
+        selectedDrop.value = { id: id, after: after };
+      }
+    }
+
+    function dropSelectedDrag(event, id) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (draggedSelectedId != null) {
+        var next = moveKey(selectedIds.value, draggedSelectedId, id, selectedDropSide(event));
+        if (next.some(function(key, index) { return key !== selectedIds.value[index]; })) {
+          selectedIds.value = next;
+          syncSelection();
+        }
+      }
+      draggedSelectedId = null;
+      selectedDrop.value = null;
+    }
+
+    function moveSelectedByKey(id, direction) {
+      var index = selectedIds.value.indexOf(id);
+      var target = selectedIds.value[index + direction];
+      if (index < 0 || target == null) return;
+      selectedIds.value = moveKey(selectedIds.value, id, target, direction > 0);
       syncSelection();
     }
 
@@ -496,7 +610,8 @@ var LoraGallery = {
     function setAutoPreviewEnabled(value) {
       autoPreviewEnabled.value = !!value;
       localStorage.setItem("eagle_lora_auto_preview", autoPreviewEnabled.value ? "1" : "0");
-      if (autoPreviewEnabled.value) scheduleAutoPreviews(items.value);
+      autoEnrichment.setEnabled(autoPreviewEnabled.value);
+      updateAutoEnrichmentRegistration();
     }
 
     var batchFilling = ref(false);
@@ -522,41 +637,6 @@ var LoraGallery = {
         });
       }
       step(0);
-    }
-
-    function scheduleAutoPreviews(newItems) {
-      if (galleryCollapsed.value || !autoPreviewEnabled.value || destroyed || !Array.isArray(newItems)) return;
-      newItems.forEach(function(item) {
-        if (!item || item.hasPreview || autoPreviewQueued[item.id]) return;
-        autoPreviewQueued[item.id] = true;
-        autoPreviewQueue.push(item.id);
-      });
-      if (!autoPreviewRunning && autoPreviewQueue.length) {
-        var start = function() { runAutoPreviewQueue(); };
-        if (typeof window.requestIdleCallback === "function") {
-          window.requestIdleCallback(start, { timeout: 1800 });
-        } else {
-          setTimeout(start, 800);
-        }
-      }
-    }
-
-    function runAutoPreviewQueue() {
-      if (galleryCollapsed.value || destroyed || !autoPreviewEnabled.value || autoPreviewRunning) return;
-      var id = autoPreviewQueue.shift();
-      if (!id) return;
-      var item = items.value.find(function(entry) { return entry.id === id; });
-      if (!item || item.hasPreview) {
-        setTimeout(runAutoPreviewQueue, 80);
-        return;
-      }
-      autoPreviewRunning = true;
-      downloadPreview(id, true).finally(function() {
-        autoPreviewRunning = false;
-        if (!galleryCollapsed.value && !destroyed && autoPreviewEnabled.value && autoPreviewQueue.length) {
-          setTimeout(runAutoPreviewQueue, 900);
-        }
-      });
     }
 
     function setApiKeyToWidget(val) {
@@ -668,15 +748,17 @@ var LoraGallery = {
     }
 
     function downloadPreview(id, silent) {
-      return fetch("/lora_gallery/download_preview", {
+      var request = silent ? queueAutoPreviewRequest(id, apiKey.value) : fetch("/lora_gallery/download_preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: id, api_key: apiKey.value })
-      }).then(function(r) { return r.json(); }).then(function(d) {
+      }).then(function(r) { return r.json(); });
+      return request.then(function(d) {
         if (d.success) {
           var item = items.value.find(function(it) { return it.id === id; });
           if (item) {
-            item.hasPreview = true;
+            item.hasPreview = d.hasPreview !== false;
+            item.hasModelInfo = !!d.hasModelInfo;
             if (d.civitaiId) item.civitaiId = String(d.civitaiId);
             if (d.civitaiUrl) item.civitaiUrl = d.civitaiUrl;
             if (Array.isArray(d.triggerWords) && d.triggerWords.length) {
@@ -822,8 +904,12 @@ var LoraGallery = {
     onMounted(function() {
       readApiKeyFromWidget();
       readManualTriggersFromWidget();
-      loadFolders();
-      if (!galleryCollapsed.value) loadItems(1, false);
+      stopVisibleLoad = loadGalleryWhenVisible(rootElRef, function() {
+        galleryVisible = true;
+        loadFolders();
+        if (!galleryCollapsed.value) loadItems(1, false);
+        updateAutoEnrichmentRegistration();
+      });
       documentClickHandler = function() { showQuickPicker.value = false; };
       document.addEventListener("click", documentClickHandler);
       restoreSplitLayout();
@@ -838,7 +924,9 @@ var LoraGallery = {
 
     onBeforeUnmount(function() {
       destroyed = true;
-      autoPreviewQueue = [];
+      stopVisibleLoad?.();
+      stopAutoEnrichment?.();
+      stopAutoEnrichment = null;
       if (restoreTimer != null) clearTimeout(restoreTimer);
       activeDragCleanup?.();
       layoutResizeObserver?.disconnect();
@@ -889,11 +977,28 @@ var LoraGallery = {
         var item = selectedItems.value[id] || items.value.find(function(it) { return it.id === id; });
         if (!item) return;
         var enabled = enabledMap.value[id] !== false;
+        var drop = selectedDrop.value && selectedDrop.value.id === id ? selectedDrop.value : null;
         selectedList.push(h("div", {
-          class: "lg-sel-item" + (enabled ? " enabled" : " disabled"), key: id,
+          class: "lg-sel-item" + (enabled ? " enabled" : " disabled") +
+            (drop ? (drop.after ? " drop-after" : " drop-before") : ""), key: id,
           title: enabled ? "已启用；点击条目临时忽略此 LoRA" : "已忽略；点击条目重新启用此 LoRA",
-          onClick: function() { toggleEnabled(id); }
+          onClick: function() { toggleEnabled(id); },
+          onDragover: function(event) { hoverSelectedDrag(event, id); },
+          onDrop: function(event) { dropSelectedDrag(event, id); }
         }, [
+          h("span", {
+            class: "lg-sel-handle", draggable: true, role: "button", tabindex: 0,
+            title: "拖动调整 LoRA 应用顺序；方向键也可调整",
+            "aria-label": "调整 " + item.name + " 的顺序",
+            onClick: function(event) { event.stopPropagation(); },
+            onDragstart: function(event) { startSelectedDrag(event, id); },
+            onDragend: function() { draggedSelectedId = null; selectedDrop.value = null; },
+            onKeydown: function(event) {
+              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+              event.preventDefault(); event.stopPropagation();
+              moveSelectedByKey(id, event.key === "ArrowUp" ? -1 : 1);
+            }
+          }, "⋮⋮"),
           h("img", { src: thumbUrl(id), class: "lg-sel-thumb", loading: "lazy", decoding: "async" }),
           h("div", { class: "lg-sel-info" }, [
             h("div", { class: "lg-sel-name", title: item.name }, item.name),
@@ -1173,8 +1278,9 @@ var LoraGallery = {
             ]),
             h("label", { class: "lg-auto-preview" }, [
               h("input", { type: "checkbox", checked: autoPreviewEnabled.value, onChange: function(e) { setAutoPreviewEnabled(e.target.checked); } }),
-              h("span", "空闲时自动补全无封面模型（单任务低速）")
+              h("span", "空闲时自动补全全部模型封面和信息（全画廊共用队列，拖动画布时暂停下一项）")
             ]),
+            autoProgress.value.total ? h("div", { class: "lg-modal-tip" }, "后台补全 " + autoProgress.value.done + "/" + autoProgress.value.total) : null,
             h("div", { class: "lg-modal-tip" }, "API Key 仅保存在当前节点 widget 中；自动补全优先读取旁车信息，必要时会计算并向 civitai.red 发送模型文件 SHA256 以识别版本。")
           ]),
           h("div", { class: "lg-modal-ft" }, [
@@ -1295,6 +1401,7 @@ var LoraGallery = {
           h("button", { class: "lg-btn", onClick: function() { sortDir.value = sortDir.value === "asc" ? "desc" : "asc"; doSearch(); } }, sortDir.value === "asc" ? "升序" : "降序"),
           h("button", { class: "lg-btn", onClick: function() {
             fetch("/lora_gallery/clear_cache", {method:"POST"}).then(function() {
+              autoEnrichment.refresh();
               quickLoaded = false;
               quickItems.value = [];
               loadFolders();
@@ -1425,6 +1532,10 @@ var CSS = [
   ".lg-sel-list{flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px;min-height:0}",
   ".lg-selected-full .lg-sel-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));grid-auto-rows:min-content;align-content:start;padding:12px;gap:10px}",
   ".lg-sel-item{display:flex;align-items:center;gap:8px;padding:6px;background:#1a1a24;border-radius:6px;border:1px solid #2a2a32;cursor:pointer;transition:background .15s,border-color .15s,opacity .15s}",
+  ".lg-sel-item.drop-before{box-shadow:inset 0 3px #78aaff}",
+  ".lg-sel-item.drop-after{box-shadow:inset 0 -3px #78aaff}",
+  ".lg-sel-handle{flex:0 0 13px;cursor:grab;color:#9bb5dc;font-size:12px;line-height:1;user-select:none;touch-action:none}",
+  ".lg-sel-handle:active{cursor:grabbing}",
   ".lg-sel-item.enabled{border-color:#3b73d1;background:#223554;box-shadow:inset 3px 0 #4a86eb}",
   ".lg-sel-item.enabled:hover{background:#294266;border-color:#5593ef}",
   ".lg-sel-item.disabled{opacity:.58;border-style:dashed;background:#14141a}",
@@ -1567,7 +1678,10 @@ app.registerExtension({
       var el = document.createElement("div");
       // DOM widget 的百分比宽度会受创建时布局缓存影响。节点变宽后改用实时像素宽度，
       // 避免 Vue 画廊仍停留在旧宽度并被挤在节点左侧。
-      el.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
+      // Nodes 2.0 mounts this in an auto-sized grid/flex row. Isolate its
+      // intrinsic size so all cards cannot enlarge the row past the node.
+      // Native flex sizing still fills the available space on either renderer.
+      el.style.cssText = "width:940px;max-width:none;min-width:0;min-height:280px;height:100%;contain:size;box-sizing:border-box;overflow:hidden;border-radius:0 0 8px 8px;background:#121216;";
 
       var INITIAL_VIEWPORT_HEIGHT = 550;
       var MIN_VIEWPORT_HEIGHT = 280;
@@ -1580,6 +1694,7 @@ app.registerExtension({
         getHeight: function() { return currentViewportHeight; },
       });
       widget.width = undefined;
+      this._lgReleaseWheel = bindNodeWidgetScroll(el);
       widget._eagleViewportHeight = INITIAL_VIEWPORT_HEIGHT;
       // Do not install an instance computeSize override here.  Current ComfyUI
       // classifies any such widget as fixed-height; the inherited
@@ -1651,6 +1766,8 @@ app.registerExtension({
 
     var onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function() {
+      this._lgReleaseWheel?.();
+      this._lgReleaseWheel = null;
       if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
       this._lgApplyFrame = null;
       this._eagleRestoreUiState = null;

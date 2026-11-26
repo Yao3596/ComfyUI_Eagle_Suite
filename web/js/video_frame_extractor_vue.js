@@ -7,6 +7,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { pauseReviewAutoQueue, queueNodeTask } from "./review_gate_flow.js";
 import { createApp, ref, computed, onBeforeUnmount } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 
@@ -571,6 +572,7 @@ const FrameSelector = {
     }
 
     async function refreshPreview() {
+      pauseReviewAutoQueue(app);
       persist("size_mode", sizeMode.value);
       persist("extract_audio", extractAudio.value);
       persist("lock_aspect_ratio", lockAspectRatio.value);
@@ -582,9 +584,9 @@ const FrameSelector = {
       const revision = (Number(widgetValue(node, "preview_revision", 0)) || 0) + 1;
       setWidgetValue(node, "preview_revision", revision);
       running.value = true;
-      status.value = "正在执行工作流并生成预览…";
+      status.value = "正在生成当前节点预览…";
       try {
-        await app.queuePrompt(0);
+        await queueNodeTask(app, node);
       } catch (error) {
         running.value = false;
         status.value = `无法执行：${error?.message || error}`;

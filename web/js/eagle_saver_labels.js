@@ -20,7 +20,8 @@ const LABEL_MAP = {
   "save_metadata_json": "输出 JSON 元数据",
   "tags": "标签",
   "star": "评分",
-  "annotation": "注释"
+  "annotation": "注释",
+  "fill_number_gaps": "填补编号"
 };
 
 function getWidget(node, name) {

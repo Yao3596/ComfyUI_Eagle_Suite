@@ -259,37 +259,19 @@ DEFAULT_CONFIG = {
     "default_category": "自定义"
 }
 
-# 内置模板
+# 随插件分发少量通用示例。用户模板从独立的本地文件加载。
 PROMPT_TEMPLATES = {
     "图片编辑 (kontext)": [
         {"Label": "移除物体", "Instruction": "remove the {{target}}", "example": "remove the grapes on the left"},
         {"Label": "主体微调", "Instruction": "make the object {{adjustment}}", "example": "make the object head gigantic"},
-        {"Label": "替换主体", "Instruction": "turn the object into a {{replacement}}", "example": "turn the object into a mech"},
-        {"Label": "添加物件", "Instruction": "give the object a {{item}}", "example": "give the object a hat"},
-        {"Label": "更换背景", "Instruction": "Replace the background with a {{scene}}", "example": "Replace the background with a desert"},
-        {"Label": "添加文字", "Instruction": 'write the words "{{text}}"', "example": 'write the words "Hello World" in the bottom left'},
-        {"Label": "移除水印", "Instruction": "remove the watermark", "example": "remove the watermark"},
-        {"Label": "高清修复", "Instruction": "unblur the photo, make it more clear", "example": "unblur the photo"},
     ],
     "风格转换": [
         {"Label": "转动漫风格", "Instruction": "Make this into anime", "example": "Make this into anime"},
         {"Label": "转写实风格", "Instruction": "Make this a real photo", "example": "Make this a real photo"},
-        {"Label": "水彩画", "Instruction": "Turn this into a watercolor painting", "example": "Turn this into a watercolor painting"},
-        {"Label": "钢笔画", "Instruction": "turn this into a detailed pen and ink sketch", "example": "turn this into a detailed pen and ink sketch"},
-        {"Label": "木炭素描", "Instruction": "convert this picture to a charcoal sketch", "example": "convert this picture to a charcoal sketch"},
-        {"Label": "黑白漫画", "Instruction": "turn this into a manga panel", "example": "turn this into a manga panel"},
-        {"Label": "像素化", "Instruction": "Turn this into pixel art", "example": "Turn this into pixel art"},
-        {"Label": "3D化", "Instruction": "turn this into a low poly isometric render", "example": "turn this into a low poly 3d render"},
-        {"Label": "吉卜力风格", "Instruction": "This image in the style of Studio Ghibli", "example": "This image in the style of Studio Ghibli"},
-        {"Label": "贴纸化", "Instruction": "A sticker of this image", "example": "A sticker of this image"},
     ],
     "镜头/视角": [
         {"Label": "推进镜头", "Instruction": "Zoom in on the object closest to the camera", "example": "Zoom in on the object"},
         {"Label": "拉远镜头", "Instruction": "Zoom out to show the whole scene", "example": "Zoom out to show the whole scene"},
-        {"Label": "俯瞰镜头", "Instruction": "show me an aerial view from above", "example": "show me an aerial view from above"},
-        {"Label": "无人机视角", "Instruction": "An aerial drone shot of this scene", "example": "An aerial drone shot"},
-        {"Label": "侧视图", "Instruction": "Generate a side view of this subject", "example": "Generate a side view"},
-        {"Label": "正视图", "Instruction": "Generate a front view of this subject", "example": "Generate a front view"},
     ],
 }
 

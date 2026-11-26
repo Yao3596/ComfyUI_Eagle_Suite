@@ -5,10 +5,12 @@ import {
   isValidRetryLength,
   normalizeReview,
   normalizeWorkspace,
+  pendingReviewIdentity,
   reviewPhase,
   serializeWorkspace,
   snapRetryLength,
   takeKey,
+  workspaceForPendingReview,
 } from "../src/lib/contracts.js";
 
 const migrated = normalizeWorkspace({
@@ -38,6 +40,28 @@ const review = normalizeReview({
 assert.equal(review.history.length, 1);
 assert.equal(takeKey(review.history[0]), "2:1");
 assert.equal(reviewPhase(review), "reviewing");
+assert.equal(reviewPhase(normalizeReview({})), "idle");
+assert.equal(reviewPhase(normalizeReview({ approved: true })), "approved");
+assert.equal(reviewPhase(normalizeReview({ decision: "stop" })), "stopped");
+assert.equal(reviewPhase(normalizeReview({ mode: "history", awaiting_review: true })), "history");
+assert.equal(reviewPhase(normalizeReview({ restored_history: true })), "history");
+
+const pending = normalizeReview({
+  ...review, run_name: "run-a", token: "live-token", prompt: "current", seed: 12, length: 243,
+});
+const retryDraft = workspaceForPendingReview(migrated, pending, true);
+assert.equal(retryDraft.retryLength, 0);
+assert.equal(retryDraft.retryPrompt, "current");
+assert.equal(retryDraft.assemblePartial, false);
+assert.equal(retryDraft.autoplay, true);
+const savedDraft = serializeWorkspace({ ...retryDraft, retryPrompt: "draft", retryLength: 260 });
+assert.equal(savedDraft.includes("live-token"), false);
+const recovered = workspaceForPendingReview(normalizeWorkspace(savedDraft), pending, true);
+assert.equal(recovered.retryLength, 260);
+assert.equal(recovered.retryPrompt, "draft");
+assert.equal(workspaceForPendingReview(recovered, { ...pending, run_name: "run-b" }, true).retryLength, 0);
+assert.equal(workspaceForPendingReview(recovered, pending, false).retryLength, 0);
+assert.notEqual(pendingReviewIdentity(pending), pendingReviewIdentity({ ...pending, token: "next-token" }));
 
 assert.equal(snapRetryLength(0), 0);
 assert.equal(snapRetryLength(5), 5);

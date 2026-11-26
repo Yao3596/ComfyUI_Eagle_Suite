@@ -9,9 +9,14 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
+
+from aiohttp.test_utils import make_mocked_request
 
 import numpy as np
 import torch
@@ -34,6 +39,8 @@ SPEC.loader.exec_module(PACKAGE)
 from eagle_suite_test_package.eagle_suite.h3_pipeline import state as h3_state
 from eagle_suite_test_package.eagle_suite.h3_pipeline import media_utils
 from eagle_suite_test_package.eagle_suite.h3_pipeline import nodes as h3_nodes
+from eagle_suite_test_package.eagle_suite.h3_pipeline import routes as h3_routes
+from eagle_suite_test_package.eagle_suite import h3_director_node as h3_director
 from eagle_suite_test_package.eagle_suite.h3_pipeline.nodes import (
     EagleH3PlanNode,
     EagleH3PlanInteropNode,
@@ -245,6 +252,95 @@ class H3ChainTests(unittest.TestCase):
         self.assertIn("ref_video_audio_0", optional)
         self.assertIn("ref_audio_0", optional)
         self.assertNotIn("video_frames_1", optional)
+
+    def test_media_bridge_round_trip_routes_sparse_video_and_audio_by_physical_slot(self):
+        bridge = EagleH3MediaBridgeNode()
+        video = torch.ones((5, 8, 8, 3))
+        paired = {"waveform": torch.ones((1, 1, 800)), "sample_rate": 8000}
+        audio = {"waveform": torch.zeros((1, 1, 800)), "sample_rate": 8000}
+        result = bridge.execute(ref_video_2=video, ref_video_audio_2=paired, ref_audio_2=audio)
+        # Passing the bridge bundle through another bridge must keep its third-slot identity.
+        bundle = bridge.execute(media_bundle=result[0])[0]
+        self.assertIs(video, bundle["video_slots"][2])
+        self.assertIs(audio, bundle["audio_slots"][2])
+        prompt = "Match <Video 3> with <Audio 3>."
+        state = {"plan": {"shots": [{"scene_prompt": prompt}]}}
+        compiled, grouped, report = _prepare_reference_condition(state, bundle, prompt)
+        self.assertEqual("Match <Video 1> with <Audio 2>.", compiled)
+        self.assertIs(video, grouped["video"][0]["value"])
+        self.assertIs(paired, grouped["video"][0]["paired_audio"])
+        self.assertIs(audio, grouped["audio"][0]["value"])
+        self.assertEqual(["<Video 3>", "<Audio 3>"], [entry["source"] for entry in report["active"]])
+
+    def test_media_bridge_merges_external_ports_above_empty_director_mapping(self):
+        node = h3_director.EagleH3DirectorNode()
+        director = node.execute(h3_state=json.dumps({"scenes": [{"id": 1}]}))["result"][6]
+        self.assertEqual([], json.loads(director["media_mapping"]))
+        bridge = EagleH3MediaBridgeNode()
+        video = torch.ones((5, 8, 8, 3))
+        bundle, first_image, *outputs = bridge.execute(media_bundle=director, ref_video_2=video)
+        self.assertEqual(0, outputs[-3])
+        self.assertIsNone(first_image)
+        _compiled, grouped, report = _prepare_reference_condition({}, bundle, "<Video 3> motion")
+        self.assertEqual(["<Video 3>"], [entry["source"] for entry in report["active"]])
+        self.assertIs(video, grouped["video"][0]["value"])
+
+        # A real black external image remains selectable as a reference and seed.
+        black_image = torch.zeros((1, 64, 64, 3))
+        result = bridge.execute(media_bundle=director, ref_images=black_image)
+        self.assertTrue(torch.equal(black_image, result[1]))
+        self.assertEqual(1, result[-3])
+
+    def test_media_bridge_merges_legacy_positional_mapping_with_new_ports(self):
+        bridge = EagleH3MediaBridgeNode()
+        existing = torch.ones((5, 8, 8, 3))
+        external = torch.zeros_like(existing)
+        source = {
+            "version": 2,
+            "media_mapping": json.dumps([{"type": "video", "name": "director clip"}]),
+            "video_slots": [existing, None, None],
+        }
+        bundle = bridge.execute(media_bundle=source, ref_video_2=external)[0]
+        _compiled, grouped, report = _prepare_reference_condition({}, bundle, "<Video 1> then <Video 3>")
+        self.assertEqual(["<Video 1>", "<Video 3>"], [entry["source"] for entry in report["active"]])
+        self.assertEqual("director clip", report["active"][0]["name"])
+        self.assertIs(existing, grouped["video"][0]["value"])
+        self.assertIs(external, grouped["video"][1]["value"])
+
+    def test_director_skill_request_always_blocks_downstream(self):
+        from comfy_execution.graph_utils import ExecutionBlocker
+
+        director = h3_director.EagleH3DirectorNode()
+        cases = (json.dumps({"run": True, "blockDownstream": False}), "{", "[]")
+        for request in cases:
+            with self.subTest(request=request), \
+                    patch.object(h3_director, "run_director_skill", return_value={}), \
+                    patch.object(h3_director, "compile_h3_params", wraps=h3_director.compile_h3_params) as compile_plan:
+                outputs = director.execute(skill_request=request)
+                self.assertEqual(len(director.RETURN_TYPES), len(outputs))
+                self.assertTrue(all(isinstance(output, ExecutionBlocker) for output in outputs))
+                compile_plan.assert_not_called()
+
+    def test_director_skill_request_publishes_correlated_errors_without_compiling(self):
+        from comfy_execution.graph_utils import ExecutionBlocker
+        from server import PromptServer
+
+        request = {"run": True, "sceneId": 8, "requestId": "request-1", "batchId": "batch-2"}
+        with patch.object(PromptServer, "instance", create=True) as server, \
+                patch.object(h3_director, "run_director_skill", side_effect=OSError("test model error")), \
+                patch.object(h3_director, "compile_h3_params") as compile_plan:
+            outputs = h3_director.EagleH3DirectorNode().execute(
+                skill_request=json.dumps(request), node_id="42",
+            )
+        self.assertTrue(all(isinstance(output, ExecutionBlocker) for output in outputs))
+        compile_plan.assert_not_called()
+        server.send_sync.assert_called_once()
+        event, data = server.send_sync.call_args.args
+        self.assertEqual("h3_director_skill_result", event)
+        self.assertEqual(("42", "request-1", "batch-2", 8), (
+            data["node_id"], data["requestId"], data["batchId"], data["sceneId"],
+        ))
+        self.assertIn("test model error", data["error"])
 
     def test_start_node_outputs_dimensions(self):
         plan = _sample_plan()
@@ -1599,6 +1695,30 @@ class H3ChainTests(unittest.TestCase):
         state2 = out2["result"][0]
         self.assertEqual(state2["current_index"], 1)
 
+    def test_resume_repairs_legacy_stop_cursor_and_keeps_shot_records(self):
+        for decision, expected_index in (("approve_stop", 1), ("stop", 0)):
+            with self.subTest(decision=decision):
+                plan = _sample_plan()
+                state = h3_state.init_state(
+                    plan, str(self.tmpdir), run_name_override=decision, resume_policy="overwrite"
+                )
+                manifest_path = pathlib.Path(state["base_dir"]) / "manifest.json"
+                shots = [{"index": 0, "clip": "/legacy/take.mp4", "decision": decision}]
+                manifest_path.write_text(json.dumps({
+                    "plan": plan, "current_index": 0, "stop": True,
+                    "shots": shots, "pending_decision": "stop", "awaiting_review": True,
+                    "manifest_status": "partial",
+                }), encoding="utf-8")
+                resumed = h3_state.init_state(
+                    plan, str(self.tmpdir), run_name_override=decision, resume_policy="resume"
+                )
+                self.assertEqual(expected_index, resumed["current_index"])
+                self.assertEqual(shots, resumed["shots"])
+                self.assertFalse(resumed["stop"])
+                self.assertFalse(resumed.get("awaiting_review"))
+                self.assertIsNone(resumed.get("pending_decision"))
+                self.assertEqual("running", resumed["manifest_status"])
+
     def test_current_shot_outputs_prompt_and_seed(self):
         plan = _sample_plan()
         out = EagleH3PlanNode().execute(plan, output_dir=str(self.tmpdir), resume_policy="overwrite")
@@ -1744,6 +1864,96 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(original_prompt, state["plan"]["shots"][0]["prompt"])
         with self.assertRaisesRegex(ValueError, "17k\\+5"):
             h3_state.apply_shot_overrides(state, length=120)
+
+    def test_retry_unchanged_raw_length_preserves_the_editorial_timeline(self):
+        for anchor in ("head", "before"):
+            project = {"fps": 24, "anchorMode": anchor, "contextLength": 22}
+            plan = compile_h3_params(project, [{"defaultSeconds": 10}] * 2, anchor)
+            state = self._init_state(plan)
+            for index in range(2):
+                state["current_index"] = index
+                authored = plan["shots"][index]
+                for length in (0, "0", authored["raw_frames"]):
+                    with self.subTest(anchor=anchor, index=index, length=length):
+                        h3_state.apply_shot_overrides(state, prompt="Retake", length=length)
+                        effective = h3_state.shot_params(state)["shot"]
+                        self.assertEqual(240, effective["delivered_frames"])
+                        self.assertEqual(authored["raw_frames"], effective["raw_frames"])
+                        self.assertEqual(10, effective["duration_seconds"])
+
+    def test_retry_manual_length_uses_the_head_prefix_and_keeps_audio_in_sync(self):
+        raw_frames = 107
+        fps = 24
+        frames = torch.arange(raw_frames).reshape(-1, 1, 1, 1).expand(-1, 2, 2, 3)
+        waveform = torch.arange(raw_frames * 10).reshape(1, 1, -1)
+        audio = {"waveform": waveform, "sample_rate": fps * 10}
+        for anchor, trim in (("head", 22), ("before", 0)):
+            with self.subTest(anchor=anchor):
+                plan = compile_h3_params(
+                    {"fps": fps, "anchorMode": anchor, "contextLength": 22},
+                    [{"defaultSeconds": 10}] * 2, anchor,
+                )
+                state = self._init_state(plan)
+                state["current_index"] = 1
+                h3_state.apply_shot_overrides(state, length=raw_frames)
+                effective = h3_state.shot_params(state)["shot"]
+                self.assertEqual(raw_frames, effective["length"])
+                self.assertEqual(raw_frames, effective["raw_frames"])
+                self.assertEqual(raw_frames - trim, effective["delivered_frames"])
+                self.assertEqual(10, effective["duration_seconds"])
+                self.assertEqual(240, effective["timeline_frames"])
+                self.assertEqual(trim, effective["context_trim_frames"])
+                self.assertEqual(0, effective["tail_trim_frames"])
+                self.assertAlmostEqual(raw_frames / fps, effective["generated_duration_seconds"])
+                self.assertAlmostEqual(raw_frames / fps, effective["audio_duration_seconds"])
+                self.assertEqual(240, plan["shots"][1]["delivered_frames"])
+                delivered, synced_audio, _, _ = EagleH3FrameTrimNode().execute(
+                    frames, audio=audio, fps=fps, trim_frames=trim,
+                    target_frames=effective["delivered_frames"],
+                )
+                self.assertTrue(torch.equal(delivered, frames[trim:]))
+                self.assertTrue(torch.equal(synced_audio["waveform"], waveform[..., trim * 10:]))
+
+                if trim:
+                    with self.assertRaisesRegex(ValueError, "上下文"):
+                        h3_state.apply_shot_overrides(state, length=22)
+                else:
+                    h3_state.apply_shot_overrides(state, length=22)
+                    self.assertEqual(22, h3_state.shot_params(state)["shot"]["delivered_frames"])
+
+    def test_retry_and_reroll_route_references_from_the_revised_scene_text(self):
+        project = {
+            "mode": "r2v",
+            "mediaRefs": [
+                {"type": "image", "filename": "a.png", "name": "first actor"},
+                {"type": "image", "filename": "b.png", "name": "second actor"},
+            ],
+        }
+        plan = compile_h3_params(project, [{"preamble": "Use <Picture 1> in the scene."}])
+        state = self._init_state(plan)
+        image_a = torch.zeros((1, 8, 8, 3))
+        image_b = torch.ones((1, 8, 8, 3))
+        bundle = {"ref_images": [image_a, image_b], "media_mapping": plan["reference_media"]}
+        # Match the review editor, which opens the full prompt with its global definitions.
+        revised_prompt = plan["shots"][0]["prompt"].replace(
+            "Use <Picture 1> in the scene.", "Use <Picture 2> in the scene."
+        )
+        h3_state.apply_shot_overrides(state, prompt=revised_prompt)
+        for decision in ("retry", "reroll"):
+            with self.subTest(decision=decision):
+                state, _, _ = h3_state.advance(state, decision)
+                effective_prompt = EagleH3CurrentShotNode().execute(state)[0]
+                compiled, grouped, report = _prepare_reference_condition(state, bundle, effective_prompt)
+                self.assertEqual(["<Picture 2>"], [item["source"] for item in report["active"]])
+                self.assertIs(grouped["image"][0]["value"], image_b)
+                self.assertNotIn("first actor", compiled)
+                self.assertIn("Use <Picture 1> in the scene.", compiled)
+
+        h3_state.apply_shot_overrides(state, prompt="An empty hallway.")
+        effective_prompt = EagleH3CurrentShotNode().execute(state)[0]
+        compiled, _grouped, report = _prepare_reference_condition(state, bundle, effective_prompt)
+        self.assertEqual("An empty hallway.", compiled)
+        self.assertEqual([], report["active"])
 
     def test_checkpoint_history_retains_immutable_revisions(self):
         state = self._init_state(_sample_plan())
@@ -1967,6 +2177,62 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(2, len(payload["samples"]))
         self.assertEqual(22, payload["context_frames"].shape[0])
         self.assertTrue(torch.equal(images[-22:], payload["context_frames"]))
+
+    def test_checkpoint_uses_selected_audio_and_preserves_the_video_frames(self):
+        source = self.tmpdir / "source.mp4"
+        ffmpeg = media_utils._check_ffmpeg()
+        subprocess.run([
+            ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=s=64x64:r=24:d=1",
+            "-f", "lavfi", "-i", "sine=f=440:r=16000:d=1",
+            "-c:v", "libx264", "-c:a", "aac", "-shortest", str(source),
+        ], check=True, capture_output=True)
+        sample_rate = 16000
+        time = torch.arange(sample_rate // 2) / sample_rate
+        audio = {"waveform": torch.sin(2 * torch.pi * 880 * time)[None, None], "sample_rate": sample_rate}
+        state = self._init_state(_sample_plan())
+        state["plan"]["shots"][0]["delivered_frames"] = 24
+        output = asyncio.run(EagleH3CheckpointReviewNode().execute(
+            state, video=media_utils.native_video(source), audio=audio,
+        ))
+        saved = output["result"][7]
+        self.assertTrue(saved["audio"])
+        self.assertEqual("approved", saved["decision"])
+        self.assertEqual(24, media_utils.probe_decoded_frame_count(saved["clip"]))
+        result = subprocess.run([
+            ffmpeg, "-v", "error", "-i", saved["clip"], "-map", "0:a:0",
+            "-f", "f32le", "-ar", str(sample_rate), "-ac", "1", "-",
+        ], check=True, capture_output=True)
+        samples = np.frombuffer(result.stdout, dtype=np.float32)[:sample_rate // 2]
+        peak_hz = np.argmax(np.abs(np.fft.rfft(samples))) * sample_rate / len(samples)
+        self.assertAlmostEqual(880, peak_hz, delta=2)
+
+    def test_checkpoint_still_saves_video_only_without_an_audio_input(self):
+        state = self._init_state(_sample_plan())
+        state["plan"]["shots"][0]["delivered_frames"] = 5
+        output = asyncio.run(EagleH3CheckpointReviewNode().execute(
+            state, images=torch.zeros((5, 16, 16, 3)),
+        ))
+        saved = output["result"][7]
+        ffmpeg = media_utils._check_ffmpeg()
+        streams = media_utils._probe_concat_streams(
+            saved["clip"], ffmpeg, media_utils._concat_probe_path(ffmpeg),
+        )
+        self.assertFalse(saved["audio"])
+        self.assertEqual("approved", saved["decision"])
+        self.assertEqual(["video"], [stream["codec_type"] for stream in streams])
+
+    def test_legacy_silent_pending_take_cannot_be_approved_with_audio_required(self):
+        state = self._init_state(_sample_plan())
+        clip_path = self.tmpdir / "silent_pending.mp4"
+        media_utils.frames_to_video(np.zeros((5, 16, 16, 3), dtype=np.uint8), clip_path, fps=24)
+        h3_state.record_shot_result(state, clip_path, decision="pending", meta={"audio": True})
+        h3_state.save_state(state)
+        with self.assertRaisesRegex(RuntimeError, "缺少已连接的音轨"):
+            asyncio.run(EagleH3CheckpointReviewNode().execute(
+                state, review_decision="approve",
+                audio={"waveform": torch.zeros((1, 1, 800)), "sample_rate": 8000},
+            ))
+        self.assertEqual("pending", h3_state.load_state(state["base_dir"])["shots"][0]["decision"])
 
     def test_native_end_carries_compact_av_latent_and_frame_tail(self):
         state = self._init_state(_sample_plan())
@@ -2199,6 +2465,62 @@ class H3ChainTests(unittest.TestCase):
         self.assertEqual(240, overlap.shape[0])
         self.assertEqual(0, overlap_frames)
         self.assertEqual(10000, synced["waveform"].shape[-1])
+
+
+class H3ReviewRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_custom_output_pending_review_recovers_previews_and_approves_the_right_run(self):
+        with tempfile.TemporaryDirectory(prefix="h3_custom_review_") as output_dir:
+            output_root = pathlib.Path(output_dir)
+            state = h3_state.init_state(_sample_plan(), output_root / "custom", mode="interactive")
+            custom_run = pathlib.Path(state["base_dir"])
+            default_output = output_root / "default"
+            default_run = default_output / "h3_eagle_chains" / state["run_name"]
+            default_run.mkdir(parents=True)
+            clip = custom_run / "test_preview.mp4"
+            clip.write_bytes(b"review fixture")
+            h3_state.record_shot_result(state, clip, decision="pending")
+
+            def submit(token, name=state["run_name"]):
+                return h3_routes.post_review(SimpleNamespace(
+                    query={"run": name},
+                    text=AsyncMock(return_value=json.dumps({"decision": "approve", "token": token})),
+                ))
+
+            with patch.object(h3_routes.folder_paths, "get_output_directory", return_value=str(default_output)):
+                task = asyncio.create_task(EagleH3ReviewGateNode().execute(state, str(clip), unique_id="5.9.42"))
+                try:
+                    await asyncio.sleep(0)
+                    pending = await h3_routes.get_pending_review(make_mocked_request(
+                        "GET", "/eagle_h3_pipeline/review/pending?run=test_run&node=42",
+                    ))
+                    self.assertEqual(200, pending.status)
+                    payload = json.loads(pending.body)["review"]
+                    token = payload["token"]
+                    self.assertEqual(payload["preview_url"], payload["history"][0]["preview_url"])
+                    denied = await submit(token, "other_run")
+                    self.assertFalse(json.loads(denied.body).get("resolved"))
+                    self.assertFalse(task.done())
+
+                    approved = await submit(token)
+                    self.assertTrue(json.loads(approved.body)["resolved"])
+                    decision = await asyncio.wait_for(task, timeout=1)
+                    self.assertTrue(decision["result"][3])
+                    self.assertEqual([], list(default_run.glob("review_decision_*")))
+                    decisions = list(custom_run.glob("review_decision_*"))
+                    self.assertEqual(1, len(decisions))
+                    self.assertEqual("approve", json.loads(decisions[0].read_text(encoding="utf-8"))["decision"])
+
+                    preview_request = make_mocked_request("GET", payload["preview_url"])
+                    preview = await h3_routes.get_preview(preview_request)
+                    self.assertEqual(200, preview.status)
+                    self.assertEqual(clip.resolve(), preview._path)
+                    invalid = await h3_routes.get_preview(make_mocked_request("GET", payload["preview_url"] + "x"))
+                    self.assertEqual(404, invalid.status)
+                finally:
+                    if not task.done():
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
 
 
 class H3ReviewSafetyTests(unittest.TestCase):

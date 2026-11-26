@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -130,7 +131,7 @@ class H3NativePromptExecutorTests(unittest.TestCase):
                 scene = int(state["current_index"])
                 sampler_calls.append((int(stage), scene))
                 images = torch.full(
-                    (6, 2, 2, 3), float(scene) / 10.0, dtype=torch.float32
+                    (17, 16, 16, 3), float(scene) / 10.0, dtype=torch.float32
                 )
                 latent = {"samples": [
                     torch.full((1, 16, 2, 1, 1), float(scene)),
@@ -224,8 +225,8 @@ class H3NativePromptExecutorTests(unittest.TestCase):
     def _install_review_decisions(self, decisions):
         remaining = deque(decisions)
 
-        def open_and_submit(node_id=None, run_name=None):
-            token, future = self.original_open_review(node_id, run_name)
+        def open_and_submit(node_id=None, run_name=None, base_dir=None):
+            token, future = self.original_open_review(node_id, run_name, base_dir)
             if not remaining:
                 raise AssertionError("unexpected extra H3 review request")
             decision = remaining.popleft()
@@ -305,7 +306,7 @@ class H3NativePromptExecutorTests(unittest.TestCase):
             }},
         }
 
-    def _run(self, mode, decisions=()):
+    def _run(self, mode, decisions=(), *, resume_policy="overwrite", auto_assemble=False):
         remaining = None
         if mode == "interactive":
             remaining = self._install_review_decisions(decisions)
@@ -316,8 +317,11 @@ class H3NativePromptExecutorTests(unittest.TestCase):
             cache_type=False,
             cache_args={"ram": 0.0, "ram_inactive": 0.0},
         )
+        prompt = self._prompt(mode)
+        prompt["start"]["inputs"]["resume_policy"] = resume_policy
+        prompt["end"]["inputs"]["auto_assemble"] = auto_assemble
         executor.execute(
-            self._prompt(mode),
+            prompt,
             f"h3-native-executor-{mode}-{'-'.join(decisions) or 'auto'}",
             execute_outputs=["end", "save", "preview", "history"],
         )
@@ -421,6 +425,67 @@ class H3NativePromptExecutorTests(unittest.TestCase):
         self.assertEqual(1, manifest["current_index"])
         self.assertTrue(manifest["stop"])
         self.assertEqual("partial", manifest["manifest_status"])
+
+    def test_resume_after_approve_stop_keeps_previous_takes_and_assembles_all_scenes(self):
+        _executor, stopped = self._run("interactive", ("retry", "approve_stop"))
+        self.assertEqual("partial", stopped["manifest_status"])
+        self.assertEqual(2, len(stopped["shots"][0]["revisions"]))
+
+        self.sampler_calls.clear()
+        self.saver_calls.clear()
+        self.preview_calls.clear()
+        _executor, resumed = self._run(
+            "interactive", ("approve", "approve", "approve"),
+            resume_policy="resume", auto_assemble=True,
+        )
+        self.assertEqual(
+            [(stage, scene) for scene in (1, 2, 3) for stage in (1, 2, 3)],
+            self.sampler_calls,
+        )
+        self._assert_branch_counts((1, 2, 3))
+        self.assertEqual(stopped["shots"][0], resumed["shots"][0])
+        self.assertEqual(stopped["checkpoint_history"], resumed["checkpoint_history"][:2])
+        self.assertFalse(resumed["stop"])
+        self.assertEqual(4, resumed["current_index"])
+        self.assertEqual("complete", resumed["manifest_status"])
+        final_dir = pathlib.Path(resumed["base_dir"]) / "final"
+        outputs = list(final_dir.glob("*.mp4"))
+        self.assertEqual(1, len(outputs))
+        self.assertEqual(68, h3_nodes.probe_decoded_frame_count(outputs[0]))
+
+    def test_mux_failure_stops_the_production_checkpoint_before_approval(self):
+        prompt = self._prompt("auto")
+        for unused in ("sample_refine", "sample_decode", "save", "preview", "history"):
+            prompt.pop(unused)
+        checkpoint_id = "review"
+        prompt[checkpoint_id] = {
+            "class_type": "EagleH3CheckpointReviewNode",
+            "inputs": {
+                "state": ["sample_base", 0], "images": ["sample_base", 1],
+                "sampled_latent": ["sample_base", 2],
+                "audio": {"waveform": torch.ones((1, 1, 12000)), "sample_rate": 16000},
+            },
+        }
+        prompt["end"]["inputs"].update({
+            "state": [checkpoint_id, 1], "decision": [checkpoint_id, 2],
+            "images": ["sample_base", 1], "sampled_latent": ["sample_base", 2],
+        })
+        executor = PromptExecutor(
+            _FakeServer(), cache_type=False, cache_args={"ram": 0.0, "ram_inactive": 0.0},
+        )
+        with patch.object(h3_nodes, "merge_audio_video", side_effect=OSError("test audio mux failure")):
+            executor.execute(prompt, "h3-production-checkpoint-audio-failure", execute_outputs=["end"])
+
+        self.assertFalse(executor.success)
+        errors = [data for event, data in executor.status_messages if event == "execution_error"]
+        self.assertEqual(1, len(errors))
+        self.assertIn("test audio mux failure", errors[0]["exception_message"])
+        manifest_path = self.tmpdir / "h3_eagle_chains" / "test_run" / "manifest.json"
+        state = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(0, state["current_index"])
+        self.assertEqual([], state["shots"])
+        self.assertEqual([], state["checkpoint_history"])
+        self.assertFalse(list((manifest_path.parent / "shots").rglob("clip_r*")))
 
 
 if __name__ == "__main__":

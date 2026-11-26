@@ -5865,8 +5865,7 @@ var DEFINITIONS = [{
 	Component: CharacterInteraction,
 	defaultSize: [960, 720],
 	minimumSize: [620, 560],
-	panelHeight: 500,
-	nodeChromeHeight: 140
+	panelHeight: 500
 }, {
 	nodeName: "EagleSvelteCharacterPVNode",
 	stateWidget: "pv_state",
@@ -5874,8 +5873,7 @@ var DEFINITIONS = [{
 	Component: CharacterPV,
 	defaultSize: [960, 720],
 	minimumSize: [680, 600],
-	panelHeight: 540,
-	nodeChromeHeight: 160
+	panelHeight: 540
 }];
 function findWidget(node, name) {
 	return (node.widgets || []).find((widget) => widget.name === name) || null;
@@ -5920,7 +5918,7 @@ function suppressStateWidgetDefinition(nodeData, stateWidget) {
 	}
 }
 function installNodeUi(nodeType, definition) {
-	const { stateWidget, domWidget, Component, defaultSize, minimumSize, panelHeight, nodeChromeHeight } = definition;
+	const { stateWidget, domWidget, Component, defaultSize, minimumSize, panelHeight } = definition;
 	const originalCreated = nodeType.prototype.onNodeCreated;
 	nodeType.prototype.onNodeCreated = function() {
 		originalCreated?.apply(this, arguments);
@@ -5933,33 +5931,16 @@ function installNodeUi(nodeType, definition) {
 		// populate native widgets after onNodeCreated returns.
 		hideStateWidget(node, stateWidget);
 		const host = document.createElement("div");
-		host.style.cssText = "display:block;width:100%;height:100%;min-width:0;overflow:hidden;box-sizing:border-box;";
-		let currentViewportHeight = panelHeight;
+		host.style.cssText = "display:block;width:100%;height:100%;min-width:0;min-height:0;contain:size;overflow:hidden;box-sizing:border-box;";
 		const MAX_VIEWPORT_HEIGHT = 4096;
 		const panelWidget = this.addDOMWidget(domWidget, "div", host, {
 			serialize: false,
 			hideInPanel: true,
 			hideOnZoom: false,
 			getMinHeight: () => panelHeight,
-			getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
-			getHeight: () => currentViewportHeight
+			getMaxHeight: () => MAX_VIEWPORT_HEIGHT
 		});
 		panelWidget.width = void 0;
-		panelWidget._eagleViewportHeight = panelHeight;
-		const applySize = (size) => {
-			const current = size || node.size || defaultSize;
-			const width = Math.max(minimumSize[0] - 60, Number(current[0] || defaultSize[0]) - 20);
-			const height = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(panelHeight, Number(current[1] || defaultSize[1]) - nodeChromeHeight));
-			currentViewportHeight = height;
-			panelWidget._eagleViewportHeight = height;
-			host.style.width = `${width}px`;
-			host.style.height = `${height}px`;
-			return [width, height];
-		};
-		// Do not shadow DOMWidgetImpl.computeLayoutSize with an instance
-		// computeSize.  The inherited layout contract marks this panel growable,
-		// so Classic and Nodes 2.0 allocate the user's full dragged height.
-		applySize(this.size);
 		const readState = () => parseState(findWidget(node, stateWidget)?.value);
 		const writeState = (nextState) => {
 			const widget = findWidget(node, stateWidget);
@@ -5989,12 +5970,6 @@ function installNodeUi(nodeType, definition) {
 		setTimeout(() => hideStateWidget(node, stateWidget), 0);
 		setTimeout(() => hideStateWidget(node, stateWidget), 250);
 		setTimeout(() => hideStateWidget(node, stateWidget), 500);
-		const originalResize = this.onResize;
-		this.onResize = function(size) {
-			originalResize?.apply(this, arguments);
-			applySize(size);
-		};
-		this._eagleSveltePanelApplySize = applySize;
 	};
 	const originalConfigured = nodeType.prototype.onConfigure;
 	nodeType.prototype.onConfigure = function() {
@@ -6004,10 +5979,7 @@ function installNodeUi(nodeType, definition) {
 		setTimeout(() => hideStateWidget(node, stateWidget), 0);
 		setTimeout(() => hideStateWidget(node, stateWidget), 250);
 		this._eagleSveltePanelReloadState?.();
-		requestAnimationFrame(() => {
-			this._eagleSveltePanelApplySize?.(this.size);
-			refreshEagleVueTheme();
-		});
+		requestAnimationFrame(refreshEagleVueTheme);
 	};
 	const originalRemoved = nodeType.prototype.onRemoved;
 	nodeType.prototype.onRemoved = function() {
@@ -6015,7 +5987,6 @@ function installNodeUi(nodeType, definition) {
 			unmount(this._eagleSveltePanelApp);
 			this._eagleSveltePanelApp = null;
 		}
-		this._eagleSveltePanelApplySize = null;
 		this._eagleSveltePanelReloadState = null;
 		originalRemoved?.apply(this, arguments);
 	};

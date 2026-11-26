@@ -99,11 +99,11 @@ assert.equal(normalizeNsfwTriState(false), 0);
 assert.equal(normalizeNsfwTriState(true), 1);
 assert.match(danbooru, /"identity", "appearance", "body", "face", "outfit"/);
 assert.match(danbooru, /title: "选择标签后按 Delete 删除；用途分类保存到工作流"/);
-assert.match(danbooru, /selected_tag_enrichment_request = request[\s\S]*?app\.queuePrompt\(0, 1, \[String\(props\.node\.id\)\]\)/,
+assert.match(danbooru, /selected_tag_enrichment_request = request[\s\S]*?queueNodeTask\(app, props\.node\)/,
   'tag enrichment must queue only the Danbooru node and its ancestors');
-assert.match(danbooru, /async function togglePortFill\(\)[\s\S]*?saveEnrichmentState\(true\);[\s\S]*?app\.queuePrompt\(0, 1, \[String\(props\.node\.id\)\]\)/,
+assert.match(danbooru, /async function togglePortFill\(\)[\s\S]*?saveEnrichmentState\(true\);[\s\S]*?queueNodeTask\(app, props\.node\)/,
   'the first continuous dictionary batch must not queue unrelated sampler nodes');
-assert.match(danbooru, /const accepted = await app\.queuePrompt\(0, 1, \[String\(props\.node\.id\)\]\);[\s\S]*?if \(!accepted\) throw[\s\S]*?delete current\.selected_tag_enrichment_request;[\s\S]*?widget\.value = JSON\.stringify\(current\)/,
+assert.match(danbooru, /await queueNodeTask\(app, props\.node\);[\s\S]*?delete current\.selected_tag_enrichment_request;[\s\S]*?widget\.value = JSON\.stringify\(current\)/,
   'accepted one-shot enrichment must not remain in a saved workflow after the queue snapshot');
 assert.match(danbooru, /const tags = \[\.\.\.new Set\(\(items \|\| \[\]\)[\s\S]*?\.slice\(0, 50\)/);
 assert.match(danbooru, /selected_tag_enrichment_request: controls\.selected_tag_enrichment_request/);

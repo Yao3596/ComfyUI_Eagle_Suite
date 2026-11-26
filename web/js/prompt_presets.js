@@ -1,5 +1,8 @@
 import { app } from "../../../scripts/app.js";
 import { createApp, h, ref, reactive, computed, onMounted, onUnmounted, watch } from "../lib/vue.esm-browser.js";
+import { loadGalleryWhenVisible } from "./gallery_visibility.js";
+import { moveVisibleKey } from "./reorder_utils.js";
+import { bindNodeWidgetScroll } from "./node_scroll.js";
 import "./eagle_vue_theme.js";
 
 // ============ 样式加载 ============
@@ -20,7 +23,7 @@ function loadStyles() {
     style.id = styleId;
     document.head.appendChild(style);
   }
-  style.textContent = `
+  var cssText = `
     .eagle-prompt-presets-root, .eagle-prompt-presets-root * { box-sizing: border-box; }
     .eagle-prompt-presets-root {
       width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden;
@@ -88,12 +91,16 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-splitter:focus-visible::after { background:var(--ppui-primary); outline:none; }
     .eagle-prompt-presets-root .pp-master-item {
       width: 100% !important; min-width: 0; min-height: 66px; margin: 0 0 8px; padding: 8px;
-      display: grid !important; grid-template-columns: 46px minmax(0, 1fr) auto !important; gap: 9px; align-items: center;
+      display: grid !important; grid-template-columns: 16px 46px minmax(0, 1fr) auto !important; gap: 9px; align-items: center;
       text-align: left; border: 1px solid var(--ppui-border); border-radius: 9px;
       background: var(--ppui-surface) !important; color: var(--ppui-text) !important; transition: background .14s ease, border-color .14s ease;
     }
     .eagle-prompt-presets-root .pp-master-item:hover { background: var(--ppui-surface-alt) !important; border-color: var(--ppui-primary); }
     .eagle-prompt-presets-root .pp-master-item.active { background: color-mix(in srgb, var(--ppui-primary) 30%, var(--ppui-bg) 70%) !important; border-color: var(--ppui-primary); box-shadow: inset 3px 0 var(--ppui-primary); }
+    .eagle-prompt-presets-root .pp-master-item.drop-before { box-shadow:inset 0 3px #78aaff; }
+    .eagle-prompt-presets-root .pp-master-item.drop-after { box-shadow:inset 0 -3px #78aaff; }
+    .eagle-prompt-presets-root .pp-master-handle { cursor:grab; color:#9bb5dc; user-select:none; touch-action:none; font-size:13px; }
+    .eagle-prompt-presets-root .pp-master-handle:active { cursor:grabbing; }
     .eagle-prompt-presets-root .pp-master-cover {
       width: 46px; height: 46px; object-fit: cover; border-radius: 7px; background: var(--ppui-surface-alt);
     }
@@ -341,12 +348,13 @@ function loadStyles() {
     .eagle-prompt-presets-root .pp-filmstrip-add:hover { background: #252840; border-color: #5a7db0; color: #b0c4e8; }
     @media (max-width: 700px) {
       .eagle-prompt-presets-root .ppui-main { grid-template-columns: minmax(180px, 42%) minmax(0, 1fr); }
-      .eagle-prompt-presets-root .pp-master-item { grid-template-columns: 38px minmax(0, 1fr); }
+      .eagle-prompt-presets-root .pp-master-item { grid-template-columns: 16px 38px minmax(0, 1fr) auto !important; }
       .eagle-prompt-presets-root .pp-master-cover { width: 38px; height: 38px; }
       .eagle-prompt-presets-root .pp-var-count { display: none; }
       .eagle-prompt-presets-root .pp-director-layout { grid-template-columns: 1fr; }
     }
   `;
+  if (style.textContent !== cssText) style.textContent = cssText;
 }
 
 
@@ -1060,6 +1068,9 @@ var SettingsDialog = {
           body: JSON.stringify(config.obsidian)
         });
         var data = await response.json();
+        if (data.success && data.api_url) {
+          config.obsidian.api_url = data.api_url;
+        }
         testResult.value = data;
       } catch (e) {
         testResult.value = { success: false, error: e.message };
@@ -1248,6 +1259,9 @@ var PromptPresetsApp = {
     var selectedCategory = ref("全部");
     var keyword = ref("");
     var selectedId = ref("");
+    var templateOrder = ref(Array.isArray(restoredState.templateOrder) ? restoredState.templateOrder.slice() : []);
+    var templateDrop = ref(null);
+    var draggedTemplateKey = null;
     var activeVariable = ref("");
     var variableValues = reactive({});
     var externalVariableValues = reactive({});
@@ -1266,6 +1280,9 @@ var PromptPresetsApp = {
     var noticeTimer = 0;
     var retryTimers = new Set();
     var coverLoadStates = reactive({});
+    var loadGeneration = 0;
+    var visibleRoot = null;
+    var stopVisibleLoad = null;
 
     function scheduleRetry(callback, delay) {
       var timer = setTimeout(function() {
@@ -1386,6 +1403,7 @@ var PromptPresetsApp = {
       nextVariables = nextVariables && typeof nextVariables === "object" ? nextVariables : {};
       if (typeof nextState.selectedCategory === "string") selectedCategory.value = nextState.selectedCategory;
       if (typeof nextState.selectedId === "string") selectedId.value = nextState.selectedId;
+      if (Array.isArray(nextState.templateOrder)) templateOrder.value = nextState.templateOrder.slice();
       if (typeof nextState.activeVariable === "string") activeVariable.value = nextState.activeVariable;
       if (nextState.previewMode === "source" || nextState.previewMode === "markdown") previewMode.value = nextState.previewMode;
       if (nextState.activeTab === "presets") activeTab.value = nextState.activeTab;
@@ -1426,6 +1444,7 @@ var PromptPresetsApp = {
         version: 1,
         selectedCategory: selectedCategory.value,
         selectedId: selectedId.value,
+        templateOrder: templateOrder.value.slice(),
         activeVariable: activeVariable.value,
         previewMode: previewMode.value,
         activeTab: activeTab.value,
@@ -1433,16 +1452,45 @@ var PromptPresetsApp = {
       };
       var currentStateWidget = nodeWidget("ui_state");
       var currentVariablesWidget = nodeWidget("local_variables");
-      if (currentStateWidget) currentStateWidget.value = JSON.stringify(nextState);
-      if (currentVariablesWidget) currentVariablesWidget.value = JSON.stringify(variableValues);
-      props.node.graph?.change?.();
-      props.node.setDirtyCanvas(true, true);
+      var stateValue = JSON.stringify(nextState);
+      var variableValue = JSON.stringify(variableValues);
+      var changed = false;
+      if (currentStateWidget && currentStateWidget.value !== stateValue) {
+        currentStateWidget.value = stateValue;
+        changed = true;
+      }
+      if (currentVariablesWidget && currentVariablesWidget.value !== variableValue) {
+        currentVariablesWidget.value = variableValue;
+        changed = true;
+      }
+      if (changed) {
+        props.node.graph?.change?.();
+        props.node.setDirtyCanvas(true, true);
+      }
     }
 
     // ... 工具函数和计算属性保持不变 ...
     
+    function allTemplateKeys() {
+      var available = templates.value.map(templateKey);
+      var known = new Set(available);
+      var seen = new Set();
+      return templateOrder.value.filter(function(key) {
+        if (!known.has(key) || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).concat(available.filter(function(key) {
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }));
+    }
+
     var filteredTemplates = computed(function() {
-      var result = templates.value.slice();
+      var ranks = new Map(allTemplateKeys().map(function(key, index) { return [key, index]; }));
+      var result = templates.value.slice().sort(function(a, b) {
+        return ranks.get(templateKey(a)) - ranks.get(templateKey(b));
+      });
       if (selectedCategory.value !== "全部") {
         result = result.filter(function(t) { return t.category === selectedCategory.value; });
       }
@@ -1457,6 +1505,52 @@ var PromptPresetsApp = {
       }
       return result;
     });
+
+    function templateDropAfter(event) {
+      var rect = event.currentTarget.getBoundingClientRect();
+      return event.clientY >= rect.top + rect.height / 2;
+    }
+
+    function reorderTemplate(source, target, after) {
+      var next = moveVisibleKey(
+        allTemplateKeys(), filteredTemplates.value.map(templateKey), source, target, after
+      );
+      if (next.some(function(key, index) { return key !== allTemplateKeys()[index]; })) {
+        templateOrder.value = next;
+        persistUiState();
+      }
+    }
+
+    function startTemplateDrag(event, key) {
+      event.stopPropagation();
+      draggedTemplateKey = key;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", key);
+    }
+
+    function hoverTemplateDrag(event, key) {
+      if (!draggedTemplateKey || draggedTemplateKey === key) return;
+      event.preventDefault(); event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+      var after = templateDropAfter(event);
+      if (!templateDrop.value || templateDrop.value.key !== key || templateDrop.value.after !== after) {
+        templateDrop.value = { key: key, after: after };
+      }
+    }
+
+    function dropTemplate(event, key) {
+      event.preventDefault(); event.stopPropagation();
+      if (draggedTemplateKey) reorderTemplate(draggedTemplateKey, key, templateDropAfter(event));
+      draggedTemplateKey = null;
+      templateDrop.value = null;
+    }
+
+    function moveTemplateByKey(key, direction) {
+      var visible = filteredTemplates.value.map(templateKey);
+      var index = visible.indexOf(key);
+      var target = visible[index + direction];
+      if (index >= 0 && target) reorderTemplate(key, target, direction > 0);
+    }
 
     var selectedTemplate = computed(function() {
       return templates.value.find(function(t) { return templateKey(t) === selectedId.value; }) ||
@@ -1556,40 +1650,48 @@ var PromptPresetsApp = {
       applySelected();
     }
 
-    async function loadTemplates() {
+    async function loadTemplates(options) {
+      var forceRefresh = !!(options && options.forceRefresh === true);
+      var requestGeneration = ++loadGeneration;
       loading.value = true;
       errorMessage.value = "";
       try {
-        var response = await fetch("/eaglePromptPresets/search_template");
+        var url = "/eaglePromptPresets/search_template" + (forceRefresh ? "?refresh=1" : "");
+        var response = await fetch(url);
         var data = await response.json();
+        if (requestGeneration !== loadGeneration) return;
         if (!response.ok || !data.success) throw new Error(data.error || ("HTTP " + response.status));
         templates.value = (data.data && data.data.list_data) || [];
         categories.value = ["全部"].concat((data.data && data.data.categories) || []);
         var current = templates.value.find(function(t) { return templateKey(t) === selectedId.value; });
         selectTemplate(current || templates.value[0]);
       } catch (e) {
+        if (requestGeneration !== loadGeneration) return;
         console.error("加载模板失败:", e);
         errorMessage.value = "加载模板失败：" + e.message;
       } finally {
-        loading.value = false;
+        if (requestGeneration === loadGeneration) loading.value = false;
       }
     }
 
     onMounted(function() {
-      loadTemplates().finally(function() {
-        stateReady = true;
-        persistUiState();
-      });
+      // An off-screen preset library must not load and render every template
+      // while the user is panning a workflow containing many DOM nodes.
+      stopVisibleLoad = loadGalleryWhenVisible(visibleRoot, function() {
+        loadTemplates().finally(function() {
+          stateReady = true;
+          persistUiState();
+        });
 
-      // 延迟同步外部变量：左侧变量输入节点可能尚未完成 onConfigure / widgets 恢复，
-      // 立即读取会得到空值。分阶段重试确保最终能拿到。
-      function trySyncExternalVariables(attempt) {
-        syncExternalVariables();
-        if (attempt < 3) {
-          scheduleRetry(function() { trySyncExternalVariables(attempt + 1); }, 250 * (attempt + 1));
+        // ComfyUI may restore linked variable widgets after onConfigure.
+        function trySyncExternalVariables(attempt) {
+          syncExternalVariables();
+          if (attempt < 3) {
+            scheduleRetry(function() { trySyncExternalVariables(attempt + 1); }, 250 * (attempt + 1));
+          }
         }
-      }
-      scheduleRetry(function() { trySyncExternalVariables(0); }, 100);
+        scheduleRetry(function() { trySyncExternalVariables(0); }, 100);
+      });
 
       props.node._ppSyncExternalVariables = function() {
         syncLinkedPromptVariableNames(props.node, selectedVariables.value);
@@ -1599,6 +1701,8 @@ var PromptPresetsApp = {
     });
 
     onUnmounted(function() {
+      loadGeneration += 1;
+      stopVisibleLoad?.();
       stopSplitDrag();
       clearTimeout(noticeTimer);
       noticeTimer = 0;
@@ -1764,16 +1868,20 @@ var PromptPresetsApp = {
     }
 
     function renderMasterItem(template) {
-      var active = templateKey(template) === templateKey(selectedTemplate.value);
+      var key = templateKey(template);
+      var active = key === templateKey(selectedTemplate.value);
+      var drop = templateDrop.value && templateDrop.value.key === key ? templateDrop.value : null;
       var cover = coverDisplay(template, "master");
       var readOnly = isReadOnly(template);
       return h("div", {
-        key: templateKey(template),
+        key: key,
         role: "button",
         tabindex: "0",
-        class: ["pp-master-item", active ? "active" : ""],
+        class: ["pp-master-item", active ? "active" : "", drop ? (drop.after ? "drop-after" : "drop-before") : ""],
         onClick: function() { selectTemplate(template); },
         onDblclick: function() { selectTemplate(template); applySelected(); },
+        onDragover: function(event) { hoverTemplateDrag(event, key); },
+        onDrop: function(event) { dropTemplate(event, key); },
         onKeydown: function(event) {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
@@ -1781,6 +1889,19 @@ var PromptPresetsApp = {
           }
         }
       }, [
+        h("span", {
+          class: "pp-master-handle", draggable: true, role: "button", tabindex: 0,
+          title: "拖动调整预设顺序；方向键也可调整",
+          "aria-label": "调整 " + (template.Label || "预设") + " 的顺序",
+          onClick: function(event) { event.stopPropagation(); },
+          onDragstart: function(event) { startTemplateDrag(event, key); },
+          onDragend: function() { draggedTemplateKey = null; templateDrop.value = null; },
+          onKeydown: function(event) {
+            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+            event.preventDefault(); event.stopPropagation();
+            moveTemplateByKey(key, event.key === "ArrowUp" ? -1 : 1);
+          }
+        }, "⋮⋮"),
         cover.url
           ? h("img", {
               class: "pp-master-cover",
@@ -1957,7 +2078,7 @@ var PromptPresetsApp = {
 
     return function() {
       // ✅ 使用统一样式类名
-      return h("div", { class: "ppui-root eagle-prompt-presets-root", style: "height:100%;display:flex;flex-direction:column;overflow:hidden;" }, [
+      return h("div", { class: "ppui-root eagle-prompt-presets-root", ref: function(el) { visibleRoot = el; }, style: "height:100%;display:flex;flex-direction:column;overflow:hidden;" }, [
         // 工具栏
         h("div", { class: "ppui-toolbar", style: "flex-shrink:0" }, [
           h("select", {
@@ -1975,7 +2096,11 @@ var PromptPresetsApp = {
           }),
           h("span", { class: "ppui-badge" }, filteredTemplates.value.length + " / " + templates.value.length),
           h("div", { class: "ppui-toolbar-sep" }),
-          h("button", { class: "ppui-btn", title: "刷新", onClick: loadTemplates }, "↻"),
+          h("button", {
+            class: "ppui-btn",
+            title: "刷新",
+            onClick: function() { loadTemplates({ forceRefresh: true }); }
+          }, "↻"),
           h("button", { class: "ppui-btn", onClick: function() { showImport.value = true; } }, "📁 导入"),
           h("button", { class: "ppui-btn primary", onClick: handleCreate }, "＋ 新建"),
           h("button", { class: "ppui-btn", title: "设置", onClick: function() { showSettings.value = true; } }, "⚙")
@@ -1985,7 +2110,13 @@ var PromptPresetsApp = {
         loading.value
           ? h("div", { class: "ppui-loading" }, "加载模板中...")
           : errorMessage.value
-            ? h("div", { class: "ppui-error" }, [errorMessage.value, h("button", { class: "ppui-btn", onClick: loadTemplates }, "重试")])
+            ? h("div", { class: "ppui-error" }, [
+                errorMessage.value,
+                h("button", {
+                  class: "ppui-btn",
+                  onClick: function() { loadTemplates({ forceRefresh: true }); }
+                }, "重试")
+              ])
             : h("div", { class: "ppui-main", style: { flex: "1 1 auto", overflow: "hidden", minHeight: "0", height: "100%" } }, [
                 h("div", { class: "pp-split-layout" }, [
                   h("aside", {
@@ -2024,7 +2155,7 @@ var PromptPresetsApp = {
         h(ImportDialog, {
           visible: showImport.value,
           onClose: function() { showImport.value = false; },
-          onImported: loadTemplates
+          onImported: function() { loadTemplates(); }
         }),
 
         h(SettingsDialog, {
@@ -2032,7 +2163,7 @@ var PromptPresetsApp = {
           visible: showSettings.value,
           categories: categories.value,
           onClose: function() { showSettings.value = false; },
-          onSaved: loadTemplates
+          onSaved: function() { loadTemplates(); }
         }),
 
         deleteTarget.value ? h("div", { class: "ppui-settings-backdrop show", onClick: function() { deleteTarget.value = null; } }, [
@@ -2122,7 +2253,10 @@ app.registerExtension({
           container.className = "eagle-prompt-presets-root";
           // ComfyUI may cache a DOM widget host's creation-time percentage width.
           // Start with the node's real pixel width and keep it synchronized below.
-          container.style.cssText = "width:940px;max-width:none;min-width:0;box-sizing:border-box;overflow:hidden;";
+          // Prevent the Nodes 2.0 auto grid from using the entire list and
+          // Markdown document as this widget's intrinsic height. The native
+          // flex row can grow and shrink while the panes scroll internally.
+          container.style.cssText = "width:940px;max-width:none;min-width:0;min-height:280px;contain:size;box-sizing:border-box;overflow:hidden;";
 
           var PRESETS_MIN_VIEWPORT_HEIGHT = 280;
           var PRESETS_DEFAULT_VIEWPORT_HEIGHT = 600;
@@ -2166,6 +2300,7 @@ app.registerExtension({
       vueApp.mount(container);
       this._ppVueApp = vueApp;
       this._ppContainer = container;
+      this._ppReleaseWheel = bindNodeWidgetScroll(container);
       this._ppInit = true;
       this._ppMounting = false;
 
@@ -2234,6 +2369,8 @@ app.registerExtension({
 
       var previousOnRemoved = this.onRemoved;
       this.onRemoved = function() {
+        this._ppReleaseWheel?.();
+        this._ppReleaseWheel = null;
         this._ppStopSplitDrag?.();
         if (this._ppVueApp) this._ppVueApp.unmount();
             this._ppVueApp = null;
@@ -2245,6 +2382,8 @@ app.registerExtension({
             if (previousOnRemoved) previousOnRemoved.apply(this, arguments);
           };
       } catch (error) {
+        this._ppReleaseWheel?.();
+        this._ppReleaseWheel = null;
         this._ppInit = false;
         this._ppMounting = false;
         hideWidgets(this);

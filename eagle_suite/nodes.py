@@ -5,6 +5,8 @@ from .video_nodes import EagleImagesToVideo, EagleVideoConverter
 from .audio_nodes import EagleAudioExtractor, EagleAudioMixer
 from .eagle_loader import EagleLoader
 from .eagle_saver import EagleSaver
+from .review_gate import EagleReviewGate, EagleReviewGateEager, EagleReviewGateResume
+from .execution_isolation import EagleExecutionAnchor
 from .batch_video_nodes import (
     EagleBatchVideoLoader, EagleVideoFrameExtractor, EagleVideoInfo,
 )
@@ -64,6 +66,7 @@ NODE_CLASS_MAPPINGS = {
     # Eagle 基础
     "EagleLoader":   EagleLoader,
     "EagleSaver":    EagleSaver,
+    "EagleReviewGate": EagleReviewGate,
     "LocalImageLoader": LocalImageLoader,
 
     # 批量视频处理
@@ -115,6 +118,9 @@ NODE_CLASS_MAPPINGS = {
 NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_TEXT)
 NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_H3PIPELINE)
 NODE_CLASS_MAPPINGS.update(NODE_CLASS_MAPPINGS_H3_REVIEW_SVELTE)
+NODE_CLASS_MAPPINGS["EagleExecutionAnchor"] = EagleExecutionAnchor
+NODE_CLASS_MAPPINGS["EagleReviewGateEager"] = EagleReviewGateEager
+NODE_CLASS_MAPPINGS["EagleReviewGateResume"] = EagleReviewGateResume
 
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -130,6 +136,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # Eagle 基础
     "EagleLoader":   "🦅 Eagle 图片加载",
     "EagleSaver":    "🦅 Eagle 图片保存",
+    "EagleReviewGate": "🦅 预览确认",
     "LocalImageLoader": "🦅 本地图片加载",
 
     # 批量视频处理
@@ -191,6 +198,7 @@ _CATEGORY_GROUPS = {
     f"{MENU_ROOT}/Eagle": (
         EagleLoader,
         EagleSaver,
+        EagleReviewGate,
     ),
     f"{MENU_ROOT}/画廊": (
         EagleGalleryNode,

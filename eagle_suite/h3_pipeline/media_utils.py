@@ -608,19 +608,42 @@ def extract_audio(video_path, out_path, start=0.0, duration=0.0, sample_rate=441
 
 
 def merge_audio_video(video_path, audio_path, out_path, audio_codec="aac", audio_bitrate="192k"):
-    """把音轨合并到视频。"""
+    """Replace the input video's sound while preserving its full duration."""
+    import av
+
     ffmpeg = _check_ffmpeg()
+    with av.open(str(video_path)) as container:
+        video = container.streams.video[0]
+        duration = float(video.duration * video.time_base) if video.duration else 0.0
+        if not duration and container.duration:
+            duration = float(container.duration / av.time_base)
+    if duration <= 0:
+        raise RuntimeError("[H3Chain] 无法确定合并音频所需的视频时长")
+
+    # Bound the silence to the video timeline. An unbounded apad combined
+    # with -shortest can stall when the video stream is copied in FFmpeg 7.
+    audio_timeline = f"apad=whole_dur={duration:.9f},atrim=duration={duration:.9f}"
     cmd = [
-        ffmpeg, "-y", "-i", str(video_path), "-i", str(audio_path),
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video_path), "-i", str(audio_path),
+        "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy", "-c:a", audio_codec, "-b:a", audio_bitrate,
-        "-shortest", str(out_path),
+        "-af", audio_timeline, str(out_path),
     ]
-    result = subprocess.run(cmd, capture_output=True)
+    result = subprocess.run(cmd, capture_output=True, timeout=600)
     if result.returncode != 0:
         raise RuntimeError(
             f"[H3Chain] 合并音视频失败: {result.stderr.decode('utf-8', errors='ignore')[:400]}"
         )
     return str(out_path)
+
+
+def video_has_audio(video_path):
+    """Read the clip's actual stream layout without decoding the audio."""
+    import av
+
+    with av.open(str(video_path)) as container:
+        return bool(container.streams.audio)
 
 
 def safe_output_path(root, *parts, create_dirs=True):
@@ -651,5 +674,6 @@ __all__ = [
     "seam_analysis",
     "extract_audio",
     "merge_audio_video",
+    "video_has_audio",
     "safe_output_path",
 ]

@@ -10,6 +10,9 @@
  *   6. 输出：IMAGE + STRING
  */
 import { app } from "../../../scripts/app.js";
+import { pauseReviewAutoQueue, queueNodeTask } from "./review_gate_flow.js";
+import { loadGalleryWhenVisible } from "./gallery_visibility.js";
+import { createLatestRequest, createSharedJsonReader, gridWindow } from "./danbooru_runtime.js";
 import { createApp, h, ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 
@@ -59,12 +62,49 @@ const TAG_CATEGORIES = [
 
 const PAGE_LIMIT = 40;
 const libraryFacetLabels = reactive({});
+const TAG_SOURCE_LABELS = { character: "角色输入", reverse: "反推", image: "选图", detail: "图片编辑", semantic: "语义搜索", manual: "手动", gacha: "抽卡" };
+const ANNOTATION_FIELDS = ["annotation_source", "annotation_model", "annotation_status", "annotation_updated_at", "annotation_confidence"];
+const librarySummary = reactive({ pending: null, approved: 0, updatedAt: "" });
+function applyLibraryInfo(data) {
+  if (!data?.success) return;
+  Object.assign(libraryFacetLabels, data.facets || {});
+  if (data.status) {
+    librarySummary.pending = Number(data.status.annotations?.pending || 0);
+    librarySummary.approved = Number(data.status.annotations?.approved || 0);
+    librarySummary.updatedAt = data.status.last_annotation_update || "";
+  }
+}
+function annotationDate(value) { return String(value || "未记录").replace("T", " ").replace(/Z$/, " UTC"); }
+function annotationDescription(item) {
+  const source = item.annotation_source;
+  const label = item.translation_manual && source !== "manual" ? "人工编辑 · 尚未保存词库"
+    : source === "manual" ? "人工修订 · 已采用"
+    : source === "model" ? "模型采用"
+    : source === "catalog" ? "随附词表" : item.translation ? "现有注释 · 来源未记录" : "暂无中文注释";
+  const confidence = !item.translation_manual && source === "model" && Number.isFinite(item.annotation_confidence)
+    ? ` · 模型置信度 ${Math.round(item.annotation_confidence * 100)}%` : "";
+  return `${label}${item.annotation_model ? ` · ${item.annotation_model}` : ""}${confidence} · 更新：${annotationDate(item.annotation_updated_at)}`;
+}
 
 const TAG_KIND_LABELS = {
   semantic: "语义", detail: "图片", manual: "手动", gacha: "抽卡",
   outfit: "服装", action: "动作", expression: "表情", scene: "场景", environment: "环境", composition: "构图",
   lighting: "光照", quality: "质量", identity: "身份/角色", appearance: "外观", body: "身体", face: "面部", general: "通用",
 };
+const REVERSE_SCOPES = [
+  { key: "identity", label: "角色身份" },
+  { key: "appearance", label: "外观特征" },
+  { key: "outfit", label: "服装配饰" },
+  { key: "expression", label: "表情" },
+  { key: "action", label: "动作姿势" },
+  { key: "composition", label: "视角构图" },
+  { key: "scene", label: "场景环境" },
+  { key: "lighting", label: "光照" },
+  { key: "style", label: "风格" },
+];
+const DEFAULT_REVERSE_SCOPES = REVERSE_SCOPES
+  .filter(item => item.key !== "identity" && item.key !== "style")
+  .map(item => item.key);
 const PROMPT_KIND_LABELS = {
   outfit: "服装", action: "动作", expression: "表情", scene: "场景",
   environment: "环境", composition: "构图", lighting: "光照",
@@ -123,6 +163,22 @@ async function readJsonResponse(response, label = "服务") {
   } catch (_) {
     throw new Error(`${label}返回非 JSON（HTTP ${response.status}）：${raw.slice(0, 160)}`);
   }
+}
+
+const readSharedDanbooruJson=createSharedJsonReader(async url=>{
+  const response=await fetch(url);
+  const data=await readJsonResponse(response);
+  if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);
+  return data;
+});
+
+function outputDraftChanged(node, snapshot) {
+  let current = "";
+  try {
+    const widget = (node.widgets || []).find(item => item.name === "selection_data");
+    current = JSON.parse(widget?.value || "{}").draft_revision || "";
+  } catch (_) {}
+  return current !== (snapshot?.draft_revision || "");
 }
 
 function inferTagTaxonomy(value) {
@@ -250,6 +306,7 @@ function normalizeTagItem(value, defaults = {}) {
   if (inlineWeight) sourceTag = inlineWeight[1].trim();
   const tag = sourceTag.replace(/\s+/g, "_");
   if (!tag) return null;
+  const cached = approvedMetadataCache[tag] || {};
   if (!validTranslation(raw.translation)) requestTranslations([tag]);
   const weightValue = Number(raw.weight == null ? (inlineWeight ? inlineWeight[2] : 1) : raw.weight);
   return {
@@ -258,7 +315,8 @@ function normalizeTagItem(value, defaults = {}) {
     category: raw.category || defaults.category || "general",
     kind: raw.kind || defaults.kind || "general",
     kind_manual: raw.kind_manual === true,
-    translation_manual: raw.translation_manual === true,
+    translation_manual: raw.translation_manual === true || (cached.translation_manual === true && (!raw.translation || raw.translation === cached.cn_name)),
+    ...Object.fromEntries(ANNOTATION_FIELDS.map(key => [key, raw[key] ?? cached[key] ?? (key === "annotation_confidence" ? null : "")])),
     // Safety is independent from purpose. Missing/unknown rating must not be
     // displayed as SFW; preserve backend review data across workflow saves.
     rating: raw.rating || defaults.rating || "unknown",
@@ -335,12 +393,14 @@ const translationCache = reactive({});   // { tag: cn_name }
 const approvedMetadataCache = reactive({}); // Only approved taxonomy.
 let _pendingTranslate = new Set();
 let _translateTimer = null;
+const translationVersions = new Map();
 
 function requestTranslations(tags, force = false) {
   let need = false;
   tags.forEach(t => {
     if (t && (force || !(t in translationCache)) && !_pendingTranslate.has(t)) {
       _pendingTranslate.add(t);
+      translationVersions.set(t, (translationVersions.get(t) || 0) + 1);
       need = true;
     }
   });
@@ -351,25 +411,26 @@ function requestTranslations(tags, force = false) {
     const batch = Array.from(_pendingTranslate);
     _pendingTranslate = new Set();
     if (batch.length === 0) return;
-    try {
+    const versions = new Map(batch.map(tag => [tag, translationVersions.get(tag)]));
+    // The backend accepts at most 200 tags; keep larger visible batches intact
+    // by sending bounded chunks, and never let an older read undo a correction.
+    for (let start = 0; start < batch.length; start += 200) {
+     const chunk = batch.slice(start, start + 200);
+     try {
       const res = await fetch("/danbooru_search/translate_tags_batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tags: batch }),
+        body: JSON.stringify({ tags: chunk }),
       });
       const data = await res.json();
-      if (data.success && data.translations) {
-        Object.assign(translationCache, data.translations);
-      }
-      if (data.success && data.metadata && typeof data.metadata === "object") {
-        Object.assign(approvedMetadataCache, data.metadata);
-      }
-      // 未命中的也标记为空串，避免重复请求
-      batch.forEach(t => {
-        if (!(t in translationCache)) translationCache[t] = "";
+      if (!res.ok || !data.success) continue;
+      chunk.forEach(tag => {
+        if (versions.get(tag) !== translationVersions.get(tag)) return;
+        translationCache[tag] = typeof data.translations?.[tag] === "string" ? data.translations[tag] : "";
+        if (data.metadata?.[tag] && typeof data.metadata[tag] === "object") approvedMetadataCache[tag] = data.metadata[tag];
+        else delete approvedMetadataCache[tag];
       });
-    } catch (e) {
-      // 忽略
+     } catch (_) { /* A failed chunk can be retried by an explicit refresh. */ }
     }
   }, 200);
 }
@@ -451,6 +512,8 @@ const TagSearchPanel = {
     const selected = ref([]);
     const related = ref([]);
     const relatedLoading = ref(false);
+    const searchRequests=createLatestRequest();
+    const relatedRequests=createLatestRequest();
 
     const selectedTags = computed(() => {
       const s = {};
@@ -460,11 +523,13 @@ const TagSearchPanel = {
 
     async function doSearch() {
       if (!query.value.trim()) return;
+      const request=searchRequests.begin();
       loading.value = true;
       errorMsg.value = "";
 
       try {
         const res = await fetch("/danbooru_search/search", {
+          signal: request.signal,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -476,6 +541,7 @@ const TagSearchPanel = {
         });
 
         const data = await readJsonResponse(res, "本地标签搜索接口");
+        if(!request.isCurrent())return;
 
         if (data.success) {
           results.value = data.results || [];
@@ -491,11 +557,12 @@ const TagSearchPanel = {
           searchSummary.value = "";
         }
       } catch (e) {
+        if(!request.isCurrent()||e.name==='AbortError')return;
         errorMsg.value = "请求失败: " + e.message;
         results.value = [];
         searchSummary.value = "";
       } finally {
-        loading.value = false;
+        if(request.isCurrent())loading.value = false;
       }
     }
 
@@ -504,6 +571,8 @@ const TagSearchPanel = {
         selected.value = selected.value.filter(s => s.tag !== item.tag);
       } else {
         selected.value.push({
+          ...Object.fromEntries(ANNOTATION_FIELDS.map(key => [key, item[key]])),
+          translation_manual: item.translation_manual,
           tag: item.tag,
           cn_name: item.cn_name,
           category: item.category,
@@ -523,6 +592,7 @@ const TagSearchPanel = {
     }
 
     function clearSelected() {
+      relatedRequests.cancel();
       clearTimeout(_relatedTimer);
       _relatedTimer = null;
       selected.value = [];
@@ -533,31 +603,36 @@ const TagSearchPanel = {
     let _relatedTimer = null;
     function loadRelated() {
       clearTimeout(_relatedTimer);
+      relatedRequests.cancel();
+      relatedLoading.value=false;
       if (selected.value.length === 0) {
         related.value = [];
         return;
       }
 
       _relatedTimer = setTimeout(async () => {
+        const request=relatedRequests.begin();
         _relatedTimer = null;
         relatedLoading.value = true;
         const tags = selected.value.map(s => s.tag);
 
         try {
           const res = await fetch("/danbooru_search/related", {
+            signal: request.signal,
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tags, limit: 50, show_nsfw: showNsfw.value }),
           });
 
           const data = await readJsonResponse(res, "关联标签接口");
+          if(!request.isCurrent())return;
           if (data.success) {
             related.value = data.results || [];
           }
         } catch (e) {
           // 忽略
         } finally {
-          relatedLoading.value = false;
+          if(request.isCurrent())relatedLoading.value = false;
         }
       }, 350);
     }
@@ -579,6 +654,8 @@ const TagSearchPanel = {
 
     function selectedItems() {
       return selected.value.map(s => ({
+          ...Object.fromEntries(ANNOTATION_FIELDS.map(key => [key, s[key]])),
+          translation_manual: s.translation_manual,
           tag: s.tag,
           translation: s.cn_name || "",
           category: String(s.category || "general").toLowerCase(),
@@ -605,6 +682,8 @@ const TagSearchPanel = {
     }
 
     onBeforeUnmount(() => {
+      searchRequests.cancel();
+      relatedRequests.cancel();
       clearTimeout(_relatedTimer);
       _relatedTimer = null;
     });
@@ -1013,6 +1092,17 @@ const GalleryPanel = {
 
     const gridRef = ref(null);
     const detailPost = ref(null);
+    const galleryRequests=createLatestRequest();
+    const poolRequests=createLatestRequest();
+    const gridMetrics=reactive({width:0,height:400,scrollTop:0});
+    let gridObserver=null,stopVisibleGalleryLoad=null,galleryAlive=true;
+    function measureGrid() {
+      const element=gridRef.value;
+      if(!element?.clientWidth || !element.clientHeight)return;
+      gridMetrics.width=Math.max(0,element.clientWidth-24);
+      gridMetrics.height=Math.max(0,element.clientHeight-24);
+      gridMetrics.scrollTop=element.scrollTop;
+    }
 
     watch(() => props.initialSelections, (items) => {
       const incoming = Array.isArray(items) ? items : [];
@@ -1030,7 +1120,11 @@ const GalleryPanel = {
     });
 
     async function fetchPage(pageNum, replace) {
+      const request=galleryRequests.begin();
       if (replace) {
+        loadingMore.value=false;
+        if(gridRef.value)gridRef.value.scrollTop=0;
+        gridMetrics.scrollTop=0;
         loading.value = true;
       } else {
         loadingMore.value = true;
@@ -1039,6 +1133,7 @@ const GalleryPanel = {
 
       try {
         const res = await fetch("/danbooru_search/api/posts", {
+          signal: request.signal,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1053,6 +1148,7 @@ const GalleryPanel = {
         });
 
         const data = await res.json();
+        if(!request.isCurrent())return;
 
         if (data.success) {
           const incoming = data.posts || [];
@@ -1073,12 +1169,15 @@ const GalleryPanel = {
           hasMore.value = false;
         }
       } catch (e) {
+        if(!request.isCurrent()||e.name==='AbortError')return;
         errorMsg.value = "请求失败: " + e.message;
         if (replace) posts.value = [];
         hasMore.value = false;
       } finally {
-        loading.value = false;
-        loadingMore.value = false;
+        if(request.isCurrent()) {
+          loading.value = false;
+          loadingMore.value = false;
+        }
       }
     }
 
@@ -1096,20 +1195,24 @@ const GalleryPanel = {
 
     async function searchPools() {
       if (!poolQuery.value.trim() || poolLoading.value) return;
+      const request=poolRequests.begin();
       poolLoading.value = true;
       errorMsg.value = "";
       try {
         const response = await fetch("/danbooru_search/api/pools", {
+          signal: request.signal,
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: poolQuery.value, category: "series", limit: 20 }),
         });
         const data = await response.json();
+        if(!request.isCurrent())return;
         if (!response.ok || !data.success) throw new Error(data.error || "Pool 搜索失败");
         poolResults.value = data.pools || [];
       } catch (error) {
+        if(!request.isCurrent()||error.name==='AbortError')return;
         errorMsg.value = "Pool 搜索失败: " + error.message;
         poolResults.value = [];
-      } finally { poolLoading.value = false; }
+      } finally { if(request.isCurrent())poolLoading.value = false; }
     }
 
     function usePool(pool) {
@@ -1121,6 +1224,8 @@ const GalleryPanel = {
 
     function onScroll(e) {
       const el = e.target;
+      if (!el.clientHeight) return;
+      gridMetrics.scrollTop=el.scrollTop;
       if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
         loadMore();
       }
@@ -1192,10 +1297,16 @@ const GalleryPanel = {
       doSearch();
     }
 
-    onMounted(async () => {
-      try {
-        const res = await fetch("/danbooru_search/settings");
-        const data = await res.json();
+    onMounted(() => {
+      measureGrid();
+      if(typeof ResizeObserver==='function') {
+        gridObserver=new ResizeObserver(measureGrid);
+        if(gridRef.value)gridObserver.observe(gridRef.value);
+      }
+      stopVisibleGalleryLoad=loadGalleryWhenVisible(gridRef.value,async ()=>{
+       try {
+        const data = await readSharedDanbooruJson("/danbooru_search/settings");
+        if(!galleryAlive)return;
         if (data.success && data.settings) {
           if (data.settings.rating_filter) {
             ratingFilter.value = data.settings.rating_filter;
@@ -1205,13 +1316,20 @@ const GalleryPanel = {
           // 保持固定页大小；滚动到末端后继续异步请求下一页。
           pageLimit.value = PAGE_LIMIT;
         }
-      } catch (_) {
+       } catch (_) {
         // 设置接口不可用时沿用 general，不阻断图库。
-      }
-      if (tags.value) doSearch();
+       }
+       if (galleryAlive&&tags.value) doSearch();
+      });
+    });
+    onBeforeUnmount(()=>{
+      galleryAlive=false;
+      galleryRequests.cancel();poolRequests.cancel();
+      gridObserver?.disconnect();stopVisibleGalleryLoad?.();
     });
 
     return () => {
+      const viewport=gridWindow({count:errorMsg.value?0:posts.value.length,...gridMetrics});
       return h("div", { class: "dbg-panel" }, [
         h("div", { class: "dbg-search-bar" }, [
           h("input", {
@@ -1258,7 +1376,7 @@ const GalleryPanel = {
             h("input", {
               class: "dbg-pool-input", value: poolQuery.value,
               placeholder: "系列 Pool 名称",
-              onInput: e => { poolQuery.value = e.target.value; poolResults.value = []; },
+              onInput: e => { poolRequests.cancel();poolLoading.value=false;poolQuery.value = e.target.value; poolResults.value = []; },
               onKeydown: e => { if (e.key === "Enter") { e.preventDefault(); searchPools(); } },
             }),
             h("button", { class: "dbg-btn", disabled: poolLoading.value, onClick: searchPools }, poolLoading.value ? "查找中…" : "查系列"),
@@ -1275,19 +1393,21 @@ const GalleryPanel = {
           ref: gridRef,
           onScroll: onScroll,
         }, [
+          posts.value.length&&viewport.top ? h("div",{class:"dbg-spacer",style:{height:viewport.top+"px"},"aria-hidden":"true"}) : null,
           errorMsg.value
             ? h("div", { class: "dbg-error" }, errorMsg.value)
             : loading.value && posts.value.length === 0
             ? h("div", { class: "dbg-loading" }, "🔄 加载中…")
             : posts.value.length === 0
             ? h("div", { class: "dbg-empty" }, "输入标签搜索 Danbooru 图库")
-            : posts.value.map(post => {
+            : h("div",{class:"dbg-window",style:{gridTemplateColumns:`repeat(${viewport.columns},minmax(0,1fr))`}},posts.value.slice(viewport.start,viewport.end).map(post => {
                 const id = String(post.id);
                 const isSelected = selected.has(id);
                 const edited = isPostEdited(post);
 
                 return h("div", {
                   class: ["dbg-card", isSelected ? "selected" : ""],
+                  "data-post-id":id,
                   key: id,
                   onClick: () => toggleSelect(post),
                   onContextmenu: e => { e.preventDefault(); e.stopPropagation(); openDetail(post, e); },
@@ -1329,7 +1449,8 @@ const GalleryPanel = {
 
                   isSelected ? h("div", { class: "dbg-check" }) : null,
                 ]);
-              }),
+              })),
+          posts.value.length&&viewport.bottom ? h("div",{class:"dbg-spacer",style:{height:viewport.bottom+"px"},"aria-hidden":"true"}) : null,
 
           // 底部加载提示
           posts.value.length > 0
@@ -1385,8 +1506,9 @@ const TagEditor = {
     onToggleCollapse: Function, onGacha: Function, onClearGacha: Function,
     onOpenSettings: Function, gachaName: String, gachaLoading: Boolean,
     autoGacha: Boolean, onAutoGacha: Function, onClearAll: Function,
+    reverseEnabled: Boolean, onReverseToggle: Function,
     onEnrichSelected: Function, enrichmentBusy: Boolean, enrichmentStatus: String,
-    onRefreshApproved: Function,
+    onRefreshApproved: Function, onSaveTranslation: Function,
   },
   setup(props) {
     const input = ref("");
@@ -1544,16 +1666,21 @@ const TagEditor = {
           h("input", { type: "checkbox", checked: !!props.autoGacha, onChange: e => props.onAutoGacha && props.onAutoGacha(e.target.checked) }),
           "每次执行换卡",
         ]),
+        h("label", { class: "dbte-auto", title: "开启后每次执行使用已连接模型识别参考图并把中文描述映射为英文标签；可能调用外部 API" }, [
+          h("input", { type: "checkbox", checked: !!props.reverseEnabled,
+            onChange: e => props.onReverseToggle?.(e.target.checked) }),
+          "启用反推",
+        ]),
         props.gachaName ? h("span", { class: "dbs-gacha-name" }, props.gachaName) : null,
         props.gachaName ? h("button", { class: "dbs-btn small", onClick: props.onClearGacha }, "清除抽卡") : null,
         selectedKeys.value.size ? h("span", { class: "dbte-selection-count" }, "已框选 " + selectedKeys.value.size) : null,
         selectedKeys.value.size ? h("button", { class: "dbs-btn small primary", disabled: props.enrichmentBusy,
-          title: "通过节点已连接的 local_model 或 api_config 填充当前框选标签；结果进入待审核，不会自动改写手工分类",
+          title: "用已连接的 local_model 或 api_config 为框选标签补充中文注释；只自动添加译名，不覆盖已有人工注释或安全分类",
           onClick: () => props.onEnrichSelected?.((props.tags || []).filter(item => selectedKeys.value.has(itemKey(item)) && item.enabled !== false)) },
-          props.enrichmentBusy ? "模型填充提交中…" : "模型填充框选标签") : null,
+          props.enrichmentBusy ? "中文注释提交中…" : "一键添加中文注释") : null,
         (props.tags || []).length ? h("button", { class: "dbs-btn small",
-          title: "从本地已审核词库回读翻译和用途；待审核结果不会采用，也不会覆盖手动设置",
-          onClick: props.onRefreshApproved }, "回读已审核") : null,
+          title: "从本地词库回读已采用的中文注释和用途；不会覆盖手动设置",
+          onClick: props.onRefreshApproved }, "回读词库注释") : null,
         props.enrichmentStatus ? h("span", { class: "dbte-selection-count", title: props.enrichmentStatus }, props.enrichmentStatus) : null,
         selectedKeys.value.size ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => selectedKeys.value.has(itemKey(item)) && item.enabled !== false).map(item => item.tag.replace(/_/g, " ")).join(", ")).catch(() => {}) }, "复制框选") : null,
         (props.tags || []).length ? h("button", { class: "dbs-btn small", onClick: () => navigator.clipboard?.writeText((props.tags || []).filter(item => item.enabled !== false).map(item => {
@@ -1649,7 +1776,13 @@ const TagEditor = {
               updateAt(inspectorIndex, { weight: Number.isFinite(value) ? value : 1 });
             } })]),
         ]),
-        h("label", { class: "dbte-translation" }, ["译名 ", h("input", { value: inspectorCn, placeholder: "可选中文说明", onChange: e => updateAt(inspectorIndex, { translation: e.target.value.trim(), translation_manual: true }) })]),
+        h("label", { class: "dbte-translation" }, ["译名 ", h("input", { value: inspectorCn, placeholder: "可选中文说明", onChange: e => updateAt(inspectorIndex, { translation: e.target.value.trim(), translation_manual: true }) }),
+          h("button", { class: "dbte-toggle", title: "把修改后的中文译名写入本地词库，后续工作流可复用", onClick: event => {
+            event.preventDefault();
+            event.stopPropagation();
+            props.onSaveTranslation?.({ tag: inspectorItem.tag, translation: event.currentTarget.previousElementSibling?.value || "" });
+          } }, "保存到词库")]),
+        h("div", { class: "dbte-annotation-meta" }, annotationDescription(inspectorItem)),
         h("div", { class: "dbte-pop-row actions" }, [
           h("button", { class: "dbte-toggle", onClick: () => updateAt(inspectorIndex, { enabled: inspectorItem.enabled === false }) }, inspectorItem.enabled === false ? "恢复输出" : "屏蔽输出"),
           h("button", { class: "dbte-toggle", onClick: () => navigator.clipboard?.writeText(inspectorItem.tag.replace(/_/g, " ")).catch(() => {}) }, "复制"),
@@ -1836,12 +1969,11 @@ const TagLibraryPanel = {
     async function refresh() {
       clearTimeout(timer);
       try {
-        const res = await fetch("/danbooru_search/library");
-        const data = await readJsonResponse(res, "词库状态接口");
-        if (!res.ok || !data.success) throw new Error(data.error || "读取词库状态失败");
+        const data = await readSharedDanbooruJson("/danbooru_search/library", { fresh: true });
+        if (!data.success) throw new Error(data.error || "读取词库状态失败");
         if (!alive) return;
         info.value = data;
-        Object.assign(libraryFacetLabels, data.facets || {});
+        applyLibraryInfo(data);
         if (data.job.running) timer = setTimeout(refresh, 2500);
       } catch (e) { if (alive) error.value = e.message; }
     }
@@ -1852,8 +1984,11 @@ const TagLibraryPanel = {
           headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, pages: pages.value, batch: batch.value, ...extra }) });
         const data = await readJsonResponse(res, "词库任务接口");
         if (!res.ok || !data.success) throw new Error(data.error || "任务失败");
+        readSharedDanbooruJson.invalidate("/danbooru_search/library");
         if (action === "review") {
           for (const key of Object.keys(translationCache)) delete translationCache[key];
+          delete approvedMetadataCache[extra.name];
+          requestTranslations([extra.name], true);
         }
         await refresh();
       } catch (e) { error.value = e.message; }
@@ -1864,6 +1999,7 @@ const TagLibraryPanel = {
       return !!input && (input.link != null || (Array.isArray(input.links) && input.links.length > 0));
     }
     async function togglePortFill() {
+      pauseReviewAutoQueue(app);
       error.value = "";
       if (enrichmentEnabled.value) {
         try {
@@ -1881,8 +2017,7 @@ const TagLibraryPanel = {
         saveEnrichmentState(true);
         // First batch only needs this node and its connected model upstream;
         // enabling dictionary work must not start unrelated H3 sampling nodes.
-        const accepted = await app.queuePrompt(0, 1, [String(props.node.id)]);
-        if (!accepted) throw new Error("局部执行未被 ComfyUI 接受");
+        await queueNodeTask(app, props.node);
         error.value = "✅ 已启用并提交首批；以后每次正常执行工作流时只处理一批。";
         setTimeout(refresh, 800);
       } catch (e) {
@@ -1911,6 +2046,7 @@ const TagLibraryPanel = {
         h("h4", {}, "本地词库 · 同步 / 翻译 / 审核"),
         h("p", { class: "dbs-setting-desc" }, "首次初始化依次导入随附词表、续传 Wiki 分组和官方标签，只读取元数据、不抓图片。完成阶段不会重复执行；中断后从事务断点继续。"),
         data ? h("p", {}, `本地 ${data.status.total} 条 · 原表译名 ${data.status.translated} 条 · API 更新 ${data.status.official} 条 · Wiki 组 ${data.status.groups} 个 · 已审核 ${data.status.annotations.approved || 0} 条 · 待审核 ${data.status.annotations.pending || 0} 条`) : null,
+        data?.status?.last_annotation_update ? h("p", { class: "dbs-setting-desc" }, `注释最近更新：${annotationDate(data.status.last_annotation_update)} · 人工修订优先保留`) : null,
         data ? h("div", { class: ["dbs-bootstrap-card", bootstrap.ready ? "ready" : "pending"] }, [
           h("strong", {}, bootstrap.ready ? "✅ 首次词库初始化已完成" : "⏳ 首次词库尚未完成"),
           h("span", {}, bootstrap.ready
@@ -1942,7 +2078,8 @@ const TagLibraryPanel = {
         ...(data?.pending || []).map(item => h("div", { class: "dbs-status-card", key: item.name }, [
           h("strong", {}, item.name + " → " + (item.cn_name || "译名不确定")),
           h("span", {}, item.facets.map(key => libraryFacetLabels[key] || key).join("、") || "尚未分类"),
-          h("span", {}, `评级 ${item.rating} · 置信度 ${item.confidence} · ${item.model}`),
+          h("span", {}, `模型草稿 · 待审核 · 评级 ${item.rating} · 置信度 ${item.confidence} · ${item.model}`),
+          h("span", {}, `更新：${annotationDate(item.updated_at)}`),
           h("span", {}, item.note),
           h("div", { class: "dbs-setting-checks" }, [
             h("button", { class: "dbs-btn", disabled: running, onClick: () => run("review", { name: item.name, approve: true }) }, "核对无误，采用"),
@@ -2151,8 +2288,7 @@ const SettingsDialog = {
     async function loadSettings() {
       errorMsg.value = "";
       try {
-        const res = await fetch("/danbooru_search/settings");
-        const data = await readJsonResponse(res, "设置接口");
+        const data = await readSharedDanbooruJson("/danbooru_search/settings");
 
         if (data.success && data.settings) {
           applySettings(data.settings);
@@ -2170,9 +2306,8 @@ const SettingsDialog = {
         const statusData = await readJsonResponse(statusRes, "标签状态接口");
         localModels.value = modelsData.success && Array.isArray(modelsData.models) ? modelsData.models : [];
         tagDataStatus.value = statusData.success ? statusData.data : null;
-        const libraryRes = await fetch("/danbooru_search/library");
-        const libraryData = await readJsonResponse(libraryRes, "词库接口");
-        if (libraryData.success) Object.assign(libraryFacetLabels, libraryData.facets || {});
+        const libraryData = await readSharedDanbooruJson("/danbooru_search/library");
+        applyLibraryInfo(libraryData);
       } catch (e) {
         errorMsg.value = "读取设置失败: " + e.message;
       }
@@ -2193,6 +2328,7 @@ const SettingsDialog = {
           throw new Error(data.error || ("HTTP " + res.status));
         }
         const savedSettings = data.settings || collectSettings();
+        readSharedDanbooruJson.invalidate("/danbooru_search/settings");
         applyDanbooruUiSettings(savedSettings);
         if (props.onSaved) props.onSaved(savedSettings);
         if (props.onClose) props.onClose();
@@ -2549,11 +2685,15 @@ const DanbooruSearchApp = {
     const settingsOpen = ref(false);
     const settingsTab = ref("general");
     const libraryBootstrap = ref(null);
+    const taskMode = ref(props.node.properties?.eagle_danbooru_task || "tags");
     const galleryCollapsed = ref(false);
     const lastGachaCard = ref("");
     const gachaLoading = ref(false);
     const gachaStatus = ref("");
     const autoGacha = ref(false);
+    const reverseEnabled = ref(false);
+    const reverseScopes = ref([...DEFAULT_REVERSE_SCOPES]);
+    const reverseResult = ref(null);
     const gachaContext = ref("");
     const gachaContentLevel = ref(0);
     const gachaHoldingMode = ref("none");
@@ -2562,11 +2702,68 @@ const DanbooruSearchApp = {
     const modelReleaseRequest = ref("");
     const enrichmentBusy = ref(false);
     const enrichmentStatus = ref("");
+    const outputSnapshot = ref(null);
+    const outputFormat = ref("anima_prompt");
+    const outputOpen = ref(false);
+    const outputDirty = ref(false);
+    const outputCopyStatus = ref("");
     let restoreSelectionTimer = null;
+    let stopVisibleInit = null;
+    let appAlive = true;
     const MAX_SIDE_RATIO_SUM = 0.68;
     const leftRatio = ref(0.28);
     const selectedRatio = ref(0.19);
     let activeSplitCleanup = null;
+
+    function restoreOutput() {
+      const saved = props.node.properties || {};
+      outputSnapshot.value = saved.eagle_danbooru_output || null;
+      outputDirty.value = !!saved.eagle_danbooru_output_dirty || outputDraftChanged(props.node, outputSnapshot.value);
+      outputFormat.value = ["tags", "sdxl_prompt", "anima_prompt"].includes(saved.eagle_danbooru_output_format)
+        ? saved.eagle_danbooru_output_format : "anima_prompt";
+      outputOpen.value = saved.eagle_danbooru_output_open ?? !!outputSnapshot.value;
+    }
+    restoreOutput();
+    props.node._dbsRestoreOutput = restoreOutput;
+    props.node._dbsReceiveOutput = snapshot => {
+      outputSnapshot.value = snapshot;
+      outputDirty.value = !!props.node.properties.eagle_danbooru_output_dirty;
+      outputCopyStatus.value = "";
+      outputOpen.value = true;
+      props.node.properties.eagle_danbooru_output_open = true;
+    };
+    function saveOutputView() {
+      props.node.properties ||= {};
+      props.node.properties.eagle_danbooru_output_format = outputFormat.value;
+      props.node.properties.eagle_danbooru_output_open = outputOpen.value;
+      props.node.graph?.change?.();
+    }
+    async function copyOutput() {
+      try {
+        await navigator.clipboard.writeText(outputSnapshot.value?.[outputFormat.value] || "");
+        outputCopyStatus.value = "已复制";
+      } catch (_) { outputCopyStatus.value = "请选中文本复制"; }
+    }
+
+    props.node._dbsReceiveReverse = result => { reverseResult.value = result; };
+    props.node._dbsReceiveAnnotation = result => {
+      readSharedDanbooruJson.invalidate("/danbooru_search/library");
+      readSharedDanbooruJson("/danbooru_search/library").then(applyLibraryInfo).catch(() => {});
+      if (result?.status === "error") {
+        enrichmentStatus.value = `中文注释失败：${result.error || "模型未返回有效结果"}`;
+      } else if (result?.status === "approved") {
+        enrichmentStatus.value = `已添加 ${result.applied || 0} 条中文注释；跳过 ${result.skipped || 0} 条`;
+        if (result.applied_names?.length) refreshAppliedTranslations(result.applied_names);
+      } else if (result?.status === "empty") {
+        enrichmentStatus.value = "所选标签已有注释或不在本地词库中";
+      }
+    };
+    if (props.node._dbsReverseResult) reverseResult.value = props.node._dbsReverseResult;
+
+    function validReverseScopes(value) {
+      if (!Array.isArray(value)) return [...DEFAULT_REVERSE_SCOPES];
+      return REVERSE_SCOPES.filter(item => value.includes(item.key)).map(item => item.key);
+    }
 
     function restoreSplitLayout() {
       const savedSplit = props.node.properties?.eagle_danbooru_split_layout || {};
@@ -2651,6 +2848,19 @@ const DanbooruSearchApp = {
 
     const contentLevelLabels = ["SFW 安全", "SFW 轻微", "NSFW 成人", "NSFW 明确"];
 
+    function chooseTask(mode) {
+      if (!["tags", "reverse", "gacha"].includes(mode)) return;
+      taskMode.value = mode;
+      props.node.properties ||= {};
+      props.node.properties.eagle_danbooru_task = mode;
+      props.node.graph?.change?.();
+    }
+    function restoreTask() {
+      const saved = props.node.properties?.eagle_danbooru_task;
+      taskMode.value = ["tags", "reverse", "gacha"].includes(saved) ? saved
+        : reverseEnabled.value ? "reverse" : autoGacha.value ? "gacha" : "tags";
+    }
+
     function protectNativeEditing(event) {
       if (!shouldProtectDanbooruEditing(event, appElement.value)) return;
       // Nodes 2.0 may route Delete from an input to its graph-wide node
@@ -2715,7 +2925,12 @@ const DanbooruSearchApp = {
         // purpose or nonempty translation as potentially hand-edited.
         if (!item.kind_manual && ["general", "semantic", "detail", "manual"].includes(item.kind) &&
             meta.kind && meta.kind !== item.kind) patch.kind = meta.kind;
-        if (!item.translation_manual && !item.translation && meta.cn_name) patch.translation = meta.cn_name;
+        if (!item.translation_manual && meta.cn_name && meta.cn_name !== item.translation &&
+            (!item.translation || ["model", "catalog"].includes(item.annotation_source))) patch.translation = meta.cn_name;
+        if (!item.translation_manual || (meta.translation_manual && meta.cn_name === item.translation)) {
+          for (const key of ANNOTATION_FIELDS) if (meta[key] !== undefined && meta[key] !== item[key]) patch[key] = meta[key];
+          if (meta.translation_manual && meta.cn_name === (patch.translation || item.translation)) patch.translation_manual = true;
+        }
         if (Array.isArray(meta.facets) && JSON.stringify(meta.facets) !== JSON.stringify(item.facets || [])) patch.facets = meta.facets.slice();
         if (meta.facet_labels && JSON.stringify(meta.facet_labels) !== JSON.stringify(item.facet_labels || {})) patch.facet_labels = { ...meta.facet_labels };
         if (meta.rating && meta.rating !== item.rating) patch.rating = meta.rating;
@@ -2728,15 +2943,63 @@ const DanbooruSearchApp = {
       if (changed) {
         selectedOutputTags.value = next;
         syncSelection();
-        enrichmentStatus.value = "已回读审核通过的标签分类";
+        enrichmentStatus.value = "已回读词库中的中文注释与标签分类";
       }
     }
 
     function refreshApprovedTags() {
       const tags = selectedOutputTags.value.map(item => item.tag).filter(Boolean);
       if (!tags.length) return;
-      enrichmentStatus.value = `回读 ${tags.length} 个标签的已审核结果…`;
+      enrichmentStatus.value = `回读 ${tags.length} 个标签的词库注释…`;
       requestTranslations(tags, true);
+    }
+
+    async function refreshAppliedTranslations(names) {
+      const applied = new Set(names.map(name => String(name).toLowerCase()));
+      const tags = selectedOutputTags.value.map(item => item.tag)
+        .filter(tag => applied.has(String(tag).trim().toLowerCase().replace(/\s+/g, "_")));
+      if (!tags.length) return;
+      try {
+        const response = await fetch("/danbooru_search/translate_tags_batch", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tags }),
+        });
+        const data = await readJsonResponse(response, "中文注释回读接口");
+        if (!response.ok || !data.success) throw new Error(data.error || "回读失败");
+        Object.assign(translationCache, data.translations || {});
+        Object.assign(approvedMetadataCache, data.metadata || {});
+        selectedOutputTags.value = selectedOutputTags.value.map(item => {
+          const label = data.translations?.[item.tag];
+          return label && !item.translation_manual ? { ...item, translation: label } : item;
+        });
+        syncSelection();
+      } catch (error) {
+        enrichmentStatus.value += `；回读失败：${error.message}`;
+      }
+    }
+
+    async function saveTranslation(item) {
+      const name = String(item?.tag || "").trim();
+      const label = String(item?.translation || "").trim();
+      if (!name || !label) { enrichmentStatus.value = "先输入标签和中文译名"; return; }
+      try {
+        const response = await fetch("/danbooru_search/library", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "edit_translation", name, cn_name: label }),
+        });
+        const data = await readJsonResponse(response, "词库译名保存接口");
+        if (!response.ok || !data.success) throw new Error(data.error || "保存失败");
+        selectedOutputTags.value = selectedOutputTags.value.map(tag =>
+          tag.tag === name ? { ...tag, translation: label, translation_manual: true } : tag);
+        translationCache[name] = label;
+        readSharedDanbooruJson.invalidate("/danbooru_search/library");
+        readSharedDanbooruJson("/danbooru_search/library").then(applyLibraryInfo).catch(() => {});
+        syncSelection();
+        requestTranslations([name], true);
+        enrichmentStatus.value = `已将 ${name} 的中文注释保存到词库`;
+      } catch (error) {
+        enrichmentStatus.value = `词库保存失败：${error.message}`;
+      }
     }
 
     watch(approvedMetadataCache, applyApprovedMetadata, { deep: true });
@@ -2796,10 +3059,11 @@ const DanbooruSearchApp = {
         gachaStatus.value = "未连接 local_model；API 服务模型由服务端管理，Danbooru 节点不能远程卸载。";
         return;
       }
+      pauseReviewAutoQueue(app);
       modelReleaseRequest.value = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       syncSelection();
       try {
-        await app.queuePrompt(0);
+        await queueNodeTask(app, props.node);
         modelReleaseRequest.value = "";
         syncSelection();
         gachaStatus.value = "已提交本地生成模型释放请求；本次节点执行完成后释放显存。";
@@ -2825,7 +3089,9 @@ const DanbooruSearchApp = {
         node_id: String(props.node.id),
         batch: Math.min(50, tags.length),
         tags,
+        auto_apply_translations: true,
       };
+      pauseReviewAutoQueue(app);
       payload.selected_tag_enrichment_request = request;
       widget.value = JSON.stringify(payload);
       widget.callback?.(widget.value, widget, props.node);
@@ -2836,8 +3102,7 @@ const DanbooruSearchApp = {
         // Queue only this node and its required upstream inputs. Running the
         // whole graph here could unintentionally start an H3 sampler merely
         // because the user asked to classify a few tags.
-        const accepted = await app.queuePrompt(0, 1, [String(props.node.id)]);
-        if (!accepted) throw new Error("局部执行未被 ComfyUI 接受");
+        await queueNodeTask(app, props.node);
         // queuePrompt has already serialized the submitted prompt. Do not
         // persist an accepted one-shot action in later workflow saves: if the
         // SQLite library is moved or reset, a stale widget request could bill
@@ -2851,7 +3116,9 @@ const DanbooruSearchApp = {
             props.node.graph?.change?.();
           }
         } catch (_) {}
-        enrichmentStatus.value = `已局部提交 ${tags.length} 个标签；模型结果待审核后回读`;
+        if (!enrichmentStatus.value.startsWith("已添加 ") && !enrichmentStatus.value.startsWith("中文注释失败")) {
+          enrichmentStatus.value = `已提交 ${tags.length} 个标签；等待模型生成中文注释`;
+        }
       } catch (error) {
         // A failed queue submission must not leave a stale one-shot request.
         try {
@@ -2870,13 +3137,23 @@ const DanbooruSearchApp = {
 
     function syncSelection() {
       const nodeId = String(props.node.id);
+      // Carry this editor version through execution, including the first run.
+      // A late result must never mark edits made while it was running as clean.
+      const draftRevision = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      if (outputSnapshot.value) {
+        outputDirty.value = true;
+        props.node.properties.eagle_danbooru_output_dirty = true;
+      }
 
       const payload = {
         node_id: nodeId,
+        draft_revision: draftRevision,
         selections: selectedPosts.value,
         selected_tags: selectedOutputTags.value,
         gallery_collapsed: galleryCollapsed.value,
         auto_gacha: autoGacha.value,
+        reverse_enabled: reverseEnabled.value,
+        reverse_scopes: reverseScopes.value,
         gacha_context: gachaContext.value,
         gacha_content_level: gachaContentLevel.value,
         gacha_holding_mode: gachaHoldingMode.value,
@@ -2896,10 +3173,13 @@ const DanbooruSearchApp = {
         let controls = {};
         try { controls = JSON.parse(widget.value || "{}"); } catch (_) { controls = {}; }
         widget.value = JSON.stringify({
+          draft_revision: draftRevision,
           selections: selectedPosts.value,
           selected_tags: selectedOutputTags.value,
           gallery_collapsed: galleryCollapsed.value,
           auto_gacha: autoGacha.value,
+          reverse_enabled: reverseEnabled.value,
+          reverse_scopes: reverseScopes.value,
           gacha_context: gachaContext.value,
           gacha_content_level: gachaContentLevel.value,
           gacha_holding_mode: gachaHoldingMode.value,
@@ -2935,6 +3215,7 @@ const DanbooruSearchApp = {
           Array.isArray(saved.selections) || Array.isArray(saved.selected_tags) ||
           Object.prototype.hasOwnProperty.call(saved, "gallery_collapsed") ||
           Object.prototype.hasOwnProperty.call(saved, "auto_gacha") ||
+          Object.prototype.hasOwnProperty.call(saved, "reverse_enabled") ||
           Object.prototype.hasOwnProperty.call(saved, "gacha_context") ||
           Object.prototype.hasOwnProperty.call(saved, "gacha_content_level") ||
           Object.prototype.hasOwnProperty.call(saved, "gacha_holding_mode")
@@ -2944,6 +3225,8 @@ const DanbooruSearchApp = {
         applyApprovedMetadata();
         galleryCollapsed.value = !!saved.gallery_collapsed;
         autoGacha.value = !!saved.auto_gacha;
+        reverseEnabled.value = !!saved.reverse_enabled;
+        reverseScopes.value = validReverseScopes(saved.reverse_scopes);
         if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
         gachaContext.value = saved.gacha_context || "";
         gachaContentLevel.value = Math.max(0, Math.min(3, Number(saved.gacha_content_level) || 0));
@@ -2951,6 +3234,7 @@ const DanbooruSearchApp = {
         gachaExcludedTags.value = saved.gacha_excluded_tags || "";
         releaseModelAfterOutput.value = !!saved.release_model_after_output;
         modelReleaseRequest.value = saved.model_release_request || "";
+        restoreTask();
       } catch (_) {
         // 旧工作流值损坏时忽略，仍继续尝试服务端缓存。
       }
@@ -2967,6 +3251,8 @@ const DanbooruSearchApp = {
             selected_tags: selectedOutputTags.value,
             gallery_collapsed: galleryCollapsed.value,
             auto_gacha: autoGacha.value,
+            reverse_enabled: reverseEnabled.value,
+            reverse_scopes: reverseScopes.value,
             gacha_context: gachaContext.value,
             gacha_content_level: gachaContentLevel.value,
             gacha_holding_mode: gachaHoldingMode.value,
@@ -2987,6 +3273,8 @@ const DanbooruSearchApp = {
             applyApprovedMetadata();
             galleryCollapsed.value = !!data.gallery_collapsed;
             if (typeof data.auto_gacha === "boolean") autoGacha.value = data.auto_gacha;
+            if (typeof data.reverse_enabled === "boolean") reverseEnabled.value = data.reverse_enabled;
+            reverseScopes.value = validReverseScopes(data.reverse_scopes);
             if (autoGacha.value) selectedOutputTags.value = selectedOutputTags.value.filter(item => !isGachaItem(item));
             if (typeof data.gacha_context === "string") gachaContext.value = data.gacha_context;
             if (Number.isFinite(Number(data.gacha_content_level))) gachaContentLevel.value = Math.max(0, Math.min(3, Number(data.gacha_content_level)));
@@ -2994,6 +3282,7 @@ const DanbooruSearchApp = {
             if (typeof data.gacha_excluded_tags === "string") gachaExcludedTags.value = data.gacha_excluded_tags;
             if (typeof data.release_model_after_output === "boolean") releaseModelAfterOutput.value = data.release_model_after_output;
             if (typeof data.model_release_request === "string") modelReleaseRequest.value = data.model_release_request;
+            restoreTask();
           }
         })
         .catch(() => {});
@@ -3001,25 +3290,29 @@ const DanbooruSearchApp = {
 
     props.node._eagleRestoreUiState = restoreSelection;
 
-    onMounted(async () => {
+    onMounted(() => {
       window.addEventListener("keydown", protectNativeEditing, true);
+      stopVisibleInit=loadGalleryWhenVisible(appElement.value,async ()=>{
       try {
-        const [settingsResponse, libraryResponse] = await Promise.all([
-          fetch("/danbooru_search/settings"),
-          fetch("/danbooru_search/library"),
+        const [data, libraryData] = await Promise.all([
+          readSharedDanbooruJson("/danbooru_search/settings"),
+          readSharedDanbooruJson("/danbooru_search/library"),
         ]);
-        const data = await readJsonResponse(settingsResponse, "设置接口");
-        if (settingsResponse.ok && data.success && data.settings) {
+        if (!appAlive) return;
+        if (data.success && data.settings) {
           applyDanbooruUiSettings(data.settings);
-          gachaContentLevel.value = Math.max(0, Math.min(3, Number(data.settings.gacha_content_level) || 0));
-          gachaHoldingMode.value = ["none", "daily", "weapon", "any"].includes(data.settings.gacha_holding_mode) ? data.settings.gacha_holding_mode : "none";
-          gachaExcludedTags.value = data.settings.gacha_excluded_tags || "";
+          let saved = {};
+          try { saved = JSON.parse((props.node.widgets || []).find(w => w.name === "selection_data")?.value || "{}"); } catch (_) {}
+          if (!("gacha_content_level" in saved)) gachaContentLevel.value = Math.max(0, Math.min(3, Number(data.settings.gacha_content_level) || 0));
+          if (!("gacha_holding_mode" in saved)) gachaHoldingMode.value = ["none", "daily", "weapon", "any"].includes(data.settings.gacha_holding_mode) ? data.settings.gacha_holding_mode : "none";
+          if (!("gacha_excluded_tags" in saved)) gachaExcludedTags.value = data.settings.gacha_excluded_tags || "";
         }
-        const libraryData = await readJsonResponse(libraryResponse, "词库接口");
-        if (libraryResponse.ok && libraryData.success) libraryBootstrap.value = libraryData.bootstrap || null;
+        applyLibraryInfo(libraryData);
+        if (libraryData.success) libraryBootstrap.value = libraryData.bootstrap || null;
       } catch (_) {
         // 设置读取失败不阻断节点加载，使用模块内默认值。
       }
+      });
       restoreSelectionTimer = setTimeout(() => {
         restoreSelectionTimer = null;
         restoreSelection();
@@ -3027,7 +3320,9 @@ const DanbooruSearchApp = {
     });
 
     onBeforeUnmount(() => {
+      appAlive = false;
       stopSplitDrag();
+      stopVisibleInit?.();
       clearTimeout(restoreSelectionTimer);
       restoreSelectionTimer = null;
       if (props.node._dbsStopSplitDrag === stopSplitDrag) delete props.node._dbsStopSplitDrag;
@@ -3036,25 +3331,46 @@ const DanbooruSearchApp = {
       if (props.node._eagleRestoreUiState === restoreSelection) {
         delete props.node._eagleRestoreUiState;
       }
+      delete props.node._dbsReceiveReverse;
+      delete props.node._dbsReceiveAnnotation;
+      delete props.node._dbsReceiveOutput;
+      delete props.node._dbsRestoreOutput;
     });
 
     return () => {
       // Keep blank-space and node-title right-clicks available to ComfyUI.
       // Only tag chips and image cards consume their own context-menu event.
       return h("div", { class: "dbs-root", ref: appElement }, [
+        h("nav", { class: "dbs-task-bar", "aria-label": "Danbooru 任务" }, [
+          ...[["tags", "找标签"], ["reverse", "参考图反推"], ["gacha", "随机搭配"]].map(([key, label]) =>
+            h("button", { class: ["dbs-btn dbs-task-tab", taskMode.value === key ? "primary" : ""],
+              "data-task": key, "aria-pressed": taskMode.value === key, onClick: () => chooseTask(key) }, label)),
+          h("span", { class: "dbs-task-spacer" }),
+          h("span", { class: ["dbs-task-state", reverseEnabled.value ? "enabled" : ""] }, `反推：${reverseEnabled.value ? "已启用" : "关闭"}`),
+          h("span", { class: ["dbs-task-state", autoGacha.value ? "enabled" : ""] }, `自动换卡：${autoGacha.value ? "已启用" : "关闭"}`),
+          h("button", { class: "dbs-btn small dbs-annotation-status", onClick: () => { settingsTab.value = "data"; settingsOpen.value = true; },
+            title: `已采用 ${librarySummary.approved} 条 · 更新 ${annotationDate(librarySummary.updatedAt)}` },
+            librarySummary.pending == null ? "中文注释" : `中文注释 · 待审核 ${librarySummary.pending}`),
+        ]),
         h("div", { class: ["dbs-preview-bar", galleryCollapsed.value ? "collapsed" : ""] }, [
           h(TagEditor, {
             tags: selectedOutputTags.value,
             collapsed: galleryCollapsed.value,
             onChange: updateOutputTags,
             onAdd: items => addOutputTags(items, { source: "manual", kind: "manual" }),
-            onToggleCollapse: () => { galleryCollapsed.value = !galleryCollapsed.value; syncSelection(); },
+            onToggleCollapse: () => { chooseTask("tags"); galleryCollapsed.value = !galleryCollapsed.value; syncSelection(); },
             onGacha: drawGacha,
             onClearGacha: clearGacha,
             onOpenSettings: () => { settingsTab.value = "general"; settingsOpen.value = true; },
             gachaName: lastGachaCard.value,
             gachaLoading: gachaLoading.value,
             autoGacha: autoGacha.value,
+            reverseEnabled: reverseEnabled.value,
+            onReverseToggle: value => {
+              reverseEnabled.value = value;
+              if (!value) reverseResult.value = null;
+              syncSelection();
+            },
             onAutoGacha: value => {
               autoGacha.value = value;
               if (value) {
@@ -3069,7 +3385,67 @@ const DanbooruSearchApp = {
             enrichmentBusy: enrichmentBusy.value,
             enrichmentStatus: enrichmentStatus.value,
             onRefreshApproved: refreshApprovedTags,
+            onSaveTranslation: saveTranslation,
           }),
+        ]),
+
+        h("section", { class: "dbs-output" }, [
+          h("div", { class: "dbs-output-head" }, [
+            h("button", { class: "dbs-btn small", onClick: () => { outputOpen.value = !outputOpen.value; saveOutputView(); } },
+              `${outputOpen.value ? "▾" : "▸"} 实际输出（最近执行）`),
+            h("span", { class: "dbs-output-status" }, outputSnapshot.value
+              ? outputDirty.value ? "编辑已修改 · 下次执行后更新" : `${outputSnapshot.value.tag_count || 0} 个标签 · ${outputSnapshot.value.selected_image_count || 0} 张选图`
+              : "执行后显示下游收到的完整提示词"),
+            ...[["tags", "Tags"], ["sdxl_prompt", "SDXL"], ["anima_prompt", "Anima"]].map(([key, label]) =>
+              h("button", { class: ["dbs-btn small", outputFormat.value === key ? "primary" : ""], "data-format": key,
+                onClick: () => { outputFormat.value = key; outputCopyStatus.value = ""; saveOutputView(); } }, label)),
+            h("button", { class: "dbs-btn small dbs-output-copy", disabled: !outputSnapshot.value,
+              onClick: copyOutput }, outputCopyStatus.value || "复制全部"),
+          ]),
+          outputOpen.value && outputSnapshot.value ? h("div", { class: "dbs-output-body" }, [
+            h("textarea", { class: "dbs-output-text", readonly: true, value: outputSnapshot.value[outputFormat.value] || "",
+              "aria-label": "最近执行的实际提示词输出", spellcheck: false }),
+            h("small", { title: (outputSnapshot.value.tag_sources || []).map(item =>
+              `${item.tag}: ${(item.sources || []).map(source => TAG_SOURCE_LABELS[source] || source).join("、")}`).join("\n") },
+              `执行时间：${outputSnapshot.value.generated_at || "未知"} · 悬停查看标签来源；保存工作流可保留本次结果`),
+          ]) : null,
+        ]),
+
+        h("div", { class: "dbs-reverse-panel dbs-workspace-reverse", style: { display: taskMode.value === "reverse" ? "block" : "none" } }, [
+          h("p", { class: "dbs-workspace-hint" }, reverseEnabled.value
+            ? "运行工作流时按所选范围识别参考图或转换中文描述。角色输入保留为约束。"
+            : "先选择反推范围，再勾选上方“启用反推”。仅切换到此页不会调用模型。"),
+          h("div", { class: "dbs-reverse-scopes" }, [
+            h("strong", {}, "反推范围"),
+            ...REVERSE_SCOPES.map(item => h("label", { key: item.key }, [
+              h("input", {
+                type: "checkbox", checked: reverseScopes.value.includes(item.key),
+                onChange: event => {
+                  reverseScopes.value = event.target.checked
+                    ? [...reverseScopes.value, item.key]
+                    : reverseScopes.value.filter(key => key !== item.key);
+                  syncSelection();
+                },
+              }),
+              item.label,
+            ])),
+          ]),
+          h("div", { class: "dbs-reverse-hint" }, inputConnected("reference_image")
+            ? "执行时读取参考图；需连接有图像能力的 local_model 或 api_config。"
+            : "未连接参考图：只转换 character_tags 中的中文描述；需连接 local_model 或 api_config。"),
+          h("div", { class: "dbs-reverse-hint" }, "英文 tag 中文注释：将标签加入上方列表并框选，点“一键添加中文注释”；译名可在标签详情里修订并保存到词库。"),
+          reverseResult.value ? h("div", { class: ["dbs-reverse-result", reverseResult.value.ok ? "" : "error"] }, [
+            h("span", {}, reverseResult.value.ok
+              ? `已验证 ${(reverseResult.value.tags || []).length} 个标签、${(reverseResult.value.phrases || []).length} 个 Anima 英文短语；未映射 ${(reverseResult.value.unresolved || []).length} 项，拒绝 ${(reverseResult.value.rejected || []).length} 项。`
+              : `反推未完成：${reverseResult.value.error || "模型未返回有效结果"}`),
+            reverseResult.value.ok && (reverseResult.value.tags || []).length
+              ? h("button", { class: "dbs-btn small", onClick: () => addOutputTags(reverseResult.value.tags, { source: "reverse" }) }, "加入上方标签") : null,
+            reverseResult.value.ok && (reverseResult.value.tags || []).length
+              ? h("span", { title: (reverseResult.value.tags || []).map(item => item.tag).join(", ") },
+                  (reverseResult.value.tags || []).slice(0, 12).map(item => item.tag).join(", ") + ((reverseResult.value.tags || []).length > 12 ? "…" : "")) : null,
+            (reverseResult.value.unresolved || []).length
+              ? h("span", { title: reverseResult.value.unresolved.join("；") }, `未映射：${reverseResult.value.unresolved.slice(0, 3).join("；")}`) : null,
+          ]) : null,
         ]),
 
         libraryBootstrap.value && !libraryBootstrap.value.ready ? h("div", { class: "dbs-first-run-banner" }, [
@@ -3078,13 +3454,10 @@ const DanbooruSearchApp = {
           h("button", { class: "dbs-btn primary", onClick: () => { settingsTab.value = "data"; settingsOpen.value = true; } }, "打开首次初始化"),
         ]) : null,
 
-        galleryCollapsed.value ? h("div", { class: "dbs-collapsed-tools" }, [
-          h("section", { class: "dbs-collapsed-panel" }, [
-            h("div", { class: "dbs-collapsed-title" }, "标签检索与同步"),
-            h(TagSearchPanel, { onAddOutput: addSearchOutput, onSearchGallery: searchGallery }),
-          ]),
+        h("div", { class: "dbs-collapsed-tools dbs-workspace-gacha", style: { display: taskMode.value === "gacha" ? "block" : "none" } }, [
           h("section", { class: "dbs-collapsed-panel dbs-gacha-context" }, [
             h("div", { class: "dbs-collapsed-title" }, "抽卡匹配约束"),
+            h("p", { class: "dbs-workspace-hint" }, "配置后点击上方“抽取角色外内容”手动查看搭配，或勾选“每次执行换卡”。"),
             h("textarea", {
               class: "dbs-query-input",
               value: gachaContext.value,
@@ -3132,7 +3505,9 @@ const DanbooruSearchApp = {
             h("div", { class: "dbs-settings-note" }, "character_tags 中已有身份、体型、造型、服装和物品会作为锁定条件；本地 SQLite 严格执行尺度、持物、禁用分类与标签通配符，生成式模型额外理解上方自由文本。"),
             gachaStatus.value ? h("div", { class: ["dbs-gacha-status", gachaStatus.value.startsWith("抽卡失败") ? "error" : ""] }, gachaStatus.value) : null,
           ]),
-        ]) : h("div", { class: "dbs-layout" }, [
+        ]),
+        h("div", { class: ["dbs-layout", galleryCollapsed.value ? "gallery-hidden" : ""],
+          style: { display: taskMode.value === "tags" ? "flex" : "none" } }, [
           h("div", {
             class: "dbs-left",
             style: { flex: `0 0 ${leftRatio.value * 100}%` },
@@ -3225,6 +3600,21 @@ const CSS = `
   font-size: 12px;
   overflow: hidden;
 }
+.dbs-output { flex:0 0 auto; min-width:0; padding:6px 12px; border-bottom:1px solid #364154; background:#171d28; }
+.dbs-output-head { display:flex; align-items:center; flex-wrap:wrap; gap:5px; }
+.dbs-output-status { flex:1; min-width:140px; color:#9fb4ce; font-size:11px; }
+.dbs-output-body { display:flex; flex-direction:column; gap:4px; margin-top:5px; }
+.dbs-output-text { width:100%; height:100px; min-height:55px; max-height:190px; resize:vertical; overflow:auto; box-sizing:border-box; background:#0d1017; color:#dbe8ff; border:1px solid #364154; border-radius:5px; padding:7px; font:12px/1.5 monospace; }
+.dbs-output-body small { color:#8c98ac; font-size:10px; }
+.dbte-annotation-meta { color:#9fb4ce; font-size:10px; line-height:1.5; overflow-wrap:anywhere; padding:3px 0; }
+.dbs-task-bar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:7px 12px; flex:0 0 auto; border-bottom:1px solid #333c4c; background:#171b23; }
+.dbs-task-spacer { flex:1; }
+.dbs-task-state { font-size:10px; color:#8b94a2; border:1px solid #343b47; border-radius:4px; padding:3px 6px; }
+.dbs-task-state.enabled { color:#a9dfb9; border-color:#3d7050; background:#203b29; }
+.dbs-workspace-hint { margin:3px 0 10px; color:#a9bbd1; line-height:1.5; }
+.dbs-reverse-panel.dbs-workspace-reverse { flex:1 1 0; min-height:0; max-height:none; padding:12px; }
+.dbs-layout.gallery-hidden .dbs-right,.dbs-layout.gallery-hidden .dbs-column-splitter { display:none; }
+.dbs-layout.gallery-hidden .dbs-left { flex:1 1 0 !important; }
 
 .dbs-preview-bar {
   padding: 8px 12px;
@@ -3251,6 +3641,13 @@ const CSS = `
   height: 100%;
 }
 .dbs-preview-bar.collapsed { flex:0 0 auto; max-height:280px; min-height:0; }
+.dbs-reverse-panel { flex:0 0 auto; max-height:145px; overflow-y:auto; padding:6px 12px; border-bottom:1px solid #394659; background:#1a2230; }
+.dbs-reverse-scopes { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; }
+.dbs-reverse-scopes label { display:inline-flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer; }
+.dbs-reverse-scopes input { margin:0; }
+.dbs-reverse-hint { color:#9fb4ce; margin-top:4px; }
+.dbs-reverse-result { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:5px; color:#b7dfc2; }
+.dbs-reverse-result.error { color:#ffaaaa; }
 .dbs-first-run-banner { display:flex; align-items:center; gap:9px; padding:7px 12px; flex:0 0 auto; border-bottom:1px solid #5b4929; background:#2a2418; color:#d9c59c; }
 .dbs-first-run-banner strong { color:#f1d79f; white-space:nowrap; }
 .dbs-first-run-banner span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -3776,19 +4173,20 @@ const CSS = `
 .dbg-grid {
   flex: 1;
   overflow-y: auto;
+  overflow-anchor:none;
   padding: 12px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  grid-auto-rows: 180px;
-  gap: 12px;
-  align-content: start;
+  display: block;
+  min-height:0;
 }
+.dbg-window {display:grid;grid-auto-rows:180px;gap:12px;align-content:start;}
+.dbg-spacer {width:100%;pointer-events:none;}
 
 .dbg-grid::-webkit-scrollbar { width: 8px; }
 .dbg-grid::-webkit-scrollbar-track { background: transparent; }
 .dbg-grid::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
 
 .dbg-card {
+  box-sizing:border-box;
   position: relative;
   background: #1a1a22;
   border-radius: 6px;
@@ -4315,7 +4713,7 @@ app.registerExtension({
         style.textContent = CSS;
 
           container = document.createElement("div");
-          container.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;min-height:0;box-sizing:border-box;overflow:hidden;position:relative;";
+          container.style.cssText = "width:940px;max-width:none;min-width:0;height:100%;min-height:280px;contain:size;box-sizing:border-box;overflow:hidden;position:relative;";
 
         const DEFAULT_VIEWPORT_HEIGHT = 570;
         const MIN_VIEWPORT_HEIGHT = 280;
@@ -4389,6 +4787,7 @@ app.registerExtension({
           this.onConfigure = function () {
             onConfigure?.apply(this, arguments);
             this._dbsRestoreSplitLayout?.();
+            this._dbsRestoreOutput?.();
             this.properties = this.properties || {};
             if (Number(this.properties.eagle_dbs_layout_version || 0) < 4) {
               // Recover old workflows whose feedback loop already persisted a
@@ -4419,6 +4818,38 @@ app.registerExtension({
         }
       } finally {
         this._dbsMounting = false;
+      }
+    };
+
+    const onExecuted = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function (data) {
+      onExecuted?.apply(this, arguments);
+      const output = Array.isArray(data?.danbooru_output) ? data.danbooru_output[0] : null;
+      if (typeof output === "string") {
+        try {
+          const snapshot = JSON.parse(output);
+          if (!["tags", "sdxl_prompt", "anima_prompt"].every(key => typeof snapshot?.[key] === "string")) throw new Error("输出字段不完整");
+          this.properties ||= {};
+          this.properties.eagle_danbooru_output = snapshot;
+          this.properties.eagle_danbooru_output_dirty = outputDraftChanged(this, snapshot);
+          this._dbsReceiveOutput?.(snapshot);
+          this.graph?.change?.();
+        } catch (error) { console.warn("[Eagle Suite] Danbooru output snapshot invalid:", error); }
+      }
+      const raw = Array.isArray(data?.reverse_result) ? data.reverse_result[0] : null;
+      if (typeof raw === "string") {
+        try {
+          const result = JSON.parse(raw);
+          this._dbsReverseResult = result;
+          this._dbsReceiveReverse?.(result);
+        } catch (error) {
+          console.warn("[Eagle Suite] Danbooru reverse result invalid:", error);
+        }
+      }
+      const annotation = Array.isArray(data?.selected_annotation_result) ? data.selected_annotation_result[0] : null;
+      if (typeof annotation === "string") {
+        try { this._dbsReceiveAnnotation?.(JSON.parse(annotation)); }
+        catch (error) { console.warn("[Eagle Suite] Danbooru annotation result invalid:", error); }
       }
     };
 

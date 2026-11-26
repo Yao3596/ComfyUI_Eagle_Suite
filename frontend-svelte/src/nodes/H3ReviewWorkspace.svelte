@@ -1,27 +1,30 @@
 <script>
   import { onDestroy } from "svelte";
   import {
+    currentReviewTake,
     normalizeReview,
     normalizeWorkspace,
+    pendingReviewIdentity,
     reviewPhase,
     serializeWorkspace,
     snapRetryLength,
     takeKey,
+    workspaceForPendingReview,
   } from "../lib/contracts.js";
 
   /** @type {Record<string, any>} */
   export let initialReview = {};
   /** @type {Record<string, any>} */
   export let initialWorkspace = {};
-  /** @type {(path: string) => string} */
-  export let resolveVideoUrl = (path) => String(path || "");
+  /** @type {(path: string, previewUrl?: string) => string} */
+  export let resolveVideoUrl = (path, previewUrl) => previewUrl || String(path || "");
   /** @type {(state: string) => void} */
   export let onWorkspaceChange = () => {};
   /** @type {(decision: string, payload: Record<string, any>) => Promise<Record<string, any> | void>} */
   export let onDecision = async () => {};
 
   let review = normalizeReview(initialReview);
-  let workspace = normalizeWorkspace(initialWorkspace);
+  let workspace = workspaceForPendingReview(normalizeWorkspace(initialWorkspace), review, true);
   let busy = false;
   /** @type {HTMLVideoElement | undefined} */
   let player;
@@ -30,58 +33,66 @@
   let localStatus = "";
   let lockedToken = "";
 
-  /** @param {Array<Record<string, any>>} items @param {string} key */
-  function findTake(items, key) {
-    return items.find((item) => takeKey(item) === key) || items.at(-1) || null;
-  }
-
   $: history = /** @type {Array<Record<string, any>>} */ (review.history || []);
-  $: selectedTake = findTake(history, workspace.selectedTakeKey);
+  $: currentTake = currentReviewTake(review);
+  $: selectedTake = history.find((/** @type {Record<string, any>} */ item) => takeKey(item) === workspace.selectedTakeKey) || currentTake;
   $: selectedKey = takeKey(selectedTake);
+  $: historicalTake = Boolean(selectedTake && currentTake && selectedKey !== takeKey(currentTake));
   $: selectedScene = selectedTake ? Number(selectedTake.index || 0) + 1 : Number(review.current_index || 0) + 1;
   $: selectedRevision = Number(selectedTake?.revision || 1);
-  $: clipPath = selectedTake?.clip_path || review.preview_clip || review.clip_path || "";
-  $: previewUrl = resolveVideoUrl(clipPath);
+  $: currentClip = review.preview_clip || review.clip_path || "";
+  $: clipPath = selectedTake?.clip_path || currentClip;
+  $: previewUrl = resolveVideoUrl(clipPath, selectedTake?.preview_url || (clipPath === currentClip ? review.preview_url : ""));
   $: phase = reviewPhase(review);
   $: decisionLocked = Boolean(lockedToken && lockedToken === String(review.token || ""));
+  $: decisionDisabled = busy || decisionLocked || phase !== "reviewing";
+  $: rawReviewLength = phase === "reviewing" ? Number(review.length ?? currentTake?.length ?? 0) : 0;
   $: reviewFps = Math.max(1, Number(review.fps || review.output_fps || 24));
   $: retrySeconds = workspace.retryLength > 0 ? workspace.retryLength / reviewFps : 0;
   $: phaseLabel = ({
-    waiting: "等待片段",
+    idle: "空闲",
     ready: "片段已就绪",
     reviewing: "等待审片",
-    approved: "已批准",
+    approved: review.mode === "auto" || review.decision === "auto" ? "自动通过" : "已批准",
     retrying: "正在重试",
     stopped: "已停止",
     error: "发生错误",
+    history: "只读回看",
   })[phase] || phase;
+  $: phaseStatus = ({
+    idle: "运行工作流以生成候选片段",
+    ready: "可回看已生成的片段",
+    reviewing: historicalTake ? "批准与重试作用于当前待审版本" : "检查视频后选择下一步",
+    approved: "可回看已通过的片段",
+    retrying: "已提交重做，等待新片段",
+    stopped: review.decision === "approve_stop" ? "已批准当前片段并停止循环" : "循环已停止",
+    error: "审片流程发生错误",
+    history: "历史快照",
+  })[phase];
 
   /** @param {unknown} value */
   export function setReview(value) {
     const nextReview = normalizeReview(value);
-    const incomingToken = String(nextReview.token || "");
-    if (lockedToken && (nextReview.awaiting_review === false || (incomingToken && incomingToken !== lockedToken))) {
-      lockedToken = "";
-      localStatus = "";
-    }
+    const previousPending = pendingReviewIdentity(review);
+    const nextPending = pendingReviewIdentity(nextReview);
     review = nextReview;
-    if (review.awaiting_review) {
-      const latest = /** @type {Array<Record<string, any>>} */ (review.history || []).at(-1);
-      workspace = {
-        ...workspace,
-        selectedTakeKey: takeKey(latest),
-        retryPrompt: String(review.prompt ?? latest?.prompt ?? workspace.retryPrompt ?? ""),
-        retrySeed: Number(review.seed ?? latest?.seed ?? workspace.retrySeed ?? -1),
-        retryLength: Number(review.length ?? latest?.length ?? workspace.retryLength ?? 0),
-      };
+    if (nextPending && nextPending === previousPending) return;
+
+    if (!nextPending || lockedToken !== String(review.token || "")) lockedToken = "";
+    localStatus = "";
+    busy = false;
+    if (nextPending) {
+      workspace = workspaceForPendingReview(workspace, review, !previousPending);
+      persist();
+    } else if (previousPending) {
+      workspace = { ...workspace, retryRunName: "", retryTakeKey: "", retryLength: 0 };
       persist();
     }
-    busy = false;
   }
 
   /** @param {unknown} value */
   export function setWorkspace(value) {
-    workspace = normalizeWorkspace(value);
+    workspace = workspaceForPendingReview(normalizeWorkspace(value), review, true);
   }
 
   /** @param {unknown} value */
@@ -123,6 +134,14 @@
     persist();
   }
 
+  /** @param {Event} event */
+  function changeRetryLength(event) {
+    const input = /** @type {HTMLInputElement} */ (event.currentTarget);
+    const retryLength = snapRetryLength(input.value);
+    input.value = String(retryLength);
+    patchWorkspace({ retryLength });
+  }
+
   function onLoadedMetadata() {
     const media = player;
     duration = media && Number.isFinite(media.duration) ? media.duration : 0;
@@ -153,30 +172,39 @@
 
   /** @param {string} decision */
   async function decide(decision) {
-    if (busy || decisionLocked) return;
+    const submittedReview = pendingReviewIdentity(review);
+    if (busy || decisionLocked || !submittedReview) return;
+    const token = String(review.token || "");
     busy = true;
     localStatus = "正在提交决策…";
     try {
       const result = await onDecision?.(decision, {
         retry_prompt: workspace.retryPrompt,
         retry_seed: Number(workspace.retrySeed ?? -1),
-        retry_length: Number(workspace.retryLength || 0),
+        retry_length: decision === "retry" ? workspace.retryLength : 0,
         resume_scene: decision === "resume" ? selectedScene : 0,
         assemble_partial_on_stop: Boolean(workspace.assemblePartial),
         auto_continue_timeout_minutes: Number(workspace.timeoutMinutes || 0),
         unload_models_while_waiting: Boolean(workspace.unloadModels),
-        token: String(review.token || ""),
+        token,
         run_name: String(review.run_name || ""),
       });
-      const resolvedToken = String(result?.lockedToken || review.token || "");
+      if (submittedReview !== pendingReviewIdentity(review)) return;
+      const resolvedToken = String(result?.lockedToken || token);
       if (resolvedToken) lockedToken = resolvedToken;
-      localStatus = decision === "approve" ? "已批准，等待下一片段…"
-        : decision === "approve_stop" ? "已批准并请求停止"
-          : "已提交重试，等待新版本…";
+      localStatus = ({
+        approve: "已提交批准",
+        approve_stop: "已提交批准并停止",
+        retry: "已提交重试",
+        reroll: "已提交换种子",
+        resume: "已提交从所选场景重做",
+      })[decision] || "决策已提交";
     } catch (error) {
-      localStatus = `提交失败：${error instanceof Error ? error.message : String(error)}`;
+      if (submittedReview === pendingReviewIdentity(review)) {
+        localStatus = `提交失败：${error instanceof Error ? error.message : String(error)}`;
+      }
     } finally {
-      busy = false;
+      if (submittedReview === pendingReviewIdentity(review)) busy = false;
     }
   }
 </script>
@@ -185,7 +213,9 @@
   <header>
     <div>
       <h3>🦅 H3 审片工作台</h3>
-      <p>场景 {selectedScene} · r{String(selectedRevision).padStart(4, "0")}</p>
+      {#if selectedTake || clipPath}
+        <p>场景 {selectedScene} · r{String(selectedRevision).padStart(4, "0")}{historicalTake ? " · 历史版本" : ""}</p>
+      {/if}
     </div>
     <span class="phase">{phaseLabel}</span>
   </header>
@@ -215,7 +245,7 @@
         <time>{formatTime(duration)}</time>
       </div>
     {:else}
-      <div class="empty">等待循环生成候选片段…</div>
+      <div class="empty">{phase === "history" ? "暂无历史片段" : "暂无候选片段"}</div>
     {/if}
   </section>
 
@@ -226,16 +256,17 @@
   <section class="form-card">
     <label class="prompt">
       <span>重试提示词</span>
-      <textarea value={workspace.retryPrompt}
+      <textarea value={workspace.retryPrompt} disabled={decisionDisabled}
         on:input={(event) => patchWorkspace({ retryPrompt: event.currentTarget.value })}
         placeholder="只在重试时覆盖当前镜头提示词"></textarea>
     </label>
     <div class="grid">
-      <label><span>种子</span><input type="number" value={workspace.retrySeed}
+      <label><span>种子</span><input type="number" value={workspace.retrySeed} disabled={decisionDisabled}
         on:change={(event) => patchWorkspace({ retrySeed: Number(event.currentTarget.value) })} /></label>
-      <label><span>H3 length（0 或 17k+5）</span><input type="number" min="0" max="3592" step="1" value={workspace.retryLength}
-        on:change={(event) => patchWorkspace({ retryLength: snapRetryLength(event.currentTarget.value) })} />
-        <small>{workspace.retryLength ? `约 ${retrySeconds.toFixed(2)} 秒 @ ${reviewFps}fps` : "0 = 不覆盖模型帧长"}</small></label>
+      <label><span>重试覆盖帧数（0 或 17k+5）</span><input type="number" min="0" max="3592" step="1"
+        value={workspace.retryLength} disabled={decisionDisabled} on:change={changeRetryLength} />
+        <small>{workspace.retryLength ? `约 ${retrySeconds.toFixed(2)} 秒 @ ${reviewFps}fps` : "0 = 沿用当前帧长"}</small>
+        {#if rawReviewLength > 0}<small>当前待审原始帧数 {rawReviewLength}</small>{/if}</label>
       <label><span>下次等待自动通过（分）</span><input type="number" min="0" max="1440" step="0.5" value={workspace.timeoutMinutes}
         on:change={(event) => patchWorkspace({ timeoutMinutes: Number(event.currentTarget.value) })} />
         <small>仅对下一次进入审片等待生效</small></label>
@@ -251,14 +282,14 @@
   </section>
 
   <footer>
-    <button class="approve" disabled={busy || decisionLocked || !review.awaiting_review} on:click={() => decide("approve")}>批准并继续</button>
-    <button disabled={busy || decisionLocked || !review.awaiting_review} on:click={() => decide("retry")}>按修改重试</button>
-    <button disabled={busy || decisionLocked || !review.awaiting_review} on:click={() => decide("reroll")}>换种子</button>
-    <button disabled={busy || decisionLocked || !review.awaiting_review || !selectedTake} on:click={() => decide("resume")}>从所选场景重做</button>
-    <button class="stop" disabled={busy || decisionLocked || !review.awaiting_review} on:click={() => decide("approve_stop")}>批准并停止</button>
+    <button class="approve" disabled={decisionDisabled} on:click={() => decide("approve")}>批准并继续</button>
+    <button disabled={decisionDisabled} on:click={() => decide("retry")}>按修改重试</button>
+    <button disabled={decisionDisabled} on:click={() => decide("reroll")}>换种子</button>
+    <button disabled={decisionDisabled || !selectedTake} on:click={() => decide("resume")}>从所选场景重做</button>
+    <button class="stop" disabled={decisionDisabled} on:click={() => decide("approve_stop")}>批准并停止</button>
   </footer>
 
-  <div class="status" aria-live="polite">{localStatus || (decisionLocked ? "该版本已提交，等待新 token 或审片状态更新" : review.awaiting_review ? "检查视频后选择下一步" : "等待运行状态更新")}</div>
+  <div class="status" aria-live="polite">{localStatus || (decisionLocked ? "本次决策已提交" : phaseStatus)}</div>
 </main>
 
 <style>

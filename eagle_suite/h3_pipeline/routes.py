@@ -6,7 +6,7 @@ H3 循环链路 REST / WebSocket 路由。
 """
 
 import json
-import os
+import re
 from pathlib import Path
 
 from aiohttp import web
@@ -15,11 +15,12 @@ import folder_paths
 
 from ..route_registry import route
 from ..logger import logger
-from ..utils import is_safe_path, strip_path
 from .review_runtime import (
     lookup_pending_review,
+    pending_review_directory,
     resolve_review,
     review_decision_filename,
+    review_preview_file,
 )
 
 
@@ -30,13 +31,16 @@ def _chain_root():
     return Path(folder_paths.get_output_directory()) / CHAIN_SUBDIR
 
 
+def _valid_run_name(run_name):
+    return bool(
+        run_name and run_name.strip(" .") == run_name
+        and not re.search(r'[<>:"/\\|?*\x00-\x1f]', run_name)
+    )
+
+
 def _safe_run_path(run_name):
     """校验 run_name 不会越界。"""
-    if not run_name:
-        return None
-    run_name = strip_path(run_name)
-    # 禁止 .. 等
-    if ".." in run_name or "/" in run_name or "\\" in run_name:
+    if not _valid_run_name(run_name):
         return None
     base = _chain_root()
     candidate = base / run_name
@@ -106,10 +110,9 @@ async def get_manifest(request):
 @route("POST", "/eagle_h3_pipeline/review")
 @route("POST", "/eagle_h3_chain/review")
 async def post_review(request):
-    """前端审阅决策回写。把 decision 写入 run 的 review_decision.json，供节点读取。"""
+    """Record and deliver the decision to its live review execution."""
     run_name = request.query.get("run", "").strip()
-    run_path = _safe_run_path(run_name)
-    if not run_path:
+    if not _valid_run_name(run_name):
         return web.json_response({"error": "非法 run_name"}, status=400)
     try:
         raw = await request.text()
@@ -118,8 +121,10 @@ async def post_review(request):
         body = json.loads(raw)
     except Exception as e:
         return web.json_response({"error": f"JSON 解析失败: {e}"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "审阅决策必须为 JSON 对象"}, status=400)
 
-    decision = body.get("decision", "").strip().lower()
+    decision = str(body.get("decision") or "").strip().lower()
     if decision not in ("approve", "retry", "reroll", "stop", "approve_stop", "resume"):
         return web.json_response({"error": f"无效 decision: {decision}"}, status=400)
 
@@ -128,8 +133,11 @@ async def post_review(request):
         decision_filename = review_decision_filename(token)
     except ValueError:
         return web.json_response({"error": "缺少有效 token"}, status=400)
-    # The request URL is authoritative. Runtime validates this run identity
-    # against the token before it wakes a waiting recursive execution.
+    # The token binds the run directory chosen by the workflow, including
+    # output_dir overrides and runs that share the same display name.
+    run_path = pending_review_directory(token, run_name, default=_safe_run_path(run_name))
+    if run_path is None:
+        return web.json_response({"error": "待审任务已结束或运行不匹配", "resolved": False}, status=409)
     body["run_name"] = run_name
     review_file = run_path / decision_filename
     try:
@@ -148,8 +156,7 @@ async def get_pending_review(request):
     """Recover one active review after the ComfyUI browser is refreshed."""
     run_name = request.query.get("run", "").strip()
     node_id = request.query.get("node", "").strip()
-    run_path = _safe_run_path(run_name)
-    if not run_path:
+    if not _valid_run_name(run_name):
         return web.json_response({"error": "非法 run_name"}, status=400)
     if not node_id:
         return web.json_response({"error": "缺少 node"}, status=400)
@@ -168,23 +175,28 @@ async def get_pending_review(request):
 @route("GET", "/eagle_h3_chain/preview")
 async def get_preview(request):
     """返回运行目录下的预览文件流（clip / seam 图等）。"""
-    run_name = request.query.get("run", "").strip()
-    rel_path = request.query.get("path", "").strip()
-    if not run_name or not rel_path:
-        return web.json_response({"error": "缺少 run 或 path"}, status=400)
+    token = request.query.get("clip")
+    if token is not None:
+        target = review_preview_file(token)
+        if target is None:
+            return web.json_response({"error": "预览链接失效"}, status=404)
+    else:
+        run_name = request.query.get("run", "").strip()
+        rel_path = request.query.get("path", "").strip()
+        if not run_name or not rel_path:
+            return web.json_response({"error": "缺少 run 或 path"}, status=400)
 
-    run_path = _safe_run_path(run_name)
-    if not run_path:
-        return web.json_response({"error": "非法 run_name"}, status=400)
+        run_path = _safe_run_path(run_name)
+        if not run_path:
+            return web.json_response({"error": "非法 run_name"}, status=400)
 
-    # 拼接并解析，确保在 run_path 下
-    target = (run_path / rel_path).resolve()
-    try:
-        real_run = run_path.resolve()
-        if real_run not in [target, *target.parents]:
-            return web.json_response({"error": "非法路径"}, status=400)
-    except Exception:
-        return web.json_response({"error": "路径解析失败"}, status=400)
+        try:
+            real_run = run_path.resolve()
+            target = (run_path / rel_path).resolve()
+            if real_run not in target.parents:
+                return web.json_response({"error": "非法路径"}, status=400)
+        except (OSError, RuntimeError, ValueError):
+            return web.json_response({"error": "路径解析失败"}, status=400)
 
     if not target.is_file():
         return web.json_response({"error": "文件不存在"}, status=404)

@@ -1,7 +1,11 @@
 """Offline tests: no ComfyUI startup, API calls or model loading."""
 import importlib.util
+import ast
+import asyncio
 import json
 import pathlib
+import os
+import re
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -94,6 +98,58 @@ class LibraryTests(unittest.TestCase):
         self.lib.review("sitting", True)
         self.assertEqual(self.lib.search("坐姿")[0]["name"], "sitting")
         self.assertEqual(len(self.lib.sample_pool(["pose.posture"])), 1)
+
+    def test_annotation_provenance_survives_review_and_reopen(self):
+        self.lib.save_drafts([draft()], [tag()], "connected-model")
+        pending = self.lib.pending()[0]
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["model"], "connected-model")
+        self.assertRegex(pending["updated_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(self.lib.status()["last_annotation_update"], pending["updated_at"])
+        self.assertFalse(self.lib.lookup(["sitting"])["sitting"]["annotation"])
+        self.lib.review("sitting", True)
+        item = mod.Library(self.lib.path).lookup(["sitting"])["sitting"]
+        self.assertEqual(item["annotation_source"], "model")
+        self.assertEqual(item["annotation_model"], "connected-model")
+        self.assertEqual(item["annotation_status"], "approved")
+        self.assertEqual(item["annotation_confidence"], .9)
+        self.assertEqual(item["annotation_updated_at"], pending["updated_at"])
+
+    def test_manual_label_replaces_pending_without_adopting_draft_taxonomy(self):
+        self.lib.save_drafts([draft(kind="outfit", facets=["clothing.top"])], [tag()], "model-draft")
+        self.lib.edit_translation("sitting", "人工坐姿")
+        self.lib.save_translations([{"name":"sitting", "cn_name":"后来的模型译名"}], [tag()], "new-model")
+        item = mod.Library(self.lib.path).lookup(["sitting"])["sitting"]
+        self.assertEqual(item["cn_name"], "人工坐姿")
+        self.assertEqual(item["annotation_source"], "manual")
+        self.assertEqual(item["annotation_model"], "manual:ui")
+        self.assertIsNone(item["annotation_confidence"])
+        self.assertEqual(item["facets"], [])
+        self.assertEqual(self.lib.pending(), [])
+        with self.lib.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit").fetchone()[0], 1)
+
+    def test_translation_only_does_not_claim_synthetic_confidence(self):
+        self.lib.save_translations([{"name":"sitting", "cn_name":"坐姿"}], [tag()], "label-model")
+        item = self.lib.lookup(["sitting"])["sitting"]
+        self.assertEqual(item["annotation_source"], "model")
+        self.assertIsNone(item["annotation_confidence"])
+
+    def test_translation_route_returns_manual_provenance_from_sqlite(self):
+        self.lib.edit_translation("sitting", "人工坐姿")
+        path = pathlib.Path(__file__).resolve().parents[1] / "eagle_suite/danbooru_search.py"
+        function = next(n for n in ast.parse(path.read_text("utf-8-sig")).body
+                        if isinstance(n, ast.AsyncFunctionDef) and n.name == "route_translate_batch")
+        function.decorator_list = []
+        env = {"os":os, "re":re, "asyncio":asyncio, "LIBRARY_PATH":str(self.lib.path),
+               "_load_tag_translations":lambda:{}, "_library_lookup":self.lib.lookup, "FACETS":mod.FACETS,
+               "web":Mock(json_response=lambda value:value)}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), env)
+        async def request_json():return {"tags":["sitting"]}
+        result = asyncio.run(env["route_translate_batch"](Mock(json=request_json)))
+        self.assertEqual(result["translations"]["sitting"], "人工坐姿")
+        self.assertEqual(result["metadata"]["sitting"]["annotation_source"], "manual")
+        self.assertTrue(result["metadata"]["sitting"]["translation_manual"])
 
     def test_targeted_candidates_include_explicit_official_types_without_expanding_automatic_pool(self):
         rows = [tag("artist_alias", 9, category=1),

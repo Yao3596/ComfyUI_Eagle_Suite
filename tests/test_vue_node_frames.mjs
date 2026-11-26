@@ -17,7 +17,6 @@ const audited = [
   ['lora_gallery.js', /el\.style\.width = w \+ "px";/, /host\.style\.width = w \+ "px";/],
   ['unified_media_browser.js', /el\.style\.width = w \+ "px";/, /onResize/],
   ['audio_browser.js', /el\.style\.width = w \+ "px";/, /onResize/],
-  ['h3_director.js', /el\.style\.width = w \+ 'px';/, /onResize/],
   ['h3_pipeline.js', /el\.style\.width = Math\.max\(260,/, /onResize/],
   ['video_frame_extractor_vue.js', /element\.style\.width = `\$\{width\}px`;/, /onResize/],
 ];
@@ -29,6 +28,8 @@ for (const [name, rootWidth, resizeOrHost] of audited) {
   assert.match(source, /hideInPanel:\s*true/, `${name} must remain visible in Nodes 2.0 while staying out of the parameter sidebar`);
   assert.match(source, /\.width\s*=\s*undefined/, `${name} must clear stale sidebar width state`);
 }
+assert.match(read('h3_director.js'), /el\.style\.cssText = '[^']*width:100%[^']*contain:size/,
+  'H3 Director width must come from the native widget slot');
 
 // Every full-surface widget must render on both the classic canvas and the
 // Nodes 2.0 Vue node body; canvasOnly suppresses the latter entirely.
@@ -191,7 +192,7 @@ const frameSelector = read('video_frame_extractor_vue.js');
 assert.match(frameSelector, /createApp\(FrameSelector/, 'video frame selector must mount as a Vue application');
 assert.match(frameSelector, /selected_frames[\s\S]*?JSON\.stringify/, 'selected frame numbers must be serialized into the workflow');
 assert.match(frameSelector, /frame_previews[\s\S]*?onExecuted/, 'backend preview descriptors must hydrate the visual frame grid');
-assert.match(frameSelector, /app\.queuePrompt\(0\)/, 'the preview button must queue the output node');
+assert.match(frameSelector, /queueNodeTask\(app, node\)/, 'the preview button must queue only this output node');
 assert.match(frameSelector, /选择 \/ 上传视频/, 'the frame selector must support direct video upload');
 assert.match(frameSelector, /<video v-if="videoUrl"/, 'the frame selector must include an embedded video player');
 assert.match(frameSelector, /max="120"/, 'preview density must not be limited to 24 thumbnails');

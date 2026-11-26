@@ -275,6 +275,27 @@ def _safe_get(d, key, default=""):
 _MEDIA_TAG_NAMES = {"image": "Picture", "video": "Video", "audio": "Audio"}
 
 
+def _media_mapping_slots(rows):
+    """Resolve explicit zero-based slots and legacy positional media rows."""
+    next_slots = dict.fromkeys(_MEDIA_TAG_NAMES, 0)
+    used_slots = {kind: set() for kind in _MEDIA_TAG_NAMES}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("type") or "image").lower()
+        if kind not in next_slots:
+            continue
+        slot = row.get("slot")
+        if type(slot) is not int or slot < 0:
+            slot = next_slots[kind]
+            while slot in used_slots[kind]:
+                slot += 1
+            next_slots[kind] = slot + 1
+        if slot not in used_slots[kind]:
+            used_slots[kind].add(slot)
+            yield kind, slot, row
+
+
 def _project_media(project):
     """Return normalized multimodal references, migrating legacy image slots in memory."""
     media = _safe_get(project, "mediaRefs", []) or []
@@ -2475,9 +2496,8 @@ def _build_skill_extraction_prompts(project, scene, source_prompt, hint=""):
     return system, user
 
 
-def run_director_skill(project, scenes, request, api_config=None, local_model=None, director_skill=""):
-    """运行导演 Skill，返回 {scene_id, preamble, dialogues, shots, transport, error}。"""
-    out = {
+def _director_skill_response(request):
+    return {
         "scene_id": request.get("sceneId"),
         "sceneId": request.get("sceneId"),
         "preamble": None, "dialogues": None, "shots": None,
@@ -2491,6 +2511,11 @@ def run_director_skill(project, scenes, request, api_config=None, local_model=No
         "mergeMode": request.get("mergeMode", "overwrite"),
         "operation": str(request.get("operation") or "generate_scene").strip().lower(),
     }
+
+
+def run_director_skill(project, scenes, request, api_config=None, local_model=None, director_skill=""):
+    """运行导演 Skill，返回 {scene_id, preamble, dialogues, shots, transport, error}。"""
+    out = _director_skill_response(request)
     try:
         requested_tasks = set(request.get("tasks") or [])
         # The generation chain is semantic, not checkbox-click order.
@@ -2988,7 +3013,7 @@ class EagleH3DirectorNode:
     CATEGORY = "🦅 Eagle Suite/H3 导演台"
 
     def execute(self, h3_state="{}", LLM_HINT="", foundation_input="", **kwargs):
-        skill_request = kwargs.get("skill_request", "") or ""
+        skill_request = str(kwargs.get("skill_request") or "").strip()
         director_skill = kwargs.get("director_skill", "") or ""
         api_config = kwargs.get("api_config", None)
         local_model = kwargs.get("local_model", None)
@@ -3026,40 +3051,42 @@ class EagleH3DirectorNode:
         project["director_skill"] = effective_director_skill
 
         # ── 导演 Skill 生成（手动「生成」按钮触发）──
-        if skill_request and skill_request.strip():
-            block_skill_queue = True
+        if skill_request:
+            req = {}
             try:
-                req = json.loads(skill_request)
-                if req.get("run"):
-                    block_skill_queue = bool(req.get("blockDownstream", True))
-                    result = run_director_skill(
-                        project, scenes, req, api_config=api_config, local_model=local_model,
-                        director_skill=effective_director_skill
-                    )
-                    result["skill_layers"] = len(skill_layers)
-                    result["node_id"] = node_id
-                    if req.get("releaseAfter") and result.get("transport") == "local":
-                        try:
-                            from .local_llm_node import release_local_model_handle
-                            released = release_local_model_handle(local_model)
-                            result["memory_release"] = released
-                        except Exception as e:
-                            result["memory_release_error"] = str(e)
-                    try:
-                        from server import PromptServer
-                        ps = getattr(PromptServer, "instance", None)
-                        if ps:
-                            ps.send_sync("h3_director_skill_result", result)
-                    except Exception as e:
-                        logger.warning(f"[EagleH3Director] 推送 skill 结果失败: {e}")
-            except Exception as e:
-                logger.warning(f"[EagleH3Director] skill_request 解析失败: {e}")
-            if block_skill_queue:
+                parsed = json.loads(skill_request)
+                if not isinstance(parsed, dict):
+                    raise ValueError("skill_request 必须是 JSON 对象")
+                req = parsed
+                if not req.get("run"):
+                    raise ValueError("skill_request 缺少运行指令")
+                result = run_director_skill(
+                    project, scenes, req, api_config=api_config, local_model=local_model,
+                    director_skill=effective_director_skill,
+                )
+            except Exception as error:
+                logger.warning(f"[EagleH3Director] 执行导演 Skill 失败: {error}")
+                result = _director_skill_response(req)
+                result["error"] = f"生成失败: {error}"
+
+            result["skill_layers"] = len(skill_layers)
+            result["node_id"] = node_id
+            if req.get("releaseAfter") and result.get("transport") == "local":
                 try:
-                    from comfy_execution.graph_utils import ExecutionBlocker
-                    return tuple(ExecutionBlocker(None) for _ in self.RETURN_TYPES)
-                except Exception as e:
-                    logger.warning(f"[EagleH3Director] 当前 ComfyUI 不支持静默阻断下游: {e}")
+                    from .local_llm_node import release_local_model_handle
+                    result["memory_release"] = release_local_model_handle(local_model)
+                except Exception as error:
+                    result["memory_release_error"] = str(error)
+            try:
+                from server import PromptServer
+                server = getattr(PromptServer, "instance", None)
+                if server:
+                    server.send_sync("h3_director_skill_result", result)
+            except Exception as error:
+                logger.warning(f"[EagleH3Director] 推送 Skill 结果失败: {error}")
+
+            from comfy_execution.graph_utils import ExecutionBlocker
+            return tuple(ExecutionBlocker(None) for _ in self.RETURN_TYPES)
 
         # plan dict — ethanfel H3_CHAIN_PLAN 对象
         plan_data = compile_h3_params(project, scenes, LLM_HINT or "")
@@ -3136,6 +3163,7 @@ class EagleH3DirectorNode:
 
         media_bundle = {
             "ref_images": ref_images,
+            "ref_images_placeholder": not refs,
             "video_slots": video_slots,
             "video_audio_slots": video_audio_slots,
             "audio_slots": audio_slots,
@@ -3326,39 +3354,33 @@ class EagleH3MediaPackNode:
 
     @staticmethod
     def _normalized_mapping(raw_mapping, image_count, video_slots, audio_slots):
-        text = str(raw_mapping or "").strip()
-        if text:
+        if isinstance(raw_mapping, list):
+            mapping = list(raw_mapping)
+        else:
             try:
-                mapping = json.loads(text)
+                mapping = json.loads(str(raw_mapping or "").strip() or "[]")
             except Exception as error:
                 raise ValueError(f"media_mapping 不是有效 JSON: {error}") from error
-            if not isinstance(mapping, list) or not all(isinstance(row, dict) for row in mapping):
-                raise ValueError("media_mapping 必须是 JSON 对象数组")
-            return mapping
+        if not isinstance(mapping, list) or not all(isinstance(row, dict) for row in mapping):
+            raise ValueError("media_mapping 必须是 JSON 对象数组")
 
-        mapping = []
-        for index in range(image_count):
-            mapping.append({
-                "type": "image",
-                "name": f"Picture {index + 1}",
-                "role": "reference",
-                "purpose": f"<Picture {index + 1}> external reference",
-            })
-        for index, value in enumerate(video_slots):
-            if value is not None:
+        mapped = {(kind, slot) for kind, slot, _row in _media_mapping_slots(mapping)}
+        available = {
+            "image": range(image_count),
+            "video": (slot for slot, value in enumerate(video_slots) if value is not None),
+            "audio": (slot for slot, value in enumerate(audio_slots) if value is not None),
+        }
+        for kind, slots in available.items():
+            for slot in slots:
+                if (kind, slot) in mapped:
+                    continue
+                tag = f"{_MEDIA_TAG_NAMES[kind]} {slot + 1}"
                 mapping.append({
-                    "type": "video",
-                    "name": f"Video {index + 1}",
+                    "type": kind,
+                    "slot": slot,
+                    "name": tag,
                     "role": "reference",
-                    "purpose": f"<Video {index + 1}> external reference",
-                })
-        for index, value in enumerate(audio_slots):
-            if value is not None:
-                mapping.append({
-                    "type": "audio",
-                    "name": f"Audio {index + 1}",
-                    "role": "reference",
-                    "purpose": f"<Audio {index + 1}> external reference",
+                    "purpose": f"<{tag}> external reference",
                 })
         return mapping
 
@@ -3476,10 +3498,12 @@ class EagleH3MediaBridgeNode:
                         for index, value in enumerate(video_audio_overrides)]
         audios = [value if value is not None else source_audio[index]
                   for index, value in enumerate(audio_overrides)]
-        if ref_images is None:
-            images = list(source.get("ref_images") or [])
-        else:
+        if ref_images is not None:
             images = EagleH3MediaPackNode._split_images(ref_images)
+        elif source.get("ref_images_placeholder"):
+            images = []
+        else:
+            images = list(source.get("ref_images") or [])
 
         raw_mapping = str(media_mapping or "").strip() or source.get("media_mapping", "")
         mapping = EagleH3MediaPackNode._normalized_mapping(

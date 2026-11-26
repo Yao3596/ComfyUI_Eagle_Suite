@@ -7,10 +7,7 @@ import { redactSecretWidgetFromWorkflow } from '../web/js/workflow_secret_redact
 // is not mounted; this test covers the workflow export boundary specifically.
 let extension;
 const source = fs.readFileSync(new URL('../web/js/lora_gallery.js', import.meta.url), 'utf8')
-  .replace('import { app } from "../../../scripts/app.js";', '')
-  .replace('import { createApp, h, ref, onMounted, onBeforeUnmount } from "../lib/vue.esm-browser.js";', '')
-  .replace('import { redactSecretWidgetFromWorkflow } from "./workflow_secret_redaction.js";', '')
-  .replace('import "./eagle_vue_theme.js";', '');
+  .replace(/^import .*;\r?\n/gm, '');
 
 const element = () => ({ style: {}, appendChild() {}, replaceChildren() {} });
 vm.runInNewContext(source, {
@@ -20,6 +17,8 @@ vm.runInNewContext(source, {
     createElement: element,
   },
   createApp() { return { mount() {}, unmount() {} }; },
+  createLoraAutoEnrichScheduler() { return { register() {} }; },
+  bindNodeWidgetScroll() { return () => {}; },
   redactSecretWidgetFromWorkflow,
   setTimeout() {},
   console: { error() {} },

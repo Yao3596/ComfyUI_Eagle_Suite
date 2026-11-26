@@ -33,6 +33,28 @@ def _parse_star(value) -> int:
     except (TypeError, ValueError, IndexError):
         return 0
 
+
+def _sequence_from_name(name, prefix, separator, extension, allow_stem=False):
+    """Accept only this saver's exact prefix, separator, and numeric suffix."""
+    value = os.path.basename(str(name or ""))
+    suffix = "." + extension.lower()
+    if value.lower().endswith(suffix):
+        value = value[:-len(suffix)]
+    elif not allow_stem or "." in value:
+        return None
+    head = prefix + separator
+    if not value.startswith(head):
+        return None
+    number = value[len(head):]
+    return int(number) if re.fullmatch(r"[0-9]+", number) else None
+
+
+def _next_available_number(occupied, start):
+    number = max(0, int(start))
+    while number in occupied:
+        number += 1
+    return number
+
 class EagleSaver:
     """Eagle 图片保存器 - 将 ComfyUI 图像保存到 Eagle 软件或本地"""
 
@@ -100,6 +122,10 @@ class EagleSaver:
                     "multiline": True,
                     "placeholder": "Eagle 注释"
                 }),
+                "fill_number_gaps": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "从起始编号开始填补未占用编号；关闭时继续使用最大编号后一个。加在末尾以兼容旧工作流。"
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -124,7 +150,7 @@ class EagleSaver:
                     optimize_image=True, high_quality_webp=False, overwrite=False,
                     save_metadata_in_png=True, save_metadata_json=False,
                     tags="", star=0, annotation="",
-                    prompt=None, extra_pnginfo=None):
+                    prompt=None, extra_pnginfo=None, fill_number_gaps=False):
 
         star = _parse_star(star)
         filename_prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(filename_prefix or "ComfyUI")).strip(" .") or "ComfyUI"
@@ -175,10 +201,37 @@ class EagleSaver:
         # 2. 从 ComfyUI 工作流中提取元数据
         meta = self._build_metadata(prompt, extra_pnginfo)
 
-        # ✅ 3. 统一确定起始序号：优先从本地目录扫描，其次使用 Eagle 全局计数器，最后使用用户设置
+        # ✅ 3. 确定起始序号。补号只在未开启覆盖时生效。
         seq = filename_number_start
+        occupied = set()
 
-        if save_to_local:
+        if fill_number_gaps and not overwrite:
+            if save_to_local:
+                os.makedirs(local_save_path, exist_ok=True)
+                for name in os.listdir(local_save_path):
+                    number = _sequence_from_name(name, filename_prefix, filename_separator, file_extension)
+                    if number is not None:
+                        occupied.add(number)
+            if save_to_eagle and folder_id:
+                offset = 0
+                while True:
+                    batch = eagle_client.get_items_in_folder(
+                        folder_id, limit=1000, offset=offset, include_subfolders=False
+                    )
+                    for item in batch:
+                        for key in ("name", "fileName"):
+                            number = _sequence_from_name(
+                                item.get(key), filename_prefix, filename_separator,
+                                file_extension, allow_stem=True,
+                            )
+                            if number is not None:
+                                occupied.add(number)
+                    if len(batch) < 1000:
+                        break
+                    offset += len(batch)
+            seq = _next_available_number(occupied, filename_number_start)
+
+        elif save_to_local:
             os.makedirs(local_save_path, exist_ok=True)
             if not overwrite:
                 # 扫描本地目录，找到最大编号
@@ -237,7 +290,8 @@ class EagleSaver:
                         if not overwrite and os.path.exists(full_path):
                             original_seq = seq
                             while os.path.exists(full_path):
-                                seq += 1
+                                seq = (_next_available_number(occupied, seq + 1)
+                                       if fill_number_gaps else seq + 1)
                                 if filename_number_padding > 0:
                                     seq_str = str(seq).zfill(filename_number_padding)
                                 else:
@@ -296,7 +350,9 @@ class EagleSaver:
                         logger.error(f"Eagle 导入失败（{message}）")
 
                 # ✅ 本张处理完成，序号递增到下一张
-                seq += 1
+                occupied.add(seq)
+                seq = (_next_available_number(occupied, seq + 1)
+                       if fill_number_gaps and not overwrite else seq + 1)
 
             except Exception as e:
                 logger.error(f"处理第 {idx+1} 张图片时出错: {e}")
@@ -304,7 +360,9 @@ class EagleSaver:
         # ✅ 5. 更新全局计数器（用于纯 Eagle 保存场景）
         if save_to_eagle and folder_id:
             counter_key = f"{folder_id}_{filename_prefix}_{filename_separator}_{file_extension}"
-            EagleSaver._global_counter[counter_key] = seq - 1  # seq 已经递增到下一个，所以减 1
+            EagleSaver._global_counter[counter_key] = max(
+                EagleSaver._global_counter.get(counter_key, -1), seq - 1
+            )
 
         # 6. 延时清理临时文件
         if temp_files:

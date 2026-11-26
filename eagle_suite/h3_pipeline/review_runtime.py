@@ -2,14 +2,19 @@
 """In-process review rendezvous shared by the H3 node and HTTP route."""
 
 import asyncio
+import base64
 from copy import deepcopy
 import hashlib
+import hmac
+from pathlib import Path
 import re
 import secrets
 import time
+from urllib.parse import urlencode
 
 
 _PENDING_REVIEWS = {}
+_PREVIEW_KEY = secrets.token_bytes(32)
 
 
 def _terminal_node_id(node_id):
@@ -29,7 +34,7 @@ def review_decision_filename(token):
     return f"review_decision_{digest}.json"
 
 
-def open_review(node_id=None, run_name=None):
+def open_review(node_id=None, run_name=None, base_dir=None):
     token = f"{node_id or 'review'}-{secrets.token_urlsafe(18)}"
     loop = asyncio.get_running_loop()
     future = loop.create_future()
@@ -38,12 +43,52 @@ def open_review(node_id=None, run_name=None):
         "future": future,
         "token": token,
         "run_name": str(run_name or "").strip(),
+        "base_dir": Path(base_dir).resolve() if base_dir else None,
         "node_id": str(node_id or "").strip(),
         "display_node_id": _terminal_node_id(node_id),
         "created_at": time.time(),
         "payload": None,
     }
     return token, future
+
+
+def pending_review_directory(token, run_name, default=None):
+    pending = _PENDING_REVIEWS.get(str(token or ""))
+    if pending is None or pending["future"].done() or pending["run_name"] != run_name:
+        return None
+    return pending["base_dir"] or default
+
+
+def review_preview_url(base_dir, clip_path):
+    """Issue a preview URL for a single clip inside the execution's run directory."""
+    if not base_dir or not clip_path:
+        return ""
+    try:
+        root = Path(base_dir).resolve()
+        path = Path(clip_path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if root not in path.parents:
+        return ""
+    encoded = base64.urlsafe_b64encode(str(path).encode("utf-8"))
+    signature = hmac.new(_PREVIEW_KEY, encoded, "sha256").hexdigest()
+    token = f"{encoded.decode('ascii')}.{signature}"
+    query = urlencode({"clip": token})
+    return f"/eagle_h3_pipeline/preview?{query}"
+
+
+def review_preview_file(token):
+    """Verify the exact file URL, including after the review decision resolves."""
+    try:
+        encoded, supplied = str(token).rsplit(".", 1)
+        expected = hmac.new(_PREVIEW_KEY, encoded.encode("ascii"), "sha256").hexdigest()
+        if hmac.compare_digest(supplied, expected):
+            path = Path(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+            if path == path.resolve():
+                return path
+    except (OSError, RuntimeError, TypeError, ValueError):
+        pass
+    return None
 
 
 def publish_review(token, payload):
@@ -153,7 +198,10 @@ def pending_count():
 
 __all__ = [
     "open_review",
+    "pending_review_directory",
     "review_decision_filename",
+    "review_preview_file",
+    "review_preview_url",
     "publish_review",
     "lookup_pending_review",
     "resolve_review",

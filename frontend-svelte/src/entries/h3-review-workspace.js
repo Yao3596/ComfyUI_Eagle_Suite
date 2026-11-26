@@ -6,7 +6,7 @@ import { normalizeReview, normalizeWorkspace } from "../lib/contracts.js";
  * @typedef {Object} ReviewMountOptions
  * @property {unknown} [review]
  * @property {unknown} [workspace]
- * @property {(path: string) => string} [resolveVideoUrl]
+ * @property {(path: string, previewUrl?: string) => string} [resolveVideoUrl]
  * @property {(state: string) => void} [onWorkspaceChange]
  * @property {(decision: string, payload: Record<string, any>) => Promise<Record<string, any> | void>} [onDecision]
  */

@@ -22,8 +22,10 @@ const full = [
   "lora_gallery.js",
   "media_timeline_editor.js",
   "prompt_presets.js",
+  "review_gate.js",
   "svelte_character_interaction.js",
   "text_studio.js",
+  "text_switch_node_vue.js",
   "unified_media_browser.js",
   "video_frame_extractor_vue.js",
   "wallhaven_gallery.js",
@@ -52,12 +54,21 @@ for (const name of full) {
   assert.match(source, /onRemoved/, `${name} needs a node removal lifecycle`);
 }
 
-// The two compact status panels stay fixed; every large surface needs an
-// independent resize state and a finite Nodes 2.0 expansion bound.  Main DOM
-// applications deliberately do not override `computeSize`: doing so changes
-// LiteGraph's classification from growable to fixed and clips the application
-// while leaving unused grey node body below it.
-for (const name of full.filter((item) => !["h3_pipeline.js", "text_studio.js"].includes(item))) {
+const nativeSlotSurfaces = [
+  "h3_director.js", "h3_review_workspace_svelte.js", "review_gate.js", "svelte_character_interaction.js",
+];
+for (const name of nativeSlotSurfaces) {
+  const source = sources.get(name);
+  assert.match(source, /height:\s*100%;[^}]{0,320}?contain:\s*size/,
+    `${name}: the editor must fill the native slot without expanding it to fit its contents`);
+  assert.doesNotMatch(source, /getHeight:[^\n]*currentViewportHeight/,
+    `${name}: the native slot controls the editor height`);
+}
+
+const specializedSizing = new Set([
+  ...nativeSlotSurfaces, "h3_pipeline.js", "text_studio.js", "text_switch_node_vue.js",
+]);
+for (const name of full.filter((item) => !specializedSizing.has(item))) {
   const source = sources.get(name);
   assert.match(source, /getHeight:[^\n]*currentViewportHeight/,
     `${name}: Nodes 2.0 preferred height must follow the bounded resize state`);
@@ -77,6 +88,12 @@ assert.match(textStudio, /getMaxHeight:\s*\(\)\s*=>\s*240/);
 assert.match(textStudio, /getHeight:\s*\(\)\s*=>\s*150/);
 assert.match(textStudio, /Math\.max\(520, Number\(node\.size\?\.\[1\]\) \|\| 520\)/,
   "Text Studio may preserve a taller saved node, but its preview remains compact");
+
+const textSwitch = sources.get("text_switch_node_vue.js");
+assert.match(textSwitch, /getMinHeight: function\(\) \{ return 140; \}/);
+assert.match(textSwitch, /getMaxHeight: function\(\) \{ return 1200; \}/);
+assert.match(textSwitch, /getHeight: function\(\) \{ return view\.height; \}/);
+assert.match(textSwitch, /function resizePreview\(node\)[\s\S]*?view\.height = height/);
 
 const h3Pipeline = sources.get("h3_pipeline.js");
 assert.match(h3Pipeline, /getMinHeight:\s*\(\)\s*=>\s*viewportHeight/);
@@ -165,6 +182,9 @@ for (const [name, widgetNames] of definitionHiddenInventory) {
 assert.match(sources.get("svelte_character_interaction.js"),
   /suppressStateWidgetDefinition\(nodeData, definition\.stateWidget\)/,
   "Svelte transport JSON must be suppressed at definition time");
+assert.match(sources.get("review_gate.js"),
+  /beforeRegisterNodeDef[\s\S]*?确认令牌[\s\S]*?tokenDefinition\[1\] = Object\.assign\([\s\S]*?hidden: true, vueNode: "never", hideInPanel: true/,
+  "The preview confirmation token must be hidden before widget construction");
 
 for (const name of small) {
   const source = sources.get(name);
@@ -206,7 +226,7 @@ const registry = fs.readFileSync(new URL("../eagle_suite/nodes.py", import.meta.
 for (const nodeName of [
   "EagleAudioList", "DanbooruVueSearchNode", "EagleDirectorSkillNode",
   "EagleGalleryNode", "EagleH3DirectorNode", "EagleLoraGalleryNode",
-  "EagleMediaTimelineEditor", "EaglePromptPresets", "EagleVideoFrameExtractor",
+  "EagleMediaTimelineEditor", "EaglePromptPresets", "EagleReviewGate", "EagleTextSwitchMulti", "EagleVideoFrameExtractor",
   "EagleSvelteCharacterInteractionNode", "EagleSvelteCharacterPVNode",
   "UnifiedMediaBrowser", "WallhavenGalleryNode",
 ]) {

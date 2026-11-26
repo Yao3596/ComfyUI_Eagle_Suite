@@ -4,6 +4,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { pauseReviewAutoQueue, queueNodeTask } from "./review_gate_flow.js";
 import { createApp, ref, computed } from "../lib/vue.esm-browser.js";
 import "./eagle_vue_theme.js";
 
@@ -182,10 +183,10 @@ function buildViewUrl(filePath) {
   return `${api.apiURL("/view?type=output")}&filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}`;
 }
 
-function queuePrompt() {
+function queuePrompt(node) {
   if (app && app.queuePrompt) {
     try {
-      return Promise.resolve(app.queuePrompt(0));
+      return queueNodeTask(app, node, { downstream: true });
     } catch (e) {
       console.warn("[H3Pipeline] queuePrompt failed:", e);
     }
@@ -384,6 +385,7 @@ function createReviewPanel(node) {
           return;
         }
         busy.value = true;
+        pauseReviewAutoQueue(app);
         setWidgetValue(node, "retry_prompt", retryPrompt.value || "");
         setWidgetValue(node, "retry_seed", Number(retrySeed.value ?? -1));
         setWidgetValue(node, "retry_length", Number(retryLength.value || 0));
@@ -425,7 +427,13 @@ function createReviewPanel(node) {
           }
         }
         setWidgetValue(node, "review_decision", decision);
-        queuePrompt();
+        try {
+          await queuePrompt(node);
+        } catch (error) {
+          decisionError.value = error.message || String(error);
+          busy.value = false;
+          return;
+        }
         setTimeout(() => { busy.value = false; }, 800);
       }
 

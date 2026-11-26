@@ -42,7 +42,8 @@ function _stripPath(val) {
 }
 
 /**
- * 将 ComfyUI 的 STRING widget 替换为 COMBO 下拉列表，并保留当前值。
+ * 使用原生 ComboWidget，兼容经典画布的绘制和点击方法。
+ * 先移除原控件再添加同名控件，避免 Nodes 2.0 改名为 model_name#1。
  */
 function _replaceWithCombo(node, originalWidget, values) {
     if (!originalWidget || !node.widgets) return null;
@@ -51,33 +52,34 @@ function _replaceWithCombo(node, originalWidget, values) {
 
     const previous = String(originalWidget.value || '').trim();
     const safeValues = Array.isArray(values) && values.length ? values : [''];
-    const initialValue = previous && safeValues.includes(previous) ? previous : safeValues[0];
-
-    // 创建新的 COMBO widget，名字和原 widget 相同，这样序列化时键值不会丢
-    const comboWidget = node.addWidget('combo', originalWidget.name, initialValue, function (v) {
-        // 同步到原 STRING widget 的序列化位置（如果还在）
-        if (originalWidget) originalWidget.value = v;
-        node.setDirtyCanvas(true, true);
-    }, {
-        values: safeValues,
-    });
-
-    // 把原 widget 隐藏/删除：先移除，再把新 widget 移到原位置
-    node.widgets.splice(idx, 1); // 移除原 STRING widget
-    const newIdx = node.widgets.indexOf(comboWidget);
-    if (newIdx >= 0) {
-        node.widgets.splice(newIdx, 1);
-        node.widgets.splice(idx, 0, comboWidget);
+    // Changing only .type leaves a TextWidget instance with text-only canvas
+    // drawing/onClick behavior. Let LiteGraph construct the actual combo class.
+    node.widgets.splice(idx, 1);
+    let combo;
+    try {
+        combo = node.addWidget('combo', originalWidget.name, previous || safeValues[0],
+            originalWidget.callback, { ...(originalWidget.options || {}), values: safeValues });
+    } catch (error) {
+        node.widgets.splice(idx, 0, originalWidget);
+        throw error;
     }
-
-    // 修正序列化索引：ComfyUI 按 widgets 数组顺序序列化，需要让 comboWidget 占原位置
-    // 这里把原 widget 从数组里拿掉后，序列化数组长度会少一位；
-    // 通过给 comboWidget 加一个 serialize_value 钩子保持导出/导入兼容。
-    comboWidget._originalIndex = idx;
-    comboWidget.serialize_value = () => comboWidget.value;
+    const addedIndex = node.widgets.indexOf(combo);
+    if (addedIndex !== idx) {
+        node.widgets.splice(addedIndex, 1);
+        node.widgets.splice(idx, 0, combo);
+    }
+    if (originalWidget.label != null) combo.label = originalWidget.label;
+    combo.serialize_value = () => combo.value;
 
     node.setDirtyCanvas(true, true);
-    return comboWidget;
+    return combo;
+}
+
+function _savedProfileName(info) {
+    const named = info?.widgets_values_named || {};
+    if (named.model_name != null) return String(named.model_name);
+    const legacy = Object.keys(named).find(name => /^model_name#\d+$/.test(name));
+    return legacy ? String(named[legacy] ?? '') : '';
 }
 
 // ── EagleAPILoader 模型列表工具 ─────────────────────────────
@@ -137,6 +139,8 @@ async function _refreshProfileOptions(node, preferredName = '') {
             modelWidget.options.values = profiles.length ? profiles : [''];
             modelWidget.value = nextValue;
             modelWidget.callback?.(nextValue, modelWidget);
+            const idx = node.widgets?.indexOf(modelWidget) ?? -1;
+            if (idx >= 0) node.widgets.splice(idx, 1, modelWidget);
         } else {
             // 第一次：把 STRING widget 替换成真正的 COMBO widget
             const combo = _replaceWithCombo(node, modelWidget, profiles);
@@ -829,6 +833,14 @@ app.registerExtension({
 
     // ── EagleAPILoader：配置加载器 ────────────────────────────
     if (nodeData.name === 'EagleAPILoader') {
+      const origOnConfigure = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function (info) {
+        const savedName = _savedProfileName(info);
+        const result = origOnConfigure?.apply(this, arguments);
+        const modelWidget = this._eagleProfileCombo || this.widgets?.find(w => w.name === 'model_name');
+        if (savedName && modelWidget) modelWidget.value = savedName;
+        return result;
+      };
       const origNodeCreated = nodeType.prototype.onNodeCreated;
       nodeType.prototype.onNodeCreated = function () {
         origNodeCreated?.apply(this, arguments);
@@ -838,8 +850,8 @@ app.registerExtension({
           const modelWidget = node.widgets?.find(w => w.name === 'model_name');
           if (!modelWidget) return;
 
-          // 第一次：把 STRING widget 替换成真正的 COMBO 下拉框
-          const combo = _replaceWithCombo(node, modelWidget, []);
+          // 创建真正的原生下拉控件；先移除旧控件，避免同名字段被重命名。
+          const combo = modelWidget.type === 'combo' ? modelWidget : _replaceWithCombo(node, modelWidget, []);
           if (combo) node._eagleProfileCombo = combo;
           _profileNodes.add(node);
           _startProfileWatcher();

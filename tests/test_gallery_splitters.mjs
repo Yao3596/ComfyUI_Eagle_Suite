@@ -54,7 +54,7 @@ assert.match(lora, /class: "lg-resizer-right"[\s\S]*?onPointerdown:/,
   "LoRA main/selection divider must use pointer events");
 assert.equal((lora.match(/role: "separator"/g) || []).length, 2,
   "LoRA must expose both column dividers as keyboard-focusable separators");
-assert.equal((lora.match(/tabindex: 0/g) || []).length, 2,
+assert.equal((lora.match(/role: "separator",\s*tabindex: 0/g) || []).length, 2,
   "LoRA column dividers must be keyboard focusable");
 assert.match(lora, /"aria-orientation": "vertical"/,
   "LoRA column dividers must expose their orientation");

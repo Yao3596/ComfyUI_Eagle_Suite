@@ -4,6 +4,7 @@
  */
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { pauseReviewAutoQueue, queueNodeTask } from "./review_gate_flow.js";
 import {
     createApp, defineComponent, reactive, computed, watch,
     ref, nextTick, provide, inject, onBeforeUnmount
@@ -489,9 +490,10 @@ function applyStateToReactive(project, scenes, store, data) {
         savedProject.segmentCrf = savedProject.segmentRef;
     }
     var defProject = defaultProject();
-    Object.keys(defProject).forEach(function(k) {
-        project[k] = (k in savedProject) ? savedProject[k] : defProject[k];
+    Object.keys(project).forEach(function(key) {
+        if (!(key in defProject) && !(key in savedProject)) delete project[key];
     });
+    Object.assign(project, defProject, savedProject);
     if (legacyDrama) {
         project.workflowType = 'ai_drama';
         project.interaction = Object.assign(defaultInteraction(), savedProject.interaction || {}, { enabled:false });
@@ -517,30 +519,19 @@ function applyStateToReactive(project, scenes, store, data) {
     scenes.forEach(function(scene) { normalizeSceneShotTimes(scene, project.fps, false); });
     store.currentSceneId = (scenes[0] && scenes[0].id) || 1;
 }
-function saveState(node, project, scenes, immediate) {
-    var w = (node.widgets || []).find(function(x) { return x.name === 'h3_state'; });
-    if (!w) return;
-    if (node._h3SaveTimer) { clearTimeout(node._h3SaveTimer); node._h3SaveTimer = null; }
-    var doSave = function() {
-        try {
-            (scenes || []).forEach(function(scene) { normalizeSceneShotTimes(scene, project.fps, false); });
-            var clean = JSON.parse(JSON.stringify({ version: 3, project: project, scenes: scenes }));
-            (clean.project.mediaRefs || []).forEach(function(r) { if (r) delete r.file; });
-            // Keep a legacy image-only mirror so older workflow consumers continue to work.
-            clean.project.refs = (clean.project.mediaRefs || []).filter(function(r) { return r.type === 'image'; }).map(function(r) {
-                return { id:r.id, url:r.url, filename:r.filename, name:r.name, kind:r.kind, retention:r.retention };
-            });
-            var json = JSON.stringify(clean);
-            w.value = json;
-            if (typeof w.callback === 'function') w.callback(w.value, w, node);
-            if (typeof node._eagleSyncContextLoopBridges === 'function') {
-                node._eagleSyncContextLoopBridges();
-            }
-            if (node.graph) node.graph.change();
-        } catch(e) { console.warn('[EagleH3Director] saveState error:', e); }
-    };
-    if (immediate) doSave();
-    else node._h3SaveTimer = setTimeout(doSave, 300);
+function directorWidget(node, name) {
+    return (node.widgets || []).find(function(widget) { return widget.name === name; });
+}
+function serializeDirectorState(project, scenes) {
+    var clean = JSON.parse(JSON.stringify({ version: 3, project: project, scenes: scenes }));
+    clean.scenes.forEach(function(scene) { normalizeSceneShotTimes(scene, clean.project.fps, false); });
+    var media = clean.project.mediaRefs || [];
+    media.forEach(function(item) { if (item) delete item.file; });
+    // Keep a legacy image-only mirror for older workflow consumers.
+    clean.project.refs = media.filter(function(item) { return item && item.type === 'image'; }).map(function(item) {
+        return { id:item.id, url:item.url, filename:item.filename, name:item.name, kind:item.kind, retention:item.retention };
+    });
+    return JSON.stringify(clean);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -651,21 +642,41 @@ function mediaNumberMap(items) {
     (items || []).forEach(function(item) { map[item.id] = mediaTagFor(item, items); });
     return map;
 }
-function rewriteMediaTags(text, before, after, removedId) {
-    text = text || '';
-    var placeholders = {};
-    Object.keys(before || {}).forEach(function(id, index) {
-        var tag = before[id];
-        if (!tag) return;
-        var marker = '__H3_MEDIA_' + index + '_' + Date.now() + '__';
-        placeholders[id] = marker;
-        text = text.split(tag).join(marker);
+function rebindMediaReferences(project, scenes, before, after) {
+    var replacements = new Map(Object.entries(before).map(function([id, tag]) {
+        return [tag.toLowerCase(), after[id] || ''];
+    }));
+    var legacyTypes = { ref:'picture', 图片:'picture', 视频:'video', video:'video', 音频:'audio', audio:'audio' };
+    function rewrite(text) {
+        return text.replace(/<(Picture|Video|Audio)\s+(\d+)>|@(ref|图片|视频|音频|video|audio)(\d+)\b/gi,
+            function(match, type, number, legacy, legacyNumber) {
+                var kind = legacy ? legacyTypes[legacy.toLowerCase()] : type.toLowerCase();
+                var tag = '<' + kind + ' ' + Number(number || legacyNumber) + '>';
+                var replacement = replacements.get(tag);
+                if (replacement === undefined || replacement.toLowerCase() === tag) return match;
+                if (!replacement) return '';
+                return legacy ? '@' + legacy + replacement.match(/\d+/)[0] : replacement;
+            });
+    }
+    function rewriteFields(object, keys) {
+        keys.forEach(function(key) {
+            if (typeof object?.[key] === 'string') object[key] = rewrite(object[key]);
+        });
+    }
+    scenes.forEach(function(scene) {
+        rewriteFields(scene, ['title', 'preamble', 'music']);
+        (scene.shots || []).forEach(function(shot) {
+            rewriteFields(shot, ['title', 'framing', 'content', 'intent', 'action', 'camera', 'lens',
+                'sound', 'transitionIn', 'transitionOut']);
+        });
+        (scene.dialogues || []).forEach(function(row) { rewriteFields(row, ['role', 'text']); });
+        scene.disabledTokens = (scene.disabledTokens || []).map(rewrite).filter(Boolean);
     });
-    Object.keys(placeholders).forEach(function(id) {
-        var replacement = id === removedId ? '' : ((after && after[id]) || before[id] || '');
-        text = text.split(placeholders[id]).join(replacement);
-    });
-    return text.replace(/[ \t]{2,}/g, ' ');
+    rewriteFields(project, ['foundation', 'globalSoundscape', 'globalMusic']);
+    rewriteFields(project.skill, ['hint']);
+    rewriteFields(project.interaction, ['notes']);
+    rewriteFields(project.pv, ['creativeBrief', 'actionDirection', 'notes']);
+    (project.mediaRefs || []).forEach(function(item) { rewriteFields(item, ['purpose']); });
 }
 function highlightText(s, mediaItems) {
     if (!s) return '';
@@ -999,7 +1010,7 @@ function compilePrompt(project, scene) {
     }
     var sounds = shots.map(function(s) { return s.sound; }).filter(Boolean).join(', ');
     parts.push('overall_soundscape:\n  ' + (sounds || project.globalSoundscape || 'N/A'));
-    var music = project.globalMusic || scene.music || '';
+    var music = (scene.music || '').trim() || (project.globalMusic || '').trim();
     parts.push('non_diegetic_music:\n  ' + (music || 'N/A'));
     return parts.join('\n\n');
 }
@@ -1014,6 +1025,8 @@ var H3DirectorApp = defineComponent({
         var state = loadState(props.node);
         var project = reactive(state.project);
         var scenes = reactive(state.scenes);
+        var snapshot = computed(function() { return serializeDirectorState(project, scenes); });
+        var lastSyncedState = directorWidget(props.node, 'h3_state')?.value;
 
         var store = reactive({
             project: project,
@@ -1026,7 +1039,7 @@ var H3DirectorApp = defineComponent({
             skillBatch: {
                 active: false, stopRequested: false, batchId: '', requestId: '',
                 sceneIds: [], cursor: 0, completed: 0, failed: 0,
-                currentSceneId: null, status: '', lastError: '', finalQueueSubmitted: false
+                currentSceneId: null, status: '', lastError: ''
             },
             directorLibrary: {
                 items: [], loading: false, error: '', source: 'eagle',
@@ -1311,9 +1324,10 @@ var H3DirectorApp = defineComponent({
         // 供 onConfigure 在 ComfyUI 恢复 widgets_values 后重新加载状态
         function reloadFromWidget() {
             try {
-                var w = (props.node.widgets || []).find(function(x) { return x.name === 'h3_state'; });
+                var w = directorWidget(props.node, 'h3_state');
                 if (w && w.value && w.value !== '{}') {
                     var data = JSON.parse(w.value);
+                    lastSyncedState = w.value;
                     applyStateToReactive(project, scenes, store, data);
                 }
             } catch(e) { console.warn('[EagleH3Director] reloadFromWidget error:', e); }
@@ -1371,8 +1385,34 @@ var H3DirectorApp = defineComponent({
         });
         var maxId = function(arr) { return arr.reduce(function(m, x) { return Math.max(m, x.id || 0); }, 0); };
 
-        function markDirty(immediate) { store.dirty = true; saveState(props.node, project, scenes, immediate); }
-        props.node._h3FlushState = function() { saveState(props.node, project, scenes, true); };
+        function flushState(notify = true) {
+            var node = props.node;
+            var widget = directorWidget(node, 'h3_state');
+            var value = snapshot.value;
+            if (!widget) return value;
+            if (widget.value !== value) widget.value = value;
+            if (!notify) return value;
+            clearTimeout(node._h3SaveTimer);
+            node._h3SaveTimer = null;
+            store.dirty = false;
+            if (lastSyncedState !== value) {
+                lastSyncedState = value;
+                widget.callback?.(value, widget, node);
+                node._eagleSyncContextLoopBridges?.();
+                node.graph?.change();
+            }
+            return value;
+        }
+        function markDirty(immediate) {
+            if (immediate === true) return flushState();
+            store.dirty = snapshot.value !== lastSyncedState;
+            clearTimeout(props.node._h3SaveTimer);
+            if (store.dirty) props.node._h3SaveTimer = setTimeout(flushState, 300);
+        }
+        watch(snapshot, function(value) {
+            if (value !== lastSyncedState) markDirty();
+        });
+        props.node._h3FlushState = flushState;
 
         function compileDirectorLibrary() {
             var ids = (store.project.skill && store.project.skill.librarySkillIds) || [];
@@ -1597,39 +1637,56 @@ var H3DirectorApp = defineComponent({
         }
         function removeDialogue(id) {
             var s = currentScene.value; if (!s) return;
-            s.dialogues = s.dialogues.filter(function(x) { return x.id !== id; }); markDirty();
+            var removed = s.dialogues.find(function(row) { return row.id === id; });
+            s.dialogues = s.dialogues.filter(function(row) { return row.id !== id; });
+            if (removed && removed.role && removed.text && !s.dialogues.some(function(row) {
+                return row.role === removed.role && row.text === removed.text;
+            })) {
+                var token = buildDTag(removed.role, removed.text);
+                (s.shots || []).forEach(function(shot) {
+                    if (shot.content) shot.content = shot.content.split(token).join('');
+                });
+                s.disabledTokens = (s.disabledTokens || []).filter(function(value) { return value !== token; });
+            }
+            syncDlgToPreamble(s);
+            markDirty();
         }
 
-        // 双向同步守卫
-        var syncPaused = false; var lastSrc = 'dialogue';
         function syncDlgToPreamble(sc) {
-            if (syncPaused && lastSrc !== 'dialogue') return;
-            var text = (sc.preamble || '').replace(/<d>[\s\S]*?<\/d>/g,'').replace(/\n{3,}/g,'\n\n').trim();
+            var text = (sc.preamble || '').replace(/^[ \t]*Dialogue:[ \t]*\n(?=[ \t]*<d>)/gmi, '')
+                .replace(/<d>[\s\S]*?<\/d>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
             var dlg = (sc.dialogues || []).filter(function(d) { return d.role && d.text; })
                 .map(function(d) { return '  ' + buildDTag(d.role, d.text); });
             sc.preamble = (text + (dlg.length ? '\n\nDialogue:\n' + dlg.join('\n') : '')).trim();
         }
         function syncPreambleToDlg(sc) {
-            if (syncPaused && lastSrc !== 'full') return;
+            var previous = sc.dialogues || [];
+            var unused = new Set(previous.map(function(row) { return row.id; }));
+            var nextId = maxId(previous);
             var parsed = parseDialogues(sc.preamble || '');
-            parsed.forEach(function(d, i) {
-                var ex = sc.dialogues[i];
-                if (ex) { d.id = ex.id; d.time = ex.time; } else { d.id = maxId(sc.dialogues) + i + 1; }
+            var matches = parsed.map(function(row) {
+                var same = previous.find(function(old) {
+                    return unused.has(old.id) && old.role === row.role && old.text === row.text;
+                });
+                if (same) unused.delete(same.id);
+                return same;
             });
-            sc.dialogues.splice(0, sc.dialogues.length);
-            parsed.forEach(function(d) { sc.dialogues.push(d); });
+            sc.dialogues = parsed.map(function(row, index) {
+                var prior = matches[index] || previous.find(function(old) { return unused.has(old.id); });
+                if (!prior) return { ...row, id: ++nextId };
+                unused.delete(prior.id);
+                return { ...prior, role: row.role, text: row.text };
+            });
         }
         function onDialogueInput() {
             var s = currentScene.value; if (!s) return;
-            lastSrc = 'dialogue'; syncPaused = true;
-            nextTick(function() { syncDlgToPreamble(s); syncPaused = false; markDirty(); });
+            syncDlgToPreamble(s);
+            markDirty();
         }
-        var preambleTimer = null;
         function onPreambleInput() {
             var s = currentScene.value; if (!s) return;
-            lastSrc = 'full'; syncPaused = true; markDirty();
-            clearTimeout(preambleTimer);
-            preambleTimer = setTimeout(function() { syncPreambleToDlg(s); syncPaused = false; }, 600);
+            syncPreambleToDlg(s);
+            markDirty();
         }
 
         // 参考图上传
@@ -1653,9 +1710,7 @@ var H3DirectorApp = defineComponent({
             e.target.value = ''; pendingRefIdx.value = -1;
         }
         function clearRef(i) {
-            var oldName = store.project.refs[i].filename;
             store.project.refs[i].filename = ''; store.project.refs[i].url = '';
-            if (oldName) fetch('/h3_director/media?filename=' + encodeURIComponent(oldName), { method:'DELETE' }).catch(function(){});
             markDirty();
         }
         function addRef() {
@@ -1688,16 +1743,12 @@ var H3DirectorApp = defineComponent({
         }
 
         // 编译预览（按 scene 分页：每个场景一页）
-        var previewPages = computed(function() {
-            if (!store.scenes.length) return [''];
-            return store.scenes.map(function(s) { return compilePrompt(store.project, s); });
-        });
         var sceneIndex = computed(function() {
             var idx = store.scenes.findIndex(function(s) { return s.id === store.currentSceneId; });
             return idx < 0 ? 0 : idx;
         });
         var currentPreviewPage = computed(function() {
-            return previewPages.value[sceneIndex.value] || '';
+            return currentScene.value ? compilePrompt(store.project, currentScene.value) : '';
         });
         var wordCount = computed(function() { return currentPreviewPage.value.replace(/\s+/g,'').length; });
         var warnings = computed(function() {
@@ -1810,8 +1861,24 @@ var H3DirectorApp = defineComponent({
         });
 
         // ── 导演 Skill：手动「生成」按钮 ──
-        function skillRequestWidget() {
-            return (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
+        var activeSkillRequest = null;
+        async function submitSkillRequest(request) {
+            var node = props.node;
+            if (!directorWidget(node, 'skill_request')) throw new Error('skill_request 端口缺失');
+            if (activeSkillRequest) throw new Error('已有模型任务正在运行');
+            pauseReviewAutoQueue(app);
+            markDirty(true);
+            activeSkillRequest = request;
+            var value = JSON.stringify({ ...request, blockDownstream: true });
+            node._h3SkillRequest = value;
+            try {
+                await queueNodeTask(app, node);
+            } catch (error) {
+                if (activeSkillRequest === request) activeSkillRequest = null;
+                throw error;
+            } finally {
+                if (node._h3SkillRequest === value) node._h3SkillRequest = '';
+            }
         }
         function applyPvCard(card) {
             if (!card || typeof card !== 'object') return;
@@ -1831,12 +1898,11 @@ var H3DirectorApp = defineComponent({
             markDirty(true);
             flash('已应用 PV 创意卡：' + (card.name || card.theme || '未命名'));
         }
-        function drawPvCards() {
+        async function drawPvCards() {
             var pv = store.project.pv || (store.project.pv = defaultPv());
-            if (pv.drawing || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
+            if (activeSkillRequest || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
             var scene = currentScene.value;
-            var widget = skillRequestWidget();
-            if (!scene || !widget) { flash('当前场景或 skill_request 不可用'); return; }
+            if (!scene) return;
             pv.drawing = true;
             pv.lastDrawSummary = '正在组合主题、动作、切镜、转场与特效…';
             var sk = store.project.skill || {};
@@ -1848,30 +1914,20 @@ var H3DirectorApp = defineComponent({
                 drawMode:pv.drawMode || 'character_match', cardCount:Number(pv.drawCount) || 3,
                 seed:(Number(store.project.baseSeed) || Date.now()) + (pv.history || []).length,
                 creativeBrief:pv.creativeBrief || '', history:(pv.history || []).slice(),
-                blockDownstream:true, releaseAfter:false
+                releaseAfter:false
             };
-            widget.value = JSON.stringify(request);
-            if (typeof widget.callback === 'function') widget.callback(widget.value, widget, props.node);
-            if (props.node.graph) props.node.graph.change();
             try {
-                var queued = app.queuePrompt();
-                if (queued && typeof queued.catch === 'function') queued.catch(function(error) {
-                    pv.drawing = false;
-                    pv.lastDrawSummary = '抽卡提交失败：' + (error && error.message ? error.message : String(error));
-                    clearSkillRequest();
-                });
+                await submitSkillRequest(request);
             } catch (error) {
                 pv.drawing = false;
                 pv.lastDrawSummary = '抽卡提交失败：' + (error && error.message ? error.message : String(error));
-                clearSkillRequest();
             }
         }
-        function inferDirectorSkill() {
+        async function inferDirectorSkill() {
             var lib = store.directorLibrary;
-            if (lib.inference || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
+            if (activeSkillRequest || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
             var scene = currentScene.value;
-            var widget = skillRequestWidget();
-            if (!scene || !widget) { flash('当前场景或 skill_request 不可用'); return; }
+            if (!scene) return;
             editDirectorLibrarySkill({
                 name:'正在反推…', category:'video_to_image_editing', tasks:['script','shots'],
                 tags:['video-reference','identity-lock'], content:'模型正在从当前场景提示词提炼可复用规则…'
@@ -1884,57 +1940,23 @@ var H3DirectorApp = defineComponent({
                 requestId:'h3skill-extract-' + Date.now(), tasks:[],
                 temperature:0.25, modelPref:skillConfig.modelPref || 'local',
                 sourcePrompt:currentPreviewPage.value || scene.preamble || '',
-                hint:skillConfig.hint || '', blockDownstream:true, releaseAfter:false
+                hint:skillConfig.hint || '', releaseAfter:false
             };
-            widget.value = JSON.stringify(request);
-            if (typeof widget.callback === 'function') widget.callback(widget.value, widget, props.node);
-            if (props.node.graph) props.node.graph.change();
             try {
-                var queued = app.queuePrompt();
-                if (queued && typeof queued.catch === 'function') queued.catch(function(error) {
-                    lib.inference = false;
-                    lib.error = error && error.message ? error.message : String(error);
-                    clearSkillRequest();
-                });
+                await submitSkillRequest(request);
             } catch (error) {
                 lib.inference = false; lib.error = error && error.message ? error.message : String(error);
-                clearSkillRequest();
             }
         }
-        function finishSkillBatch(message, queueDownstream) {
+        function finishSkillBatch(message) {
             var batch = store.skillBatch;
             batch.active = false;
             batch.currentSceneId = null;
             batch.requestId = '';
             batch.status = message || ('已完成 ' + batch.completed + ' 个场景');
             flash(batch.status);
-            // Skill 阶段的每次 Queue 都由 ExecutionBlocker 阻断下游。
-            // 全部场景回填后必须再 Queue 一次空 skill_request，才能正式编译
-            // Plan 并把数据交给 H3 条件/采样链。只允许一次，避免重复生成视频。
-            if (queueDownstream && !batch.finalQueueSubmitted) {
-                batch.finalQueueSubmitted = true;
-                clearSkillRequest();
-                markDirty(true);
-                batch.status += ' · 正在提交完整 Plan';
-                setTimeout(function() {
-                    try {
-                        var queued = app.queuePrompt();
-                        if (queued && typeof queued.catch === 'function') {
-                            queued.catch(function(error) {
-                                batch.lastError = '完整 Plan 提交失败: ' +
-                                    (error && error.message ? error.message : error);
-                                flash(batch.lastError);
-                            });
-                        }
-                    } catch (error) {
-                        batch.lastError = '完整 Plan 提交失败: ' +
-                            (error && error.message ? error.message : error);
-                        flash(batch.lastError);
-                    }
-                }, 60);
-            }
         }
-        function submitSkillScene() {
+        async function submitSkillScene() {
             var batch = store.skillBatch;
             if (!batch.active) return;
             if (batch.stopRequested) {
@@ -1942,7 +1964,8 @@ var H3DirectorApp = defineComponent({
                 return;
             }
             if (batch.cursor >= batch.sceneIds.length) {
-                finishSkillBatch('✓ 批量生成完成：' + batch.completed + '/' + batch.sceneIds.length + (batch.failed ? '，失败 ' + batch.failed : ''), true);
+                finishSkillBatch('场景内容已更新 ' + batch.completed + '/' + batch.sceneIds.length +
+                    (batch.failed ? '，失败 ' + batch.failed : ''));
                 return;
             }
             var sceneId = batch.sceneIds[batch.cursor];
@@ -1954,9 +1977,6 @@ var H3DirectorApp = defineComponent({
                 return;
             }
             var sk = store.project.skill || {};
-            var w = skillRequestWidget();
-            if (!w) { batch.lastError = 'skill_request 端口缺失'; finishSkillBatch(batch.lastError); return; }
-            markDirty(true);
             batch.currentSceneId = sceneId;
             batch.requestId = batch.batchId + ':' + batch.cursor + ':' + Date.now();
             batch.status = '正在生成场景 ' + (batch.cursor + 1) + '/' + batch.sceneIds.length + '：' + (scene.title || '未命名');
@@ -1978,24 +1998,15 @@ var H3DirectorApp = defineComponent({
                 hint: sk.hint || '',
                 interaction: JSON.parse(JSON.stringify(store.project.interaction || defaultInteraction())),
                 pv: JSON.parse(JSON.stringify(store.project.pv || defaultPv())),
-                blockDownstream: !!getEagleSetting(EAGLE_SETTING_IDS.blockSkillDownstream, true),
                 releaseAfter: !!getEagleSetting(EAGLE_SETTING_IDS.unloadAfterSkillBatch, true)
                     && batch.cursor === batch.sceneIds.length - 1
             };
-            w.value = JSON.stringify(req);
-            if (typeof w.callback === 'function') w.callback(w.value, w, props.node);
-            if (props.node.graph) props.node.graph.change();
             flash(batch.status);
             try {
-                var queued = app.queuePrompt();
-                if (queued && typeof queued.catch === 'function') queued.catch(function(error) {
-                    batch.lastError = '队列失败: ' + (error && error.message ? error.message : error);
-                    batch.failed += 1; clearSkillRequest(); batch.cursor += 1;
-                    setTimeout(submitSkillScene, 0);
-                });
+                await submitSkillRequest(req);
             } catch (err) {
                 batch.lastError = '队列失败: ' + (err && err.message ? err.message : err);
-                batch.failed += 1; clearSkillRequest(); batch.cursor += 1;
+                batch.failed += 1; batch.cursor += 1;
                 setTimeout(submitSkillScene, 0);
             }
         }
@@ -2005,7 +2016,7 @@ var H3DirectorApp = defineComponent({
             var automation = (store.project.interaction && store.project.interaction.automationEnabled) ||
                 (store.project.pv && store.project.pv.enabled);
             if (!tasks.length && !automation) { flash('请先在「导演 Skill」选择要生成的任务（台本 / 分镜 / 台词）'); return; }
-            if (store.skillBatch.active) { flash('已有生成任务进行中'); return; }
+            if (activeSkillRequest || store.skillBatch.active) { flash('已有模型任务正在运行'); return; }
             var ids = scope === 'all'
                 ? store.scenes.map(function(scene) { return scene.id; })
                 : [store.currentSceneId];
@@ -2014,7 +2025,7 @@ var H3DirectorApp = defineComponent({
                 active:true, stopRequested:false,
                 batchId:'h3skill-' + Date.now() + '-' + Math.random().toString(16).slice(2),
                 requestId:'', sceneIds:ids, cursor:0, completed:0, failed:0,
-                currentSceneId:null, status:'', lastError:'', finalQueueSubmitted:false
+                currentSceneId:null, status:'', lastError:''
             });
             submitSkillScene();
         }
@@ -2026,20 +2037,12 @@ var H3DirectorApp = defineComponent({
         }
 
         // 后端生成结果回填（由 app.api 事件触发）
-        function clearSkillRequest() {
-            var w = (props.node.widgets || []).find(function(x) { return x.name === 'skill_request'; });
-            if (w && w.value) {
-                w.value = '';
-                if (typeof w.callback === 'function') w.callback(w.value, w, props.node);
-                if (props.node.graph) props.node.graph.change();
-            }
-        }
         function applySkillResult(data) {
-            if (!data) return;
+            if (!data || !activeSkillRequest || data.requestId !== activeSkillRequest.requestId) return;
+            activeSkillRequest = null;
             if (data.operation === 'pv_draw') {
                 var pv = store.project.pv || (store.project.pv = defaultPv());
                 pv.drawing = false;
-                clearSkillRequest();
                 if (data.error) {
                     pv.lastDrawSummary = data.error;
                     flash('PV 创意抽卡失败');
@@ -2054,7 +2057,6 @@ var H3DirectorApp = defineComponent({
             }
             if (data.operation === 'extract_skill') {
                 store.directorLibrary.inference = false;
-                clearSkillRequest();
                 if (data.error) {
                     store.directorLibrary.error = data.error;
                     flash('Skill 反推失败');
@@ -2070,14 +2072,12 @@ var H3DirectorApp = defineComponent({
             if (batch.active && data.requestId && data.requestId !== batch.requestId) return;
             var scene = store.scenes.find(function(s) { return String(s.id) === String(data.sceneId); });
             if (!scene) {
-                clearSkillRequest();
                 batch.lastError = '拒绝回填：返回的 sceneId 不存在（' + data.sceneId + '）';
                 if (batch.active) { batch.failed += 1; batch.cursor += 1; setTimeout(submitSkillScene, 0); }
                 else flash(batch.lastError);
                 return;
             }
             if (data.error) {
-                clearSkillRequest();
                 batch.lastError = '场景「' + (scene.title || data.sceneId) + '」生成出错: ' + data.error;
                 if (batch.active) { batch.failed += 1; batch.cursor += 1; setTimeout(submitSkillScene, 0); }
                 else flash(batch.lastError);
@@ -2136,7 +2136,6 @@ var H3DirectorApp = defineComponent({
                 store.project.generationHistory = history.slice(-40);
             }
             markDirty(true);
-            clearSkillRequest();
             if (batch.active) {
                 batch.completed += 1; batch.cursor += 1;
                 batch.status = '✓ 已完成 ' + batch.completed + '/' + batch.sceneIds.length + '：' + (scene.title || '未命名');
@@ -2149,8 +2148,9 @@ var H3DirectorApp = defineComponent({
 
         // provide
         provide('h3store', store);
+        provide('h3node', props.node);
         provide('h3flash', flash);
-        provide('h3preview', { pages: previewPages, sceneIndex: sceneIndex, currentPage: currentPreviewPage, wordCount: wordCount, warnings: warnings, copyCompiled: copyCompiled });
+        provide('h3preview', { sceneIndex: sceneIndex, currentPage: currentPreviewPage, wordCount: wordCount, warnings: warnings, copyCompiled: copyCompiled });
         provide('h3actions', {
             addScene: addScene, cloneScene: cloneScene, removeScene: removeScene, selectScene: selectScene, prevScene: prevScene, nextScene: nextScene,
             addShot: addShot, removeShot: removeShot, autoAssignTimes: autoAssignTimes,
@@ -2272,7 +2272,7 @@ var H3DirectorApp = defineComponent({
     <div class="h3d-field"><label>fps</label><input class="h3d-inp sm" type="number" min="8" max="60" v-model.number="store.project.fps" style="width:46px"></div>
     <span class="h3d-pill">剪辑 {{ totalDuration.toFixed(3) }}s/{{ generationInfo.deliveredFrames }}f · H3 {{ generationInfo.generatedSeconds.toFixed(3) }}s/{{ generationInfo.rawFrames }}f</span>
     <div class="h3d-spacer"></div>
-    <span class="h3d-sync" :class="store.dirty?'dirty':''">{{ store.dirty ? '⚠ 待同步' : '✓ 已保存' }}</span>
+    <span class="h3d-sync" :class="store.dirty?'dirty':''">{{ store.dirty ? '⚠ 待同步' : '✓ 已同步' }}</span>
     <button class="h3d-btn" @click="copyParams">📤 参数</button>
     <button class="h3d-btn primary" @click="copyCompiled">📋 复制提示词</button>
   </div>
@@ -2760,6 +2760,7 @@ var EditorPanel = defineComponent({
     setup: function() {
         var store = inject('h3store');
         var actions = inject('h3actions');
+        var directorNode = inject('h3node');
         var scene = computed(function() {
             return store.scenes.find(function(s) { return s.id === store.currentSceneId; }) || null;
         });
@@ -2994,6 +2995,22 @@ var EditorPanel = defineComponent({
             var files = e.dataTransfer && e.dataTransfer.files;
             if (files && files.length) uploadFiles(files);
         }
+        function receiveReferenceDrop(e) {
+            // Read File objects while the drop data store is still accessible.
+            // Claim media before ComfyUI inspects PNG workflow metadata.
+            var files = Array.from((e && e.dataTransfer && e.dataTransfer.files) || []);
+            if (!files.some(function(file) { return !!inferFileType(file); })) return false;
+            e.preventDefault();
+            e.stopPropagation();
+            uploadFiles(files);
+            return true;
+        }
+        directorNode._h3ReceiveReferenceDrop = receiveReferenceDrop;
+        onBeforeUnmount(function() {
+            if (directorNode._h3ReceiveReferenceDrop === receiveReferenceDrop) {
+                delete directorNode._h3ReceiveReferenceDrop;
+            }
+        });
         function onDragStart(e, index) {
             dragIndex.value = index;
             if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(index)); }
@@ -3003,13 +3020,7 @@ var EditorPanel = defineComponent({
             var before = mediaNumberMap(mediaItems.value);
             var moved = store.project.mediaRefs.splice(from, 1)[0];
             store.project.mediaRefs.splice(to, 0, moved);
-            var after = mediaNumberMap(mediaItems.value);
-            store.scenes.forEach(function(sc) {
-                sc.preamble = rewriteMediaTags(sc.preamble, before, after, '');
-                sc.disabledTokens = (sc.disabledTokens || []).map(function(token) {
-                    return rewriteMediaTags(token, before, after, '');
-                }).filter(Boolean);
-            });
+            rebindMediaReferences(store.project, store.scenes, before, mediaNumberMap(mediaItems.value));
             dragIndex.value = -1;
             actions.markDirty();
         }
@@ -3024,14 +3035,7 @@ var EditorPanel = defineComponent({
             if (index < 0) return;
             var before = mediaNumberMap(mediaItems.value);
             store.project.mediaRefs.splice(index, 1);
-            var after = mediaNumberMap(mediaItems.value);
-            store.scenes.forEach(function(sc) {
-                sc.preamble = rewriteMediaTags(sc.preamble, before, after, item.id);
-                sc.disabledTokens = (sc.disabledTokens || []).map(function(token) {
-                    return rewriteMediaTags(token, before, after, item.id);
-                }).filter(Boolean);
-            });
-            if (item.filename && item.managed) api.fetchApi('/h3_director/media?filename=' + encodeURIComponent(item.filename), { method:'DELETE' }).catch(function(){});
+            rebindMediaReferences(store.project, store.scenes, before, mediaNumberMap(mediaItems.value));
             actions.markDirty();
         }
         function mediaBroken(item) { return !!(item && mediaErrors[item.id]); }
@@ -3633,18 +3637,25 @@ H3DirectorApp.components = { PlanPanel: PlanPanel, EditorPanel: EditorPanel, Rig
 
 app.registerExtension({
     name: 'EagleSuite.H3Director',
-    async beforePromptQueued() {
-        // Flush the 300 ms UI debounce before ComfyUI serializes widget values.
-        // Without this, pressing Queue immediately after changing resolution or
-        // duration can execute the previous state while the UI shows the new one.
-        var nodes = (app.graph && (app.graph.nodes || app.graph._nodes)) || [];
-        nodes.forEach(function(node) {
-            if (node && typeof node._h3FlushState === 'function') node._h3FlushState();
-        });
-    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         console.log('[EagleH3Director] beforeRegisterNodeDef:', nodeData && nodeData.name);
         if (nodeData.name !== 'EagleH3DirectorNode') return;
+
+        var isReferenceFileDrag = function(e) {
+            var transfer = e && e.dataTransfer;
+            return !!transfer && (Array.from(transfer.types || []).indexOf('Files') >= 0 ||
+                !!(transfer.files && transfer.files.length));
+        };
+        var previousDragOver = nodeType.prototype.onDragOver;
+        nodeType.prototype.onDragOver = function(e) {
+            if (isReferenceFileDrag(e)) return true;
+            return previousDragOver ? previousDragOver.apply(this, arguments) : false;
+        };
+        var previousDragDrop = nodeType.prototype.onDragDrop;
+        nodeType.prototype.onDragDrop = function(e) {
+            if (this._h3ReceiveReferenceDrop && this._h3ReceiveReferenceDrop(e)) return true;
+            return previousDragDrop ? previousDragDrop.apply(this, arguments) : false;
+        };
         console.log('[EagleH3Director] matched EagleH3DirectorNode, mounting...');
 
         var hiddenStateNames = new Set(['h3_state', 'scene_index', 'LLM_HINT', 'skill_request']);
@@ -3653,7 +3664,6 @@ app.registerExtension({
         // remain user controlled after creation.
         var H3_DEFAULT_NODE_SIZE = [960, 720];
         var H3_MIN_NODE_SIZE = [760, 560];
-        var H3_NODE_CHROME_HEIGHT = 150;
         var H3_MIN_VIEWPORT_HEIGHT = 220;
         var H3_LAYOUT_VERSION = 4;
         var MAX_VIEWPORT_HEIGHT = 4096;
@@ -3684,6 +3694,13 @@ app.registerExtension({
                     w.computeSize = function() { return [0, -4]; };
                     w.hidden = true;
                     w.draw = function() {};
+                    if (w.name === 'h3_state') {
+                        w.serializeValue = function() { return node._h3FlushState?.(false) ?? w.value; };
+                    }
+                    if (w.name === 'skill_request') {
+                        w.value = '';
+                        w.serializeValue = function() { return node._h3SkillRequest || ''; };
+                    }
                     found = true;
                 }
             }
@@ -3735,9 +3752,9 @@ app.registerExtension({
             }
 
             var el = document.createElement('div');
-            el.style.cssText = 'display:block;min-width:0;max-width:100%;overflow:hidden;position:relative;box-sizing:border-box;';
-            var currentViewportHeight = H3_MIN_VIEWPORT_HEIGHT;
+            el.style.cssText = 'display:block;width:100%;height:100%;min-width:0;min-height:0;contain:size;overflow:hidden;position:relative;box-sizing:border-box;';
 
+            // The native slot has already accounted for ports and widget rows.
             var widget = this.addDOMWidget('h3_director_ui', 'div', el, {
                 serialize: false,
                 hideInPanel: true,
@@ -3746,39 +3763,33 @@ app.registerExtension({
                 // back into the layout pass.
                 getMinHeight: function() { return H3_MIN_VIEWPORT_HEIGHT; },
                 getMaxHeight: function() { return MAX_VIEWPORT_HEIGHT; },
-                getHeight: function() { return currentViewportHeight; }
             });
             widget.width = undefined;
-
-            var applySize = function(size) {
-                size = size || node.size || H3_DEFAULT_NODE_SIZE;
-                var w = Math.max(700, Number(size[0] || H3_DEFAULT_NODE_SIZE[0]) - 20);
-                // 内容区域可以缩小并在三栏内部滚动，不再反向把 LiteGraph 节点撑高。
-                var h = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(
-                    H3_MIN_VIEWPORT_HEIGHT,
-                    Number(size[1] || H3_DEFAULT_NODE_SIZE[1]) - H3_NODE_CHROME_HEIGHT
-                ));
-                currentViewportHeight = h;
-                el.style.width = w + 'px';
-                el.style.maxWidth = w + 'px';
-                // Classic LiteGraph does not consistently resize the DOM host
-                // when only a percentage height is used.  Keep the actual DOM
-                // surface in lock-step with the measured widget height.
-                el.style.height = h + 'px';
-                return [w, h];
-            };
-            // Do not install an instance computeSize here.  ComfyUI's
-            // DOMWidgetImpl supplies computeLayoutSize from getMin/MaxHeight;
-            // leaving that contract intact makes this the growable widget in
-            // both Classic and Nodes 2.0.  A fixed computeSize turns it into a
-            // fixed-height slot and clips the node after the user stretches it.
-            applySize(this.size);
 
             console.log('[EagleH3Director] mounting Vue on node', this.id);
             try {
                 var appInstance = createApp(H3DirectorApp, { node: node });
                 appInstance.mount(el);
                 this._vueApp = appInstance;
+                // Cover blank areas of the DOM widget as well as its explicit
+                // drop boxes. Internal text/card drags keep their own handlers.
+                var captureFileDrag = function(e) {
+                    if (!isReferenceFileDrag(e)) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.dataTransfer.dropEffect = 'copy';
+                };
+                var captureReferenceDrop = function(e) {
+                    if (node._h3ReceiveReferenceDrop) node._h3ReceiveReferenceDrop(e);
+                };
+                el.addEventListener('dragenter', captureFileDrag, true);
+                el.addEventListener('dragover', captureFileDrag, true);
+                el.addEventListener('drop', captureReferenceDrop, true);
+                node._h3ReleaseReferenceDrop = function() {
+                    el.removeEventListener('dragenter', captureFileDrag, true);
+                    el.removeEventListener('dragover', captureFileDrag, true);
+                    el.removeEventListener('drop', captureReferenceDrop, true);
+                };
                 console.log('[EagleH3Director] Vue mounted OK');
             } catch(e) {
                 el.replaceChildren();
@@ -3811,12 +3822,6 @@ app.registerExtension({
                 }
             }
 
-            var onResize = this.onResize;
-            this.onResize = function(size) {
-                if (onResize) onResize.apply(this, arguments);
-                applySize(size);
-            };
-            this._h3ApplyNodeSize = applySize;
         };
 
         var onConfigure = nodeType.prototype.onConfigure;
@@ -3839,9 +3844,13 @@ app.registerExtension({
                 }
             }
             doReload();
-            requestAnimationFrame(function() {
-                if (node._h3ApplyNodeSize) node._h3ApplyNodeSize(node.size);
-            });
+        };
+
+        // LiteGraph captures widget values before calling onSerialize.
+        var serialize = nodeType.prototype.serialize;
+        nodeType.prototype.serialize = function() {
+            this._h3FlushState?.(false);
+            return serialize.apply(this, arguments);
         };
 
         // Mark freshly saved nodes as using the compact layout.  The shared
@@ -3862,6 +3871,8 @@ app.registerExtension({
 
         var onRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function() {
+            if (this._h3ReleaseReferenceDrop) this._h3ReleaseReferenceDrop();
+            this._h3ReleaseReferenceDrop = null;
             if (this._h3SaveTimer) { clearTimeout(this._h3SaveTimer); this._h3SaveTimer = null; }
             (this._h3HideWidgetTimers || []).forEach(function(timer) { clearTimeout(timer); });
             this._h3HideWidgetTimers = [];
@@ -3869,9 +3880,9 @@ app.registerExtension({
             if (this._vueApp) { this._vueApp.unmount(); this._vueApp = null; }
             this._h3ReloadState = null;
             this._h3ReloadColumnLayout = null;
-            this._h3ApplyNodeSize = null;
             this._h3ContextLoopPlanJson = null;
             this._h3FlushState = null;
+            this._h3SkillRequest = '';
             this._eagleSyncContextLoopBridges = null;
             if (onRemoved) onRemoved.apply(this, arguments);
         };

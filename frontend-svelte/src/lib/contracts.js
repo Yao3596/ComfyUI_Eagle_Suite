@@ -9,6 +9,8 @@ const DEFAULT_WORKSPACE = Object.freeze({
   retryPrompt: "",
   retrySeed: -1,
   retryLength: 0,
+  retryRunName: "",
+  retryTakeKey: "",
   assemblePartial: true,
   timeoutMinutes: 0,
   unloadModels: false,
@@ -85,6 +87,8 @@ export function normalizeWorkspace(value) {
     retryPrompt: String(retry.prompt ?? retry.retryPrompt ?? ""),
     retrySeed: Math.trunc(finite(retry.seed ?? retry.retrySeed, -1)),
     retryLength: snapRetryLength(retry.length ?? retry.retryLength),
+    retryRunName: String(retry.runName ?? retry.retryRunName ?? "").trim(),
+    retryTakeKey: normalizeTakeKey(retry.takeKey ?? retry.retryTakeKey),
     assemblePartial: Boolean(options.assemblePartial ?? options.assemble_partial ?? true),
     timeoutMinutes: Math.max(0, finite(options.timeoutMinutes ?? options.timeout_minutes, 0)),
     unloadModels: Boolean(options.unloadModels ?? options.unload_models ?? false),
@@ -102,6 +106,9 @@ export function serializeWorkspace(value) {
       prompt: state.retryPrompt,
       seed: state.retrySeed,
       length: state.retryLength,
+      ...(state.retryRunName && state.retryTakeKey
+        ? { runName: state.retryRunName, takeKey: state.retryTakeKey }
+        : {}),
     },
     options: {
       assemblePartial: state.assemblePartial,
@@ -143,14 +150,51 @@ export function normalizeReview(value) {
 
 /** @param {Record<string, any> | null | undefined} review */
 export function reviewPhase(review) {
-  if (!review || typeof review !== "object" || !Object.keys(review).length) return "waiting";
+  if (!review || typeof review !== "object") return "idle";
+  if (review.mode === "history" || review.read_only === true || review.restored_history === true) return "history";
   if (review.awaiting_review) return "reviewing";
   const decision = String(review.decision || "").toLowerCase();
-  if (decision === "approve_stop") return "stopped";
+  if (decision === "stop" || decision === "approve_stop") return "stopped";
   if (decision === "retry" || decision === "reroll" || decision === "resume") return "retrying";
-  if (decision === "approve") return "approved";
   if (decision === "error") return "error";
-  return "ready";
+  if (decision === "approve" || decision === "auto" || review.approved === true) return "approved";
+  return review.history?.length || review.preview_clip || review.clip_path || review.preview_url ? "ready" : "idle";
+}
+
+/** @param {Record<string, any>} review @returns {Record<string, any> | null} */
+export function currentReviewTake(review) {
+  const history = /** @type {Array<Record<string, any>>} */ (review.history || []);
+  const clip = review.preview_clip || review.clip_path;
+  return (clip && history.find((take) => take.clip_path === clip))
+    || history.find((take) => take.active && Number(take.index) === Number(review.current_index))
+    || history.at(-1) || null;
+}
+
+/** @param {Record<string, any>} review */
+export function pendingReviewIdentity(review) {
+  if (reviewPhase(review) !== "reviewing") return "";
+  return String(review.token || "") || JSON.stringify([review.run_name, takeKey(currentReviewTake(review))]);
+}
+
+/** @param {Record<string, any>} workspace @param {Record<string, any>} review @param {boolean} restoreDraft */
+export function workspaceForPendingReview(workspace, review, restoreDraft) {
+  if (reviewPhase(review) !== "reviewing") return workspace;
+  const currentTake = currentReviewTake(review);
+  const runName = String(review.run_name || "").trim();
+  const currentTakeKey = takeKey(currentTake);
+  // A legacy workspace could have saved an automatically filled model length.
+  // Only a draft tied to this candidate can carry its override into recovery.
+  if (restoreDraft && runName && currentTakeKey
+    && workspace.retryRunName === runName && workspace.retryTakeKey === currentTakeKey) return workspace;
+  return {
+    ...workspace,
+    selectedTakeKey: currentTakeKey,
+    retryPrompt: String(review.prompt ?? currentTake?.prompt ?? ""),
+    retrySeed: Math.trunc(finite(review.seed ?? currentTake?.seed, -1)),
+    retryLength: 0,
+    retryRunName: runName,
+    retryTakeKey: currentTakeKey,
+  };
 }
 
 export function defaultWorkspace() {

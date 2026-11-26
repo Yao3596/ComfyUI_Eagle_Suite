@@ -1,7 +1,6 @@
 import { app } from "../../../scripts/app.js";
 
 export const EAGLE_SETTING_IDS = {
-  blockSkillDownstream: "EagleSuite.H3.BlockSkillDownstream",
   unloadAfterSkillBatch: "EagleSuite.H3.UnloadAfterSkillBatch",
 };
 
@@ -20,13 +19,6 @@ export function getEagleSetting(id, fallback) {
 app.registerExtension({
   name: "Eagle Suite Settings",
   setup() {
-    app.ui.settings.addSetting({
-      id: EAGLE_SETTING_IDS.blockSkillDownstream,
-      name: "🦅 Eagle Suite · 导演 Skill 生成时阻断视频下游",
-      type: "boolean",
-      defaultValue: true,
-      tooltip: "避免台本/分镜批量生成尚未完成时提前运行 H3 条件、采样和保存节点。",
-    });
     app.ui.settings.addSetting({
       id: EAGLE_SETTING_IDS.unloadAfterSkillBatch,
       name: "🦅 Eagle Suite · 导演 Skill 批量完成后卸载本地 LLM",

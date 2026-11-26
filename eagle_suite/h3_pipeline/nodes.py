@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -40,7 +41,7 @@ except Exception:  # 兼容不带动态图 API 的旧版 ComfyUI
             and isinstance(value[1], (int, float))
         )
 
-from ..h3_director_node import H3_MEDIA_BUNDLE_TYPE, H3_PLAN_TYPE
+from ..h3_director_node import H3_MEDIA_BUNDLE_TYPE, H3_PLAN_TYPE, _media_mapping_slots
 from ..eagle_client import eagle_client
 from ..logger import logger
 from ..utils import ensure_dir, get_cached_ffmpeg
@@ -65,8 +66,9 @@ from .media_utils import (
     safe_output_path,
     seam_analysis,
     trim_video,
+    video_has_audio,
 )
-from .review_runtime import close_review, open_review, publish_review
+from .review_runtime import close_review, open_review, publish_review, review_preview_url
 from .refinement import EagleH3RefineHandoffNode
 from .state import (
     _normalize_shot_bounds,
@@ -74,6 +76,7 @@ from .state import (
     apply_shot_overrides,
     build_summary,
     init_state,
+    is_approved_shot,
     load_state,
     record_shot_result,
     restore_from_scene,
@@ -470,7 +473,7 @@ def _reserve_shot_revision(shot_dir, state, index):
     revision = _next_revision(state, index)
     while revision <= 99999999:
         stem = f"clip_r{revision:04d}"
-        sidecars = (".json", ".pt", ".wav", ".prompt.txt", "_with_overlap.mp4")
+        sidecars = (".json", ".pt", ".wav", ".prompt.txt", "_with_overlap.mp4", "_with_audio.mp4")
         if any((shot_dir / f"{stem}{suffix}").exists() for suffix in sidecars):
             revision += 1
             continue
@@ -1075,6 +1078,10 @@ class EagleH3ShotContextNode:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _REFERENCE_TAG_RE = re.compile(r"<(Picture|Video|Audio)\s+(\d+)>", re.IGNORECASE)
+_REFERENCE_SCENE_FIELD_RE = re.compile(
+    r"^\s*(?:detailed_description|integrated_multimodal_description)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
 _REFERENCE_TAG_KIND = {"picture": "image", "video": "video", "audio": "audio"}
 _REFERENCE_TAG_LABEL = {"image": "Picture", "video": "Video", "audio": "Audio"}
 _REFERENCE_SLOT_LIMIT = {"image": 9, "video": 3, "audio": 3}
@@ -1097,16 +1104,8 @@ def _reference_media_entries(bundle):
     video_audios = list((bundle or {}).get("video_audio_slots") or [])
     audios = list((bundle or {}).get("audio_slots") or [])
     slots = {"image": images, "video": videos, "audio": audios}
-    counters = {"image": 0, "video": 0, "audio": 0}
     result = []
-    for row in mapping if isinstance(mapping, list) else []:
-        if not isinstance(row, dict):
-            continue
-        kind = str(row.get("type") or "image").lower()
-        if kind not in counters:
-            continue
-        slot = counters[kind]
-        counters[kind] += 1
+    for kind, slot, row in _media_mapping_slots(mapping if isinstance(mapping, list) else []):
         value = slots[kind][slot] if slot < len(slots[kind]) else None
         paired_audio = (
             video_audios[slot]
@@ -1135,7 +1134,7 @@ def _is_usable_reference(kind, value):
             and int(value.shape[2]) > 1
             and int(value.shape[-1]) >= 3
         )
-    return isinstance(value, dict) and value.get("waveform") is not None
+    return isinstance(value, Mapping) and value.get("waveform") is not None
 
 
 def _limit_reference_short_edge(image, target_short_edge):
@@ -1249,18 +1248,28 @@ def _prepare_reference_condition(run_state, media_bundle, prompt, reference_scop
         for token in shot.get("disabled_reference_tags") or []
         for match in _REFERENCE_TAG_RE.finditer(str(token))
     }
+    overrides = (state.get("shot_overrides") or {}) if state_contract == "eagle" else {}
+    override = overrides.get(str(index), overrides.get(index, {}))
+    edited_prompt = isinstance(override, dict) and bool(override.get("prompt")) and (
+        str(override["prompt"]).strip() != str(shot.get("prompt") or "").strip()
+    )
+    scene_sources = shot.get("scene_reference_tags") or [shot.get("scene_prompt") or ""]
+    if edited_prompt:
+        # The review editor shows the full prompt, including definitions of
+        # unused media. Read the edited scene fields when choosing its slots.
+        scene_text = str(prompt or "")
+        prefix = str(plan.get("prompt_prefix") or "")
+        if prefix and scene_text.startswith(prefix):
+            scene_text = scene_text[len(prefix):]
+        elif scene_field := _REFERENCE_SCENE_FIELD_RE.search(scene_text):
+            scene_text = scene_text[scene_field.start():]
+        scene_sources = [scene_text]
     scene_tags = {
         _canonical_reference_tag(match.group(1), match.group(2))
-        for token in (shot.get("scene_reference_tags") or [])
+        for token in scene_sources
         for match in _REFERENCE_TAG_RE.finditer(str(token))
     }
-    if not scene_tags:
-        scene_text = str(shot.get("scene_prompt") or "")
-        scene_tags = {
-            _canonical_reference_tag(match.group(1), match.group(2))
-            for match in _REFERENCE_TAG_RE.finditer(scene_text)
-        }
-    use_all = reference_scope == "all" or not scene_tags
+    use_all = reference_scope == "all" or (not scene_tags and not edited_prompt)
 
     active = []
     skipped = []
@@ -1279,6 +1288,7 @@ def _prepare_reference_condition(run_state, media_bundle, prompt, reference_scop
     for entry in active:
         grouped[entry["kind"]].append(entry)
     for kind, limit in _REFERENCE_SLOT_LIMIT.items():
+        grouped[kind].sort(key=lambda entry: entry["source_index"])
         overflow = grouped[kind][limit:]
         skipped.extend(
             {"tag": entry["source_tag"], "reason": "official_slot_limit"}
@@ -1745,7 +1755,7 @@ class EagleH3FrameTrimNode:
     FUNCTION = "execute"
     CATEGORY = "🦅 Eagle Suite/H3 核心"
     DESCRIPTION = (
-        "连接“镜头与上下文.context_frames”到 trim_frames；连接当前 VAE 解码帧和音频。"
+        "连接“参考条件路由.trim_frames”到 trim_frames，并接入当前 VAE 解码帧和音频。"
         "输出交付帧、同步音频及可选的重叠拼接帧；"
         "target_frames 用于去除 17k+5 网格造成的尾部多余帧。"
     )
@@ -1782,7 +1792,7 @@ class EagleH3FrameTrimNode:
 
     @staticmethod
     def _trim_audio(audio, trim_frames, delivered_frames, fps, match_tail):
-        if not isinstance(audio, dict) or audio.get("waveform") is None:
+        if not isinstance(audio, Mapping) or audio.get("waveform") is None:
             return audio
         waveform = audio["waveform"]
         if not torch.is_tensor(waveform):
@@ -1898,6 +1908,7 @@ class EagleH3SegmentCheckpointNode:
         fps = params["fps"]
         delivered = params["shot"].get("delivered_frames", 0)
         overlap_path = ""
+        take_files = [clip_path]
 
         try:
             if has_images:
@@ -1915,6 +1926,7 @@ class EagleH3SegmentCheckpointNode:
                     and int(images_with_overlap.shape[0]) > int(images.shape[0])
                 ):
                     overlap_path = str(shot_dir / f"{stem}_with_overlap.mp4")
+                    take_files.append(overlap_path)
                     frames_to_video(_tensor_to_np(images_with_overlap), overlap_path, fps=fps, crf=crf)
             # 显式首尾裁剪优先；否则按计划 delivered_frames 限长。
             elif trim_end and trim_end > trim_start:
@@ -1935,20 +1947,22 @@ class EagleH3SegmentCheckpointNode:
             else:
                 shutil.copy2(in_path, clip_path)
 
-            # 合并音频
             if audio is not None:
                 audio_path = str(shot_dir / f"{stem}.wav")
-                try:
-                    self._save_audio(audio, audio_path)
-                    merged_path = str(shot_dir / f"{stem}_with_audio.mp4")
-                    merge_audio_video(clip_path, audio_path, merged_path)
-                    os.replace(merged_path, clip_path)
-                except Exception as e:
-                    logger.warning(f"[H3Chain] 合并音频失败: {e}")
+                merged_path = str(shot_dir / f"{stem}_with_audio.mp4")
+                take_files.extend((audio_path, merged_path))
+                self._save_audio(audio, audio_path)
+                merge_audio_video(clip_path, audio_path, merged_path)
+                os.replace(merged_path, clip_path)
+
+            has_audio = (audio is not None or not has_images) and video_has_audio(clip_path)
+            if audio is not None and not has_audio:
+                raise RuntimeError("合并后的视频缺少已连接的音轨")
 
             latent_path = ""
             if sampled_latent is not None:
                 latent_path = str(shot_dir / f"{stem}.pt")
+                take_files.append(latent_path)
                 # 同一个张量检查点同时保存紧凑 AV latent 与交付画面的
                 # 无损尾帧。重启/交互审片后可以先恢复原始 IMAGE 张量，旧版
                 # 仅 latent 检查点才回退到 MP4 抽帧。
@@ -1962,8 +1976,10 @@ class EagleH3SegmentCheckpointNode:
             effective_shot = params.get("shot") or {}
             prompt_text = str(effective_shot.get("prompt") or "")
             prompt_path = str(shot_dir / f"{stem}.prompt.txt")
+            take_files.append(prompt_path)
             Path(prompt_path).write_text(prompt_text, encoding="utf-8")
             checkpoint_path = str(shot_dir / f"{stem}.json")
+            take_files.append(checkpoint_path)
             checkpoint_meta = {
                 "version": MANIFEST_VERSION,
                 "run_name": state.get("run_name"),
@@ -1971,6 +1987,7 @@ class EagleH3SegmentCheckpointNode:
                 "scene_number": idx + 1,
                 "revision": revision,
                 "clip": clip_path,
+                "audio": has_audio,
                 "overlap_clip": overlap_path,
                 "latent": latent_path,
                 "prompt": prompt_text,
@@ -1994,7 +2011,7 @@ class EagleH3SegmentCheckpointNode:
                 decision="pending",
                 meta={
                     "fps": fps,
-                    "audio": audio is not None,
+                    "audio": has_audio,
                     "overlap_clip": overlap_path,
                     "latent": latent_path,
                     "prompt_path": prompt_path,
@@ -2010,7 +2027,13 @@ class EagleH3SegmentCheckpointNode:
             )
         except Exception as e:
             logger.error(f"[H3Chain] 分段保存失败: {e}")
-            Path(clip_path).unlink(missing_ok=True)
+            for take_file in take_files:
+                try:
+                    Path(take_file).unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    logger.warning(f"[H3Chain] 清理未完成的分段失败: {cleanup_error}")
+            if audio is not None:
+                raise RuntimeError(f"当前场景检查点保存失败，循环不推进：{e}") from e
             return ("", state, f"❌ 分段保存失败: {e}")
 
     def _save_audio(self, audio, output_path):
@@ -2018,7 +2041,7 @@ class EagleH3SegmentCheckpointNode:
             import soundfile as sf
         except ImportError:
             raise RuntimeError("需要安装 soundfile 以保存音频")
-        if isinstance(audio, dict):
+        if isinstance(audio, Mapping):
             waveform = audio.get("waveform")
             if waveform is None:
                 waveform = audio.get("audio")
@@ -2029,12 +2052,18 @@ class EagleH3SegmentCheckpointNode:
         if waveform is None:
             raise ValueError("AUDIO 输入缺少 waveform")
         if isinstance(waveform, torch.Tensor):
-            waveform = waveform.cpu().numpy()
+            waveform = waveform.detach().cpu()
+            if waveform.dtype in (torch.float16, torch.bfloat16):
+                waveform = waveform.float()
+            waveform = waveform.numpy()
+        waveform = np.asarray(waveform)
+        if waveform.ndim not in (1, 2, 3) or not waveform.size:
+            raise ValueError("AUDIO 输入缺少有效音频采样")
         if waveform.ndim == 3:
-            waveform = waveform[0]
-        if waveform.ndim == 2 and waveform.shape[0] > waveform.shape[1]:
+            waveform = waveform[0].T
+        elif waveform.ndim == 2 and waveform.shape[0] <= waveform.shape[1]:
             waveform = waveform.T
-        sf.write(output_path, waveform.T if waveform.ndim == 2 else waveform, sample_rate)
+        sf.write(output_path, waveform, sample_rate)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2096,6 +2125,7 @@ class EagleH3ReviewGateNode:
                     "revision": int(revision.get("revision", item.get("active_revision", 1)) or 1),
                     "active": int(revision.get("revision", 1) or 1) == int(item.get("active_revision", 1) or 1),
                     "clip_path": revision_clip,
+                    "preview_url": review_preview_url(state.get("base_dir"), revision_clip),
                     "decision": str(revision.get("decision") or item.get("decision") or ""),
                     "seed": str(revision.get("seed", item.get("seed", "")) or ""),
                     "delivered_frames": int(revision.get("delivered_frames", item.get("delivered_frames", 0)) or 0),
@@ -2126,10 +2156,12 @@ class EagleH3ReviewGateNode:
             "current_index": state.get("current_index", 0),
             "clip_count": int(state.get("total_shots", 0) or 0),
             "preview_clip": preview_path,
+            "preview_url": review_preview_url(state.get("base_dir"), preview_path),
             "history": self._history(state),
             "prompt": str(shot.get("prompt") or ""),
             "seed": int((params or {}).get("effective_seed", shot.get("seed", 0)) or 0),
             "length": int(shot.get("raw_frames", shot.get("length", 0)) or 0),
+            "fps": int((params or {}).get("fps", 24)),
             "can_resume": bool(state.get("shots")),
             "reset_decision": bool(decision),
         }
@@ -2157,7 +2189,9 @@ class EagleH3ReviewGateNode:
                 self._set_active_decision(state, "reviewing")
             state["awaiting_review"] = True
             save_state(state)
-            token, future = open_review(unique_id, run_name=state.get("run_name"))
+            token, future = open_review(
+                unique_id, run_name=state.get("run_name"), base_dir=state.get("base_dir"),
+            )
             pending_payload = self._ui_payload(
                 state, preview_path, True, False, "", build_summary(state), mode
             )
@@ -2719,9 +2753,7 @@ def _validated_assembly_clips(state, allow_partial=False):
         shot = by_index.get(index)
         if not shot:
             raise ValueError(f"计划场景 {index + 1}/{required} 缺少分段")
-        if str(shot.get("decision") or "").lower() not in {
-            "approved", "approve", "auto", "approve_stop"
-        }:
+        if not is_approved_shot(shot):
             raise ValueError(f"计划场景 {index + 1} 尚未通过审片")
         clip = str(shot.get("clip") or "")
         if not clip or not os.path.isfile(clip) or os.path.getsize(clip) == 0:
@@ -2951,6 +2983,9 @@ class EagleH3CheckpointReviewNode:
         # A review-button click queues the graph again. Reuse the already saved take;
         # otherwise merely approving it would create a duplicate revision.
         if review_decision and existing is not None:
+            discards_take = str(review_decision).strip().lower() in {"retry", "reroll", "stop", "resume"}
+            if audio is not None and not discards_take and not video_has_audio(existing["clip"]):
+                raise RuntimeError("待审版本缺少已连接的音轨，请重试当前场景")
             clip = native_video(existing["clip"])
             checkpoint_status = f"✅ 复用待审版本 r{int(existing.get('active_revision', 1) or 1):04d}"
         else:

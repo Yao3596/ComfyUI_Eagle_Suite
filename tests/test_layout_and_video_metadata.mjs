@@ -69,8 +69,8 @@ assert.match(h3Director, /H3_DEFAULT_NODE_SIZE = \[960, 720\]/,
   "H3 Director should open at the shared 960x720 preview size");
 assert.match(h3Director, /this\.setSize\(H3_DEFAULT_NODE_SIZE\.slice\(\)\)/,
   "new H3 Director nodes should use the compact default without sharing the array");
-assert.match(h3Director, /getHeight: function\(\) \{ return currentViewportHeight; \}/,
-  "Nodes 2.0 must still render the explicitly resized H3 viewport height");
+assert.match(h3Director, /el\.style\.cssText = '[^']*height:100%;[^']*contain:size;/,
+  "H3 Director must fill the native slot without sizing it from its content");
 assert.doesNotMatch(h3Director, /widget\.computeSize = function\(width\)[\s\S]{0,900}?H3_MIN_VIEWPORT_HEIGHT/,
   "the main DOM widget must stay growable instead of being classified as a fixed-height widget");
 assert.doesNotMatch(h3Director, /Number\(current\[1\]/,

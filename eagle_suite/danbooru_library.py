@@ -254,6 +254,7 @@ class Library:
                     "groups": db.execute("SELECT count(*) FROM wiki_groups").fetchone()[0],
                     "wikis": db.execute("SELECT count(*) FROM tag_wikis").fetchone()[0],
                     "annotations": dict(db.execute("SELECT status,count(*) FROM annotations GROUP BY status")),
+                    "last_annotation_update": db.execute("SELECT max(updated_at) FROM annotations").fetchone()[0],
                     "checkpoints": {r[0]: _safe_json(r[1], {}) for r in db.execute("SELECT * FROM checkpoints")}}
 
     def candidates(self, limit=20, names=None):
@@ -297,10 +298,23 @@ class Library:
             self.cache_wiki(row["name"], {key: record[key] for key in ("id", "title", "body", "other_names", "updated_at") if key in record})
             progress({"wiki_checked": index + 1, "name": row["name"]})
 
+    @staticmethod
+    def _translation_annotation(row, cn_name, note="", confidence=1.0):
+        """Keep catalog safety metadata when only a Chinese label is approved."""
+        nsfw = row.get("nsfw")
+        rating = "unknown" if nsfw is None else ("adult" if nsfw else "general")
+        category = CATEGORIES.get(int(row.get("category") or 0), "general")
+        return {
+            "name": row["name"], "cn_name": cn_name, "facets": [],
+            "kind": purpose_from_facets([], category), "confidence": confidence,
+            "rating": rating, "note": note, "translation_only": True,
+        }
+
     def save_drafts(self, payload, expected, model, action_checkpoint=None):
         if not isinstance(payload, list) or len(payload) != len(expected):
             raise ValueError("模型返回数量不符，整批未写入；请缩小批次重试")
         names = {r["name"] for r in expected}
+        expected_by_name = {r["name"]: r for r in expected}
         checked = []
         for item in payload:
             if not isinstance(item, dict) or item.get("name") not in names:
@@ -322,7 +336,7 @@ class Library:
                 "identity.person_nsfw" in facets and item["rating"] not in {"adult", "questionable", "explicit"}
             ) or {"identity.person_sfw", "identity.person_nsfw"}.issubset(facets):
                 raise ValueError("人物全年龄/成人向 facet 与评级冲突，整批未写入")
-            evidence = next(r for r in expected if r["name"] == item["name"])
+            evidence = expected_by_name[item["name"]]
             annotation = {k: item[k] for k in ("name", "cn_name", "facets", "confidence", "rating", "note")}
             annotation["kind"] = purpose or purpose_from_facets(
                 facets, CATEGORIES.get(int(evidence.get("category") or 0), "general"))
@@ -332,10 +346,13 @@ class Library:
                 "taxonomy_version": 2}
             checked.append(annotation)
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        applied_names = []
         with self.connect() as db:
             for item in checked:
-                db.execute("INSERT OR IGNORE INTO annotations VALUES(?,?,'pending',?,?)",
-                           (item["name"], json.dumps(item, ensure_ascii=False), model, now))
+                cursor = db.execute("INSERT OR IGNORE INTO annotations VALUES(?,?,?,?,?)",
+                    (item["name"], json.dumps(item, ensure_ascii=False), "pending", model, now))
+                if cursor.rowcount:
+                    applied_names.append(item["name"])
             # A canvas-port model action is one-shot. Persist its request ID in
             # the same transaction as the drafts so re-queueing or reopening a
             # workflow cannot silently consume the next batch.
@@ -343,6 +360,73 @@ class Library:
                 resource, value = action_checkpoint
                 db.execute("INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
                            (str(resource), json.dumps(value, ensure_ascii=False)))
+        return {"applied": len(applied_names), "skipped": len(expected) - len(applied_names),
+                "applied_names": applied_names, "status": "pending"}
+
+    def save_translations(self, payload, expected, model, action_checkpoint=None):
+        """Apply only model-generated Chinese labels from an explicit one-shot action."""
+        if not isinstance(payload, list) or len(payload) != len(expected):
+            raise ValueError("模型返回数量不符，整批未写入；请缩小批次重试")
+        expected_by_name = {row["name"]: row for row in expected}
+        seen = set()
+        accepted = []
+        for item in payload:
+            if not isinstance(item, dict) or item.get("name") not in expected_by_name or item["name"] in seen:
+                raise ValueError("模型增加或重复了未知标签，整批未写入")
+            seen.add(item["name"])
+            label = item.get("cn_name")
+            note = item.get("note", "")
+            if not isinstance(label, str) or not isinstance(note, str):
+                raise ValueError("模型中文注释结构无效，整批未写入")
+            label = label.strip()
+            if not label or len(label) > 120 or not re.search(r"[\u3400-\u9fff]", label):
+                continue
+            accepted.append(self._translation_annotation(
+                expected_by_name[item["name"]], label, note[:500],
+            ))
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        applied_names = []
+        with self.connect() as db:
+            for item in accepted:
+                cursor = db.execute("INSERT OR IGNORE INTO annotations VALUES(?,?,?,?,?)",
+                    (item["name"], json.dumps(item, ensure_ascii=False), "approved", model, now))
+                if cursor.rowcount:
+                    applied_names.append(item["name"])
+            if action_checkpoint:
+                resource, value = action_checkpoint
+                db.execute("INSERT OR REPLACE INTO checkpoints VALUES(?,?)",
+                    (str(resource), json.dumps(value, ensure_ascii=False)))
+        return {"applied": len(applied_names), "skipped": len(expected) - len(applied_names),
+                "applied_names": applied_names, "status": "approved"}
+
+    def edit_translation(self, name, cn_name):
+        """Persist a user's correction without silently approving pending model taxonomy."""
+        name = str(name or "").strip().lower().replace(" ", "_")
+        label = str(cn_name or "").strip()
+        if not name or not label or len(label) > 120 or not re.search(r"[\u3400-\u9fff]", label):
+            raise ValueError("请选择现有标签并输入有效中文注释（最多 120 字）")
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with self.connect() as db:
+            tag = db.execute("SELECT * FROM tags WHERE name=? AND deprecated=0", (name,)).fetchone()
+            if not tag:
+                raise ValueError("标签不在本地词库中或已停用")
+            existing = db.execute("SELECT * FROM annotations WHERE name=?", (name,)).fetchone()
+            if existing:
+                db.execute("INSERT INTO audit SELECT * FROM annotations WHERE name=?", (name,))
+            if existing and existing["status"] == "approved":
+                annotation = _safe_json(existing["payload"], {})
+                if not isinstance(annotation, dict):
+                    annotation = {}
+                annotation["cn_name"] = label
+                annotation["name"] = name
+            else:
+                annotation = self._translation_annotation(dict(tag), label, "用户手动修订中文注释")
+            annotation["translation_manual"] = True
+            db.execute("""INSERT INTO annotations(name,payload,status,model,updated_at)
+                VALUES(?,?,'approved','manual:ui',?) ON CONFLICT(name) DO UPDATE SET
+                payload=excluded.payload,status='approved',model='manual:ui',updated_at=excluded.updated_at""",
+                (name, json.dumps(annotation, ensure_ascii=False), now))
+        return {"name": name, "cn_name": label}
 
     def save_checkpoint(self, resource, value):
         """Persist non-pagination workflow state without touching tag rows."""
@@ -360,7 +444,7 @@ class Library:
 
     def pending(self, limit=20):
         with self.connect() as db:
-            return [dict(_safe_json(r["payload"], {}), model=r["model"]) for r in db.execute(
+            return [dict(_safe_json(r["payload"], {}), model=r["model"], status=r["status"], updated_at=r["updated_at"]) for r in db.execute(
                 "SELECT * FROM annotations WHERE status='pending' ORDER BY updated_at,name LIMIT ?", (limit,))]
 
     def approved(self):
@@ -369,7 +453,7 @@ class Library:
 
     def sample_pool(self, facets, min_count=0):
         with self.connect() as db:
-            rows = db.execute("""SELECT t.*,a.payload FROM tags t JOIN annotations a ON t.name=a.name
+            rows = db.execute("""SELECT t.*,a.payload,a.model AS annotation_model,a.updated_at AS annotation_updated_at,a.status AS annotation_status FROM tags t JOIN annotations a ON t.name=a.name
                 WHERE a.status='approved' AND t.category=0 AND t.deprecated=0 AND t.post_count>=?
                 ORDER BY t.name""", (min_count,))
             return [item for item in map(self.decode, rows) if set(item["facets"]) & set(facets)]
@@ -385,7 +469,7 @@ class Library:
         minimum = max(0, int(min_count or 0))
         maximum = max(1, min(250000, int(limit or 100000)))
         with self.connect() as db:
-            rows = db.execute("""SELECT t.*,a.payload FROM tags t LEFT JOIN annotations a
+            rows = db.execute("""SELECT t.*,a.payload,a.model AS annotation_model,a.updated_at AS annotation_updated_at,a.status AS annotation_status FROM tags t LEFT JOIN annotations a
                 ON t.name=a.name AND a.status='approved'
                 WHERE t.category=0 AND t.deprecated=0 AND t.post_count>=?
                 ORDER BY t.post_count DESC,t.name LIMIT ?""", (minimum, maximum))
@@ -403,7 +487,7 @@ class Library:
         maximum = max(1000, min(250000, int(limit or 60000)))
         minimum = max(0, int(min_count or 0))
         with self.connect() as db:
-            rows = db.execute("""SELECT t.*,a.payload FROM tags t LEFT JOIN annotations a
+            rows = db.execute("""SELECT t.*,a.payload,a.model AS annotation_model,a.updated_at AS annotation_updated_at,a.status AS annotation_status FROM tags t LEFT JOIN annotations a
                 ON t.name=a.name AND a.status='approved'
                 WHERE t.deprecated=0 AND t.post_count>0 AND
                     (t.post_count>=? OR t.cn_name<>'' OR t.wiki<>'' OR a.name IS NOT NULL)
@@ -449,7 +533,7 @@ class Library:
         result = {}
         with self.connect() as db:
             for name in names:
-                r = db.execute("""SELECT t.*,a.payload FROM tags t LEFT JOIN annotations a
+                r = db.execute("""SELECT t.*,a.payload,a.model AS annotation_model,a.updated_at AS annotation_updated_at,a.status AS annotation_status FROM tags t LEFT JOIN annotations a
                     ON t.name=a.name AND a.status='approved' WHERE t.name=?""", (name,)).fetchone()
                 if r:
                     result[name] = self.decode(r)
@@ -465,6 +549,15 @@ class Library:
         item["kind"] = kind if kind in PURPOSES else purpose_from_facets(item["facets"], item["category"])
         if annotation.get("cn_name"):
             item["cn_name"] = annotation["cn_name"]
+        manual = bool(annotation.get("translation_manual")) or str(item.get("annotation_model") or "").startswith("manual:")
+        item["annotation_source"] = "manual" if manual else "model" if annotation else "catalog" if item.get("cn_name") else ""
+        item["annotation_model"] = item.get("annotation_model") or ""
+        item["annotation_status"] = item.get("annotation_status") or ("catalog" if item.get("cn_name") else "")
+        item["annotation_updated_at"] = item.get("annotation_updated_at") or (item.get("updated_at") if not annotation else "") or ""
+        # Translation-only actions did not ask the model for a confidence score.
+        # Their internal default is not evidence of certainty for the user.
+        item["annotation_confidence"] = None if manual or annotation.get("translation_only") else annotation.get("confidence")
+        item["translation_manual"] = manual
         if annotation:
             item["rating"] = annotation.get("rating", "unknown")
             item["nsfw"] = {
@@ -482,7 +575,7 @@ class Library:
         # Indexed official table remains on disk; never load millions of records into Vue/embeddings.
         pattern = "%" + query.strip().replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
         with self.connect() as db:
-            rows = db.execute("""SELECT t.*,a.payload FROM tags t LEFT JOIN annotations a
+            rows = db.execute("""SELECT t.*,a.payload,a.model AS annotation_model,a.updated_at AS annotation_updated_at,a.status AS annotation_status FROM tags t LEFT JOIN annotations a
                 ON t.name=a.name AND a.status='approved' WHERE t.deprecated=0 AND t.post_count>0 AND
                 (t.name LIKE ? ESCAPE '!' OR t.cn_name LIKE ? ESCAPE '!' OR
                  json_extract(a.payload,'$.cn_name') LIKE ? ESCAPE '!')

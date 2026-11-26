@@ -38,10 +38,13 @@ try:
     from server import PromptServer
     from . import api_key_node
     from .route_registry import register_all_routes, register_when_ready
+    from .execution_isolation import register_prompt_filter
 
     def _register_eagle_routes(server):
         register_all_routes(server)
         api_key_node.register_routes()
+        import nodes as comfy_nodes
+        register_prompt_filter(server, NODE_CLASS_MAPPINGS, comfy_nodes.NODE_CLASS_MAPPINGS)
 
     register_when_ready(PromptServer, _register_eagle_routes, callback_key=__name__)
 except Exception as e:

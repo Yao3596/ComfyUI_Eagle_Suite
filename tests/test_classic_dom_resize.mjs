@@ -23,6 +23,11 @@ const resizableSurfaces = [
   "video_frame_extractor_vue.js",
   "wallhaven_gallery.js",
 ];
+const nativeSlotSurfaces = new Set([
+  "h3_director.js",
+  "h3_review_workspace_svelte.js",
+  "svelte_character_interaction.js",
+]);
 
 for (const name of resizableSurfaces) {
   const source = read(name);
@@ -30,6 +35,8 @@ for (const name of resizableSurfaces) {
     `${name}: classic canvas resize must not stop at the old 930-1200px cap`);
   assert.match(source, /getMaxHeight:[^\n]*MAX_VIEWPORT_HEIGHT/,
     `${name}: Nodes 2.0 must share the expanded finite safety bound`);
+  // Native slot sizes are exercised in check_h3_review_layout.py.
+  if (nativeSlotSurfaces.has(name)) continue;
   assert.match(source, /Math\.min\(MAX_VIEWPORT_HEIGHT,\s*Math\.max\(/,
     `${name}: onResize must calculate the live viewport using the shared bound`);
   assert.match(source, /getHeight:[^\n]*currentViewportHeight/,
@@ -74,14 +81,10 @@ for (const [name, markers] of mainDomWidgets) {
 const h3 = read("h3_director.js");
 assert.match(h3, /H3_DEFAULT_NODE_SIZE = \[960, 720\]/,
   "H3 Director should use the shared 960x720 preview default when first added");
-assert.match(h3, /H3_NODE_CHROME_HEIGHT = 150/,
-  "H3 Director must use one explicit chrome offset for both renderers");
-assert.match(h3, /el\.style\.height = h \+ 'px'/,
-  "H3 Director must assign a pixel height; classic LiteGraph does not reliably resize a 100% child");
+assert.match(h3, /el\.style\.cssText = '[^']*height:100%[^']*contain:size/,
+  "H3 Director must fill the allocated slot without enlarging the node frame");
 assert.doesNotMatch(h3, /widget\.computeSize = function\(width\)[\s\S]{0,900}?H3_MIN_VIEWPORT_HEIGHT/,
   "H3 Director must retain DOMWidgetImpl.computeLayoutSize so its slot grows with the node body");
-assert.match(h3, /currentViewportHeight = h;[\s\S]{0,700}?el\.style\.height = h \+ 'px'/,
-  "H3 Director must still apply explicit user resizing to the live DOM viewport");
 assert.match(h3, /scheduleHideWidgets[\s\S]*?\[0, 250, 500\]\.map/,
   "H3 Director must hide transport widgets before and during Nodes 2.0 restoration");
 assert.match(h3, /nodeType\.prototype\.onConfigure[\s\S]*?scheduleHideWidgets\(node\);/,

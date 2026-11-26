@@ -52,13 +52,16 @@ class EagleTextSwitchMulti:
             values.append(v)
 
         if not values:
-            return ("",)
+            output = ""
+        elif 模式 == "随机输出一个":
+            output = random.Random(seed).choice(values)
+        else:
+            output = 分隔符.join(values)
 
-        if 模式 == "随机输出一个":
-            rnd = random.Random(seed)
-            return (rnd.choice(values),)
-
-        return (分隔符.join(values),)
+        # UI data is sent only when this node executes. The frontend saves the
+        # last result in node.properties, so reopening a workflow does not
+        # require rerunning the (possibly expensive) upstream text nodes.
+        return {"ui": {"text": [output]}, "result": (output,)}
 
 
 NODE_CLASS_MAPPINGS = {

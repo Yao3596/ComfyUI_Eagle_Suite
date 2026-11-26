@@ -272,7 +272,7 @@ class RegressionTests(unittest.TestCase):
             "selected_tags": [{"tag": "crossed_legs", "kind": "action", "enabled": True}],
             "gacha_content_level": 0,
         })
-        result = search.DanbooruVueSearchNode().execute(payload, reference_image=reference)
+        result = search.DanbooruVueSearchNode().execute(payload, reference_image=reference)["result"]
         self.assertEqual(5, len(result))
         self.assertIs(reference, result[4])
         self.assertIn("masterpiece, best quality, highres", result[2])
@@ -314,7 +314,7 @@ class RegressionTests(unittest.TestCase):
                 local_model={"path": "model.gguf"}, node_id="42",
             )
         planner.assert_called_once()
-        self.assertIn("running", result[1])
+        self.assertIn("running", result["result"][1])
 
     def test_danbooru_library_model_requires_opt_in(self):
         from eagle_suite_test_package.eagle_suite import danbooru_search as search
@@ -1722,8 +1722,8 @@ legacy prompt
             self.assertIn(preset, source)
         self.assertIn('option value="custom"', source)
         self.assertIn("function onCustomDimension(axis)", source)
-        self.assertIn("async beforePromptQueued()", source)
         self.assertIn("props.node._h3FlushState", source)
+        self.assertRegex(source, r"w\.serializeValue = function\(\) \{ return node\._h3FlushState\?\.\(false\) \?\? w\.value; \}")
         self.assertIn("generationInfo.deliveredFrames", source)
         statusbar = source.split('<div class="h3d-statusbar">', 1)[1].split("</div>", 1)[0]
         self.assertIn("场景队列", statusbar)

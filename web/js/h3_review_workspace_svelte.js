@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { pauseReviewAutoQueue, queueNodeTask } from "./review_gate_flow.js";
 import {
   assertResolvedDecision,
   isValidRetryLength,
@@ -8,6 +9,8 @@ import {
 } from "../svelte-dist/h3-review-workspace.js";
 
 const NODE_TYPE = "EagleH3ReviewWorkspaceNode";
+const MIN_VIEWPORT_HEIGHT = 280;
+const MAX_VIEWPORT_HEIGHT = 4096;
 const HIDDEN_WIDGETS = new Set([
   "workspace_state",
   "review_decision",
@@ -26,7 +29,25 @@ function ensureStylesheet() {
   link.id = "eagle-h3-review-workspace-svelte-css";
   link.rel = "stylesheet";
   link.href = new URL("../svelte-dist/h3-review-workspace.css", import.meta.url).href;
-  document.head.appendChild(link);
+  const style = document.createElement("style");
+  style.textContent = `
+    .eagle-h3-review-workspace-svelte-host {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      box-sizing: border-box;
+      contain: size;
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+    .eagle-h3-review-workspace-svelte-host > main.review-workspace {
+      height: auto;
+      min-height: 100%;
+      overflow: visible;
+    }
+  `;
+  document.head.append(link, style);
 }
 
 function getWidget(node, name) {
@@ -56,7 +77,8 @@ function hideControlWidgets(node) {
   }
 }
 
-function viewUrl(filePath) {
+function viewUrl(filePath, previewUrl) {
+  if (previewUrl) return api.apiURL(previewUrl);
   if (!filePath) return "";
   const normalized = String(filePath).replace(/\\/g, "/");
   const marker = "h3_eagle_chains/";
@@ -72,8 +94,8 @@ function viewUrl(filePath) {
   return api.apiURL(`/view?${params}`);
 }
 
-function queuePrompt() {
-  if (typeof app.queuePrompt === "function") return Promise.resolve(app.queuePrompt(0));
+function queuePrompt(node) {
+  if (typeof app.queuePrompt === "function") return queueNodeTask(app, node, { downstream: true });
   throw new Error("当前 ComfyUI 前端不支持重新入队");
 }
 
@@ -87,6 +109,7 @@ async function submitDecision(node, decision, payload) {
     throw new Error("当前审片版本已提交，请等待新 token 或状态更新");
   }
 
+  pauseReviewAutoQueue(app);
   setWidget(node, "retry_prompt", payload.retry_prompt || "");
   setWidget(node, "retry_seed", Number(payload.retry_seed ?? -1));
   setWidget(node, "retry_length", retryLength);
@@ -127,7 +150,10 @@ async function submitDecision(node, decision, payload) {
         throw new Error(String(body?.error || body?.message || `HTTP ${response.status}`));
       }
       assertResolvedDecision(body);
-      node._eagleH3ResolvedToken = token;
+      const currentReview = node._eagleH3ReviewPayload;
+      if (currentReview?.awaiting_review && String(currentReview.token || "") === token) {
+        node._eagleH3ResolvedToken = token;
+      }
       return { ...body, lockedToken: token };
     } finally {
       if (node._eagleH3ReviewAbortController === controller) {
@@ -138,7 +164,7 @@ async function submitDecision(node, decision, payload) {
   }
 
   setWidget(node, "review_decision", decision);
-  await queuePrompt();
+  await queuePrompt(node);
   return { queued: true };
 }
 
@@ -256,8 +282,6 @@ app.registerExtension({
 
       const target = document.createElement("div");
       target.className = "eagle-h3-review-workspace-svelte-host";
-      target.style.width = "100%";
-      target.style.height = "650px";
       const workspaceWidget = getWidget(node, "workspace_state");
       const workspace = normalizeWorkspace(workspaceWidget?.value || "");
       let mounted;
@@ -283,36 +307,20 @@ app.registerExtension({
         };
       }
 
-      let currentViewportHeight = 650;
-      const MAX_VIEWPORT_HEIGHT = 4096;
-      const widget = node.addDOMWidget("h3_review_workspace_svelte", "div", target, {
+      // The native widget slot accounts for ports, controls and the node footer.
+      // Let it allocate the viewport so that the panel scrolls inside the frame.
+      node.addDOMWidget("h3_review_workspace_svelte", "div", target, {
         serialize: false,
         hideInPanel: true,
         hideOnZoom: false,
-        getMinHeight: () => 650,
+        getMinHeight: () => MIN_VIEWPORT_HEIGHT,
         getMaxHeight: () => MAX_VIEWPORT_HEIGHT,
-        getHeight: () => currentViewportHeight,
       });
-      widget._eagleViewportHeight = 650;
-      // Keep DOMWidgetImpl.computeLayoutSize available.  A custom computeSize
-      // makes the review surface a fixed-height widget in Classic and clips
-      // everything below that slot when the node is stretched.
       node._eagleH3ReviewSvelte = mounted;
       const existingSize = node.size || [];
       if ((Number(existingSize[0]) || 0) < 520 || (Number(existingSize[1]) || 0) < 700) {
         node.setSize?.([960, 720]);
       }
-      const applySize = (size) => {
-        currentViewportHeight = Math.min(MAX_VIEWPORT_HEIGHT, Math.max(650, (Number(size?.[1]) || 720) - 50));
-        widget._eagleViewportHeight = currentViewportHeight;
-        target.style.height = currentViewportHeight + "px";
-      };
-      const originalResize = node.onResize;
-      node.onResize = function (size) {
-        originalResize?.apply(this, arguments);
-        applySize(size);
-      };
-      applySize(node.size);
 
       const reviewListener = (event) => {
         const payload = event?.detail || {};
@@ -328,7 +336,11 @@ app.registerExtension({
         originalExecuted?.apply(this, arguments);
         const payload = message?.h3_review;
         if (!payload) return;
-        const value = Array.isArray(payload) ? payload[0] : payload;
+        const value = Array.isArray(payload)
+          ? payload.findLast((item) => item && typeof item === "object" && !Array.isArray(item))
+          : payload;
+        if (!value) return;
+        node._eagleH3RecoveryAbortController?.abort?.();
         node._eagleH3ReviewPayload = value;
         applyReviewPayload(node, mounted, value);
       };
@@ -340,7 +352,6 @@ app.registerExtension({
         const configured = originalConfigure?.apply(this, arguments);
         queueMicrotask(() => {
           hideControlWidgets(node);
-          applySize(node.size);
           mounted.setWorkspace(getWidget(node, "workspace_state")?.value || "");
           void recoverPendingReview(node, mounted);
         });
