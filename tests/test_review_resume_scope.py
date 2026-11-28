@@ -97,6 +97,57 @@ class ResumeScopeTests(unittest.TestCase):
         self.assertIn("177", filtered["prompt"])
         self.assertEqual(["177", 0], filtered["prompt"]["278"]["inputs"]["value"])
 
+    def test_comparison_branch_is_available_for_preview_and_removed_from_approval(self):
+        data = {"prompt": prompt()}
+        data["prompt"]["reference"] = {"class_type": "Sampler", "inputs": {"seed": 1}}
+        gate = data["prompt"]["278"]["inputs"]
+        gate["对比图像"] = ["reference", 0]
+        run_filter = load_policy().make_prompt_filter(*mappings())
+        resumed = run_filter(data)
+        self.assertNotIn("对比图像", resumed["prompt"]["278"]["inputs"])
+        self.assertNotIn("reference", resumed["prompt"])
+        gate["确认令牌"] = ""
+        preview = run_filter(data)
+        self.assertEqual(["reference", 0], preview["prompt"]["278"]["inputs"]["对比图像"])
+        self.assertIn("reference", preview["prompt"])
+
+    def test_blank_image_editor_does_not_block_a_valid_final_preview(self):
+        eagle, all_nodes = mappings()
+        all_nodes["EagleImageMaskEditor"] = InputNode
+        data = {"prompt": prompt()}
+        data["prompt"]["reference"] = {"class_type": "EagleImageMaskEditor", "inputs": {"image": ""}}
+        gate = data["prompt"]["278"]["inputs"]
+        gate.update({"需要确认": False, "确认令牌": "", "对比图像": ["reference", 0]})
+        run_filter = load_policy().make_prompt_filter(eagle, all_nodes)
+        preview = run_filter(data)
+        self.assertEqual(["177", 0], preview["prompt"]["278"]["inputs"]["value"])
+        self.assertNotIn("对比图像", preview["prompt"]["278"]["inputs"])
+        data["prompt"]["reference"]["inputs"]["image"] = "reference.png"
+        self.assertEqual(["reference", 0], run_filter(data)["prompt"]["278"]["inputs"]["对比图像"])
+        data["prompt"]["reference"]["inputs"] = {"image": "", "image_input": ["5", 0]}
+        self.assertEqual(["reference", 0], run_filter(data)["prompt"]["278"]["inputs"]["对比图像"])
+
+    def test_editor_tool_is_isolated_when_queue_wrapper_drops_partial_targets(self):
+        policy = load_policy()
+        eagle, all_nodes = mappings()
+        eagle["EagleImageMaskEditor"] = InputNode
+        data = {"prompt": {
+            "editor": {"class_type": "EagleImageMaskEditor", "inputs": {
+                "image_input": ["feed", 0], "sam_model": ["model", 0], "clip": ["model", 1],
+                "editor_request": '{"id":"tool-1","action":"segment","mode":"text","source":"fixture.png"}',
+            }},
+            "feed": {"class_type": "Sampler", "inputs": {}},
+            "model": {"class_type": "ModelLoader", "inputs": {}},
+            "save": {"class_type": "EagleSaver", "inputs": {"images": ["editor", 0]}},
+            "other": {"class_type": "ForeignOutput", "inputs": {}},
+        }}
+        filtered = policy.make_prompt_filter(eagle, all_nodes)(data)
+        [anchor] = filtered["partial_execution_targets"]
+        self.assertEqual({"feed", "model", "editor", anchor}, set(filtered["prompt"]))
+        self.assertEqual({"class_type": policy.ANCHOR_CLASS_TYPE, "inputs": {"value": ["editor", 0]}},
+                         filtered["prompt"][anchor])
+        self.assertIn("save", data["prompt"])
+
     def test_a_later_hook_can_repeat_filtering_without_widening_scope(self):
         run_filter = load_policy().make_prompt_filter(*mappings())
         once = run_filter({"prompt": prompt()})

@@ -39,6 +39,48 @@ export function downstreamOutputIds(gate) {
   return outputs;
 }
 
+const workflowInputScopes = new WeakMap();
+
+function submissionInputNodes(graph, outputIds, stopAt) {
+  const scope = new Set();
+  const queue = outputIds.map((id) => graph.getNodeById?.(id));
+  while (queue.length) {
+    const node = queue.pop();
+    if (!node || node === stopAt || scope.has(node)) continue;
+    scope.add(node);
+    for (const { link } of node.inputs || []) {
+      if (link == null) continue;
+      const edge = graph.links?.get?.(link) || graph.links?.[link];
+      const sourceId = Array.isArray(edge) ? edge[1] : edge?.origin_id;
+      if (sourceId != null) queue.push(graph.getNodeById?.(sourceId));
+    }
+  }
+  return scope;
+}
+
+export async function withWorkflowInputScope(graph, outputIds, submit, stopAt) {
+  const root = graph.rootGraph || graph;
+  workflowInputScopes.set(root, submissionInputNodes(graph, outputIds, stopAt));
+  try {
+    return await submit();
+  } finally {
+    workflowInputScopes.delete(root);
+  }
+}
+
+// Approval uses the snapshot at the gate. Input uploads outside its live
+// downstream dependencies must not delay or change that submission.
+export function withReviewApprovalScope(gate, outputIds, submit) {
+  return withWorkflowInputScope(gate.graph, outputIds, submit, gate);
+}
+
+export function reviewApprovalUsesInput(node) {
+  const scope = workflowInputScopes.get(node.graph?.rootGraph || node.graph);
+  if (!scope || scope.has(node)) return true;
+  // An input can live inside a subgraph used by the downstream branch.
+  return [...scope].some((entry) => entry.subgraph === node.graph);
+}
+
 /** Run one explicit Eagle tool action without starting unrelated branches. */
 export async function queueNodeTask(app, node, options = {}) {
   if (node?.id == null) throw new Error("找不到待执行节点");

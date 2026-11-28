@@ -1,5 +1,7 @@
 import importlib.util
 import asyncio
+import copy
+import json
 import os
 import pathlib
 import sys
@@ -58,6 +60,13 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIsInstance(self.gate.run(None, True, old_token, "node-2")["result"][0], ExecutionBlocker)
         self.assertEqual("new", self.gate.run(None, True, new_token, "node-2")["result"][0])
 
+    def test_empty_result_retires_the_previous_approval(self):
+        pending = self.gate.run("old", True, "", "empty-result")["ui"]["eagle_review"][0]
+        empty = self.gate.run(None, True, "", "empty-result")["ui"]["eagle_review"][0]
+        self.assertEqual("empty", empty["state"])
+        retired = self.gate.run(None, True, pending["token"], "empty-result")["ui"]["eagle_review"][0]
+        self.assertEqual("expired", retired["state"])
+
     def test_switch_off_passes_value_without_confirmation(self):
         value = {"any": "payload"}
         self.assertEqual(["value"], self.gate.check_lazy_status(False, "", "node-3"))
@@ -104,10 +113,85 @@ class ReviewGateTests(unittest.TestCase):
             self.assertIs(image, result["result"][0])
             payload = result["ui"]["eagle_review"][0]
             self.assertEqual("bypass", payload["state"])
+            self.assertNotIn("workflow", payload)
             [preview] = payload["images"]
             with Image.open(pathlib.Path(directory, preview["subfolder"], preview["filename"])) as preview_image:
                 self.assertEqual((700, 520), preview_image.size)
                 self.assertEqual(255, preview_image.getpixel((0, 0)))
+
+    def test_workflow_remains_available_as_json_when_png_metadata_is_disabled(self):
+        import folder_paths
+        import nodes as comfy_nodes
+        from PIL import Image
+
+        workflow = {"version": 1, "nodes": [{"id": 1, "widgets_values_named": {"seed": 12}}],
+                    "links": [{"id": 2, "origin_id": 1, "target_id": 3}], "extra": {"fixture": [1, 2]}}
+        prompt = {"1": {"class_type": "TestImageSource", "inputs": {"seed": 12}}}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            folder_paths, "get_temp_directory", return_value=directory,
+        ), mock.patch.object(comfy_nodes.args, "disable_metadata", True):
+            result = self.gate.run(torch.zeros((1, 2, 3, 3)), prompt=prompt,
+                                   extra_pnginfo={"workflow": workflow, "fixture": {"sample": "保留"}})
+            payload = result["ui"]["eagle_review"][0]
+            self.assertEqual(workflow, payload["workflow"])
+            [preview] = payload["images"]
+            with Image.open(pathlib.Path(directory, preview["subfolder"], preview["filename"])) as image:
+                self.assertEqual((3, 2), image.size)
+                self.assertFalse({"workflow", "prompt", "fixture"}.intersection(image.info))
+
+    def test_comparison_previews_reference_and_approval_returns_only_final_images(self):
+        import folder_paths
+        from PIL import Image
+
+        final = torch.ones((2, 10, 8, 3))
+        reference = torch.zeros((1, 6, 14, 3))
+        self.assertEqual("IMAGE", self.gate.INPUT_TYPES()["optional"]["对比图像"][0])
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            folder_paths, "get_temp_directory", return_value=directory,
+        ):
+            pending = self.gate.run(final, True, "", "compare", 对比图像=reference)["ui"]["eagle_review"][0]
+            self.assertEqual(2, len(pending["images"]))
+            [before] = pending["reference_images"]
+            with Image.open(pathlib.Path(directory, before["subfolder"], before["filename"])) as image:
+                self.assertEqual((14, 6), image.size)
+                self.assertEqual((0, 0, 0), image.getpixel((0, 0)))
+            saved = set(pathlib.Path(directory).rglob("*.png"))
+            approved = self.gate.run(None, True, pending["token"], "compare")
+            self.assertEqual(1, len(approved["result"]))
+            self.assertIs(final, approved["result"][0])
+            self.assertEqual(saved, set(pathlib.Path(directory).rglob("*.png")))
+
+    def test_comparison_input_does_not_replace_text_or_create_a_preview_for_it(self):
+        result = self.gate.run("文字结果", False, 对比图像=torch.zeros((1, 2, 2, 3)))
+        self.assertEqual(("文字结果",), result["result"])
+        self.assertEqual([], result["ui"]["eagle_review"][0].get("reference_images", []))
+
+    def test_input_thumbnail_is_resized_and_cannot_read_outside_media_directories(self):
+        import io
+        from urllib.parse import urlencode
+
+        from aiohttp.test_utils import make_mocked_request
+        import folder_paths
+        from PIL import Image
+        from eagle_suite_review_test_package.eagle_suite import review_gate
+
+        def thumbnail(name):
+            path = "/eagle_review/input_thumbnail?" + urlencode({"filename": name})
+            return asyncio.run(review_gate.review_input_thumbnail(make_mocked_request("GET", path)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            input_dir = root / "input"
+            (input_dir / "shots").mkdir(parents=True)
+            Image.new("RGB", (512, 256), "orange").save(input_dir / "shots" / "入口.png")
+            Image.new("RGB", (512, 256), "blue").save(root / "private.png")
+            with mock.patch.object(folder_paths, "get_input_directory", return_value=str(input_dir)):
+                result = thumbnail("shots/入口.png")
+                self.assertEqual(200, result.status)
+                with Image.open(io.BytesIO(result.body)) as image:
+                    self.assertEqual((128, 64), image.size)
+                self.assertEqual(404, thumbnail("../private.png").status)
+                self.assertEqual(404, thumbnail(str(root / "private.png")).status)
 
     def test_any_contract_and_comfy_ui_payload(self):
         from comfy_execution.graph_utils import ExecutionBlocker
@@ -185,7 +269,65 @@ class SaverGapTests(unittest.TestCase):
 
 
 class ExecutionIsolationIntegrationTests(unittest.TestCase):
-    def test_native_saver_writes_only_after_approval_and_never_regenerates(self):
+    def test_joint_approval_with_different_source_metadata_blocks_without_consuming_tokens(self):
+        from comfy_execution.graph_utils import ExecutionBlocker
+        from eagle_suite_review_test_package.eagle_suite.execution_isolation import make_prompt_filter
+        from eagle_suite_review_test_package.eagle_suite.nodes import NODE_CLASS_MAPPINGS
+
+        gate = NODE_CLASS_MAPPINGS["EagleReviewGate"]()
+        resume = NODE_CLASS_MAPPINGS["EagleReviewGateResume"]()
+        prompt = {}
+        tokens = {}
+        for key in ("left", "right"):
+            pending = gate.run(key, unique_id=key, extra_pnginfo={"workflow": {"id": key}})
+            tokens[key] = pending["ui"]["eagle_review"][0]["token"]
+            prompt[key] = {"class_type": "EagleReviewGate", "inputs": {"确认令牌": tokens[key]}}
+            prompt[f"save-{key}"] = {"class_type": "EagleSaveString", "inputs": {"text": [key, 0]}}
+
+        isolated = make_prompt_filter(NODE_CLASS_MAPPINGS)({"prompt": prompt})["prompt"]
+        for key, token in tokens.items():
+            result = resume.run(确认令牌=token, unique_id=key, prompt=isolated)
+            self.assertIsInstance(result["result"][0], ExecutionBlocker)
+            self.assertEqual("error", result["ui"]["eagle_review"][0]["state"])
+        for key, token in tokens.items():
+            self.assertEqual(key, resume.run(确认令牌=token, unique_id=key)["result"][0])
+
+    def test_stale_queued_or_mismatched_approval_does_not_apply_candidate_metadata(self):
+        from comfy_execution.graph import DynamicPrompt
+        from comfy_execution.graph_utils import ExecutionBlocker
+        from eagle_suite_review_test_package.eagle_suite.execution_isolation import make_prompt_filter
+        from eagle_suite_review_test_package.eagle_suite.nodes import NODE_CLASS_MAPPINGS
+
+        gate = NODE_CLASS_MAPPINGS["EagleReviewGate"]()
+        resume = NODE_CLASS_MAPPINGS["EagleReviewGateResume"]()
+        run_filter = make_prompt_filter(NODE_CLASS_MAPPINGS)
+        original_prompt = {"source": {"class_type": "EagleText", "inputs": {"text": "old"}}}
+        original_pnginfo = {"workflow": {"version": 1, "nodes": [{"id": 1}]}}
+        first = gate.run("old", unique_id="gate", prompt=original_prompt,
+                         extra_pnginfo=original_pnginfo)["ui"]["eagle_review"][0]
+        live_pnginfo = {"workflow": {"version": 1, "nodes": [{"id": 2}]}}
+        payload = {"prompt": {
+            "gate": {"class_type": "EagleReviewGate", "inputs": {"确认令牌": first["token"]}},
+            "save": {"class_type": "EagleSaveString", "inputs": {"text": ["gate", 0]}},
+        }, "extra_data": {"extra_pnginfo": live_pnginfo, "client_id": "browser"}}
+        queued = run_filter(payload)
+        self.assertEqual({"extra_pnginfo": original_pnginfo, "client_id": "browser"}, queued["extra_data"])
+        runtime = DynamicPrompt(queued["prompt"])
+
+        wrong_gate = resume.run(确认令牌=first["token"], unique_id="other-gate",
+                                prompt=queued["prompt"], dynprompt=runtime)
+        self.assertIsInstance(wrong_gate["result"][0], ExecutionBlocker)
+        self.assertIs(runtime.get_original_prompt(), queued["prompt"])
+
+        newer = gate.run("new", unique_id="gate", extra_pnginfo=live_pnginfo)["ui"]["eagle_review"][0]
+        expired = resume.run(确认令牌=first["token"], unique_id="gate",
+                             prompt=queued["prompt"], dynprompt=runtime)
+        self.assertIsInstance(expired["result"][0], ExecutionBlocker)
+        self.assertIs(runtime.get_original_prompt(), queued["prompt"])
+        self.assertEqual(live_pnginfo, run_filter(payload)["extra_data"]["extra_pnginfo"])
+        self.assertEqual("new", gate.run(确认令牌=newer["token"], unique_id="gate")["result"][0])
+
+    def test_savers_keep_the_approved_candidates_workflow_and_never_regenerate(self):
         import folder_paths
         import nodes as comfy_nodes
         from PIL import Image
@@ -203,36 +345,41 @@ class ExecutionIsolationIntegrationTests(unittest.TestCase):
 
             @classmethod
             def INPUT_TYPES(cls):
-                return {"required": {}}
+                return {"required": {"seed": ("INT", {})}}
 
-            def run(self):
-                calls.append(1)
+            def run(self, seed):
+                calls.append(seed)
                 return (images,)
 
         registry = {**comfy_nodes.NODE_CLASS_MAPPINGS, **NODE_CLASS_MAPPINGS, "TestImageSource": ImageSource}
         filter_prompt = make_prompt_filter(NODE_CLASS_MAPPINGS, registry)
         prompt = {
-            "1": {"class_type": "TestImageSource", "inputs": {}},
+            "1": {"class_type": "TestImageSource", "inputs": {"seed": 41}},
             "2": {"class_type": "EagleReviewGate", "inputs": {
                 "value": ["1", 0], "需要确认": True, "确认令牌": "",
             }},
         }
+        workflow = {"version": 0.4, "nodes": [{"id": 1, "type": "TestImageSource", "widgets_values": [41]}],
+                    "links": [[1, 1, 0, 2, 0, "IMAGE"]], "extra": {"fixture": "原始工作流"}}
+        extra_pnginfo = {"workflow": workflow, "fixture": {"frames": [1, 2], "origin": "原始生成"}}
+        submit_data = {"extra_pnginfo": extra_pnginfo, "keep_fixture": "resume queue setting"}
         server = SimpleNamespace(client_id=None, last_node_id=None, sockets_metadata={},
                                  send_sync=lambda *_args: None)
         executor = PromptExecutor(server, cache_type=False, cache_args={"ram": 0.0, "ram_inactive": 0.0})
 
         def execute(prompt_id):
-            submission = filter_prompt({"prompt": prompt})
+            submission = filter_prompt({"prompt": prompt, "extra_data": submit_data})
             inputs = submission["prompt"]
             valid, error, outputs, node_errors = asyncio.run(validate_prompt(
                 prompt_id, inputs, submission.get("partial_execution_targets")))
             self.assertTrue(valid, error)
             self.assertFalse(node_errors)
-            executor.execute(inputs, prompt_id, execute_outputs=outputs)
+            executor.execute(inputs, prompt_id, submission["extra_data"], execute_outputs=outputs)
             self.assertTrue(executor.success, executor.status_messages)
             return executor.history_result["outputs"]["2"]["eagle_review"][0]
 
-        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, registry):
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(comfy_nodes.NODE_CLASS_MAPPINGS, registry), \
+                mock.patch.object(comfy_nodes.args, "disable_metadata", False):
             temp = pathlib.Path(scratch, "preview")
             output = pathlib.Path(scratch, "output")
             temp.mkdir()
@@ -241,22 +388,46 @@ class ExecutionIsolationIntegrationTests(unittest.TestCase):
                     mock.patch.object(folder_paths, "get_output_directory", return_value=str(output)):
                 standalone = execute("standalone")
                 self.assertEqual("pending", standalone["state"])
-                self.assertEqual([1], calls)
+                self.assertEqual([41], calls)
                 prompt["3"] = {"class_type": "SaveImage", "inputs": {
-                    "images": ["2", 0], "filename_prefix": "approved",
+                    "images": ["2", 0], "filename_prefix": "approved_native",
                 }}
+                prompt["4"] = {"class_type": "EagleSaver", "inputs": {
+                    "images": ["2", 0], "eagle_folder": "", "local_save_path": str(output),
+                    "filename_prefix": "approved_eagle",
+                }}
+                prompt["5"] = {"class_type": "EagleAPIKeyNode", "inputs": {"api_key": "fixture-secret"}}
+                source_prompt = copy.deepcopy(prompt)
+                source_prompt["5"]["inputs"]["api_key"] = ""
+                source_extra = copy.deepcopy(extra_pnginfo)
                 pending = execute("with-saver")
                 self.assertEqual("pending", pending["state"])
                 self.assertFalse(list(output.glob("*.png")))
+                self.assertEqual(source_extra["workflow"], pending.get("workflow"))
+                [preview] = pending["images"]
+                with Image.open(temp / preview["subfolder"] / preview["filename"]) as image:
+                    self.assertEqual(source_prompt, json.loads(image.info["prompt"]))
+                    self.assertEqual(source_extra["workflow"], json.loads(image.info["workflow"]))
+                    self.assertEqual(source_extra["fixture"], json.loads(image.info["fixture"]))
                 # Only approval may enter the native saver, even with no browser partial targets.
                 before_approval = list(calls)
                 prompt["2"]["inputs"]["确认令牌"] = pending["token"]
+                prompt["1"]["inputs"]["seed"] = 9001
+                workflow["nodes"][0]["widgets_values"][0] = 9001
+                extra_pnginfo["fixture"]["origin"] = "已编辑"
                 self.assertEqual("approved", execute("approval")["state"])
                 self.assertEqual(before_approval, calls)
-                [saved] = list(output.glob("*.png"))
-                with Image.open(saved) as image:
+                [native] = list(output.glob("approved_native_*.png"))
+                [eagle] = list(output.glob("approved_eagle_*.png"))
+                with Image.open(native) as image:
                     self.assertEqual((60, 40), image.size)
                     self.assertEqual((255, 255, 255), image.getpixel((0, 0)))
+                    self.assertEqual(source_prompt, json.loads(image.info["prompt"]))
+                    self.assertEqual(source_extra["workflow"], json.loads(image.info["workflow"]))
+                    self.assertEqual(source_extra["fixture"], json.loads(image.info["fixture"]))
+                with Image.open(eagle) as image:
+                    self.assertEqual(source_extra["workflow"], json.loads(image.info["workflow"]))
+                    self.assertEqual(source_prompt, json.loads(image.info["eagle_suite_meta"])["inputs"])
 
     def test_waiting_status_is_sent_only_to_the_gate_in_the_requested_branch(self):
         from types import SimpleNamespace

@@ -15,6 +15,7 @@ from .api_model_loader import EagleAPIUnifiedNode, EagleAPIImageNode
 from .local_llm_node import EagleLocalLLMLoader, EagleLocalLLMNode, EagleLocalLLMServerNode
 from .gif_compressor import GifCompressorNode
 from .local_loader import LocalImageLoader
+from .image_mask_editor import EagleImageMaskEditor
 from .wallhaven_gallery import WallhavenGalleryNode
 from .text_nodes import NODE_CLASS_MAPPINGS_TEXT, NODE_DISPLAY_NAME_MAPPINGS_TEXT
 from .eagle_gallery import EagleGalleryNode
@@ -68,6 +69,7 @@ NODE_CLASS_MAPPINGS = {
     "EagleSaver":    EagleSaver,
     "EagleReviewGate": EagleReviewGate,
     "LocalImageLoader": LocalImageLoader,
+    "EagleImageMaskEditor": EagleImageMaskEditor,
 
     # 批量视频处理
     "EagleBatchVideoLoader":    EagleBatchVideoLoader,
@@ -138,6 +140,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EagleSaver":    "🦅 Eagle 图片保存",
     "EagleReviewGate": "🦅 预览确认",
     "LocalImageLoader": "🦅 本地图片加载",
+    "EagleImageMaskEditor": "🦅 图像与遮罩编辑器",
 
     # 批量视频处理
     "EagleBatchVideoLoader":    "🦅 批量视频加载",
@@ -208,6 +211,7 @@ _CATEGORY_GROUPS = {
     ),
     f"{MENU_ROOT}/媒体": (
         LocalImageLoader,
+        EagleImageMaskEditor,
         UnifiedMediaBrowser,
     ),
     f"{MENU_ROOT}/视频": (

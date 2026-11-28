@@ -19,6 +19,7 @@ const full = [
   "h3_director.js",
   "h3_pipeline.js",
   "h3_review_workspace_svelte.js",
+  "image_mask_editor.js",
   "lora_gallery.js",
   "media_timeline_editor.js",
   "prompt_presets.js",
@@ -55,7 +56,7 @@ for (const name of full) {
 }
 
 const nativeSlotSurfaces = [
-  "h3_director.js", "h3_review_workspace_svelte.js", "review_gate.js", "svelte_character_interaction.js",
+  "h3_director.js", "h3_review_workspace_svelte.js", "image_mask_editor.js", "review_gate.js", "svelte_character_interaction.js",
 ];
 for (const name of nativeSlotSurfaces) {
   const source = sources.get(name);
@@ -155,6 +156,7 @@ const definitionHiddenInventory = new Map([
   ["h3_director.js", ["h3_state", "scene_index", "LLM_HINT", "skill_request"]],
   ["h3_pipeline.js", ["review_decision", "retry_prompt", "retry_seed", "retry_length", "resume_scene", "assemble_partial_on_stop", "auto_continue_timeout_minutes", "unload_models_while_waiting"]],
   ["h3_review_workspace_svelte.js", ["workspace_state", "review_decision", "retry_prompt", "retry_seed", "retry_length", "resume_scene", "assemble_partial_on_stop", "auto_continue_timeout_minutes", "unload_models_while_waiting"]],
+  ["image_mask_editor.js", ["edit_layers", "legacy_resize", "editor_request", "sam_prompt", "sam_auto", "editor_adjustments"]],
   ["lora_gallery.js", ["selection_data", "civitai_api_key", "manual_triggers"]],
   ["media_timeline_editor.js", ["timeline_json", "output_mode", "size_mode", "width", "height", "lock_aspect_ratio", "resize_anchor", "fit_mode", "output_fps", "include_video_audio", "audio_sample_rate", "video_crf", "frame_step", "max_frames", "render_revision"]],
   ["prompt_presets.js", ["prompt", "template", "local_variables", "ui_state"]],
@@ -225,7 +227,7 @@ assert.match(apiUnified, /min-height:30px/);
 const registry = fs.readFileSync(new URL("../eagle_suite/nodes.py", import.meta.url), "utf8");
 for (const nodeName of [
   "EagleAudioList", "DanbooruVueSearchNode", "EagleDirectorSkillNode",
-  "EagleGalleryNode", "EagleH3DirectorNode", "EagleLoraGalleryNode",
+  "EagleGalleryNode", "EagleH3DirectorNode", "EagleImageMaskEditor", "EagleLoraGalleryNode",
   "EagleMediaTimelineEditor", "EaglePromptPresets", "EagleReviewGate", "EagleTextSwitchMulti", "EagleVideoFrameExtractor",
   "EagleSvelteCharacterInteractionNode", "EagleSvelteCharacterPVNode",
   "UnifiedMediaBrowser", "WallhavenGalleryNode",

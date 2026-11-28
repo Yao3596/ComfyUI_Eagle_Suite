@@ -5,13 +5,25 @@ branch; disconnected Eagle providers do not load files or models on global Run.
 Explicit node tasks remain executable, including non-output director nodes.
 """
 
+import json
 from collections import deque
+from copy import deepcopy
 from functools import lru_cache
 
 
 ANCHOR_CLASS_TYPE = "EagleExecutionAnchor"
 _HANDLER_ATTR = "_eagle_execution_isolation_handler"
 _WIDGET_TYPES = {"STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"}
+
+
+class _ReviewPrompt(dict):
+    """Keep review metadata off the serialized runnable prompt."""
+
+    def __init__(self, prompt, *, source=None, approval=None, conflicting_approvals=False):
+        super().__init__(prompt)
+        self.review_source_prompt = source
+        self.review_approval_metadata = approval
+        self.conflicting_review_approvals = conflicting_approvals
 
 
 class _AnyType(str):
@@ -55,6 +67,20 @@ def _upstream_scope(prompt, roots):
     return scope
 
 
+def _has_editor_request(entry):
+    if entry.get("class_type") != "EagleImageMaskEditor":
+        return False
+    value = entry.get("inputs", {}).get("editor_request")
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        request = json.loads(value)
+    except (ValueError, RecursionError):
+        return False
+    return (isinstance(request, dict) and isinstance(request.get("id"), str)
+            and bool(request["id"].strip()) and request.get("action") in ("preview", "segment"))
+
+
 def make_prompt_filter(eagle_nodes, all_nodes=None):
     registry = all_nodes if all_nodes is not None else eagle_nodes
 
@@ -82,6 +108,8 @@ def make_prompt_filter(eagle_nodes, all_nodes=None):
         if not isinstance(prompt, dict) or not prompt:
             return payload
         requested = payload.get("partial_execution_targets")
+        editor_ids = [key for key, entry in prompt.items() if _has_editor_request(entry)] \
+            if "EagleImageMaskEditor" in eagle_nodes else []
         director_ids = [
             key for key, entry in prompt.items()
             if entry.get("class_type") == "EagleH3DirectorNode"
@@ -89,13 +117,14 @@ def make_prompt_filter(eagle_nodes, all_nodes=None):
             and isinstance(request := entry.get("inputs", {}).get("skill_request"), str)
             and request.strip()
         ]
-        if director_ids:
-            # Keep authoring isolated even when a frontend drops partial targets.
-            requested = [key for key in director_ids if key in (requested or [])] or director_ids
+        tool_ids = editor_ids or director_ids
+        if tool_ids:
+            # Keep node tools isolated even when a frontend drops partial targets.
+            requested = [key for key in tool_ids if key in (requested or [])] or tool_ids
             scope = _upstream_scope(prompt, requested)
             prompt = {key: entry for key, entry in prompt.items() if key in scope}
         resume_ids = set()
-        if not director_ids and "EagleReviewGateResume" in eagle_nodes:
+        if not tool_ids and "EagleReviewGateResume" in eagle_nodes:
             gate_types = {"EagleReviewGate", "EagleReviewGateEager", "EagleReviewGateResume"}
             resume_ids = {key for key, entry in prompt.items()
                           if entry.get("class_type") in gate_types
@@ -126,8 +155,30 @@ def make_prompt_filter(eagle_nodes, all_nodes=None):
             prompt = dict(prompt)
             for key in resume_ids:
                 entry = prompt[key]
-                inputs = {name: value for name, value in entry.get("inputs", {}).items() if name != "value"}
+                inputs = {name: value for name, value in entry.get("inputs", {}).items()
+                          if name not in {"value", "对比图像"}}
                 prompt[key] = {**entry, "class_type": "EagleReviewGateResume", "inputs": inputs}
+        omitted_reference = False
+        if "EagleReviewGate" in eagle_nodes and "EagleImageMaskEditor" in registry:
+            for key, entry in tuple(prompt.items()):
+                if entry.get("class_type") != "EagleReviewGate":
+                    continue
+                inputs = entry.get("inputs", {})
+                reference = inputs.get("对比图像")
+                if not _link(reference):
+                    continue
+                source = prompt.get(reference[0], {})
+                source_inputs = source.get("inputs", {})
+                if (source.get("class_type") == "EagleImageMaskEditor"
+                        and not (source_inputs.get("image") or _link(source_inputs.get("image_input")))):
+                    # An empty editor blocks its own consumers. The reference
+                    # is optional, so let the main result reach the gate alone.
+                    if not omitted_reference:
+                        prompt = dict(prompt)
+                        omitted_reference = True
+                    trimmed = dict(inputs)
+                    trimmed.pop("对比图像")
+                    prompt[key] = {**entry, "inputs": trimmed}
         eagle_ids = {key for key, entry in prompt.items()
                      if entry.get("class_type") in eagle_nodes
                      and entry.get("class_type") != ANCHOR_CLASS_TYPE}
@@ -217,9 +268,29 @@ def make_prompt_filter(eagle_nodes, all_nodes=None):
             scope = _upstream_scope(remaining, targets)
             remaining = {key: entry for key, entry in remaining.items() if key in scope}
 
-        if not (skipped or anchor_count or eager_gate_count or resume_ids or director_ids):
+        if not (skipped or anchor_count or eager_gate_count or resume_ids or tool_ids or omitted_reference):
             return payload
         result = {**payload, "prompt": remaining}
+        if resume_ids:
+            lookup = getattr(eagle_nodes["EagleReviewGateResume"], "pending_metadata", None)
+            if lookup is not None:
+                approvals = [metadata for key in resume_ids
+                             if (metadata := lookup(key, prompt[key]["inputs"]["确认令牌"])) is not None]
+                if approvals:
+                    metadata = approvals[0]
+                    if any(candidate != metadata for candidate in approvals[1:]):
+                        # ComfyUI uses one hidden metadata context for the job.
+                        result["prompt"] = _ReviewPrompt(remaining, conflicting_approvals=True)
+                    else:
+                        result["prompt"] = _ReviewPrompt(remaining, approval=metadata)
+                        result["extra_data"] = {**(payload.get("extra_data") or {}),
+                                                "extra_pnginfo": deepcopy(metadata[1])}
+        elif eager_gate_count or isinstance(payload["prompt"], _ReviewPrompt):
+            # The execution filter can remove nodes and replace the gate type;
+            # retain the submitted graph separately for the candidate's export.
+            original = payload["prompt"]
+            source = getattr(original, "review_source_prompt", None) or original
+            result["prompt"] = _ReviewPrompt(remaining, source=deepcopy(dict(source)))
         if requested is not None:
             result["partial_execution_targets"] = targets
         return result

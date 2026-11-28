@@ -4,7 +4,7 @@ import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../web/js/review_gate_flow.js", import.meta.url), "utf8");
 const flow = await import(`data:text/javascript,${encodeURIComponent(source)}`);
-const { downstreamOutputIds } = flow;
+const { downstreamOutputIds, reviewApprovalUsesInput, withReviewApprovalScope } = flow;
 
 const nodes = new Map();
 const links = {
@@ -12,6 +12,8 @@ const links = {
   11: { origin_id: 2, target_id: 3 },
   12: { origin_id: 1, target_id: 5 },
   13: { origin_id: 6, target_id: 4 },
+  14: { origin_id: 7, target_id: 2 },
+  15: { origin_id: 8, target_id: 1 },
 };
 const graph = { links, getNodeById: (id) => nodes.get(Number(id)) };
 function node(id, linkIds, output = false) {
@@ -20,12 +22,21 @@ function node(id, linkIds, output = false) {
   return result;
 }
 const gate = node(1, [10, 12]);
-node(2, [11]);
-node(3, [], true);
+gate.inputs = [{ link: 15 }];
+node(2, [11]).inputs = [{ link: 10 }, { link: 14 }];
+node(3, [], true).inputs = [{ link: 11 }];
 node(4, [], true);
 node(5, [], false);
 node(6, [13]);
+const downstreamInput = node(7, [14]);
+const previewInput = node(8, [15]);
 assert.deepEqual(downstreamOutputIds(gate), ["3"]);
+await withReviewApprovalScope(gate, ["3"], async () => {
+  assert.equal(reviewApprovalUsesInput(downstreamInput), true);
+  assert.equal(reviewApprovalUsesInput(previewInput), false);
+  assert.equal(reviewApprovalUsesInput(nodes.get(6)), false);
+});
+assert.equal(reviewApprovalUsesInput(previewInput), true);
 
 const ui = fs.readFileSync(new URL("../web/js/review_gate.js", import.meta.url), "utf8");
 assert.match(ui, /app\.queuePrompt\(0,\s*1,\s*outputIds\)/);
